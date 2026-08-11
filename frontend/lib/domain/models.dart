@@ -593,3 +593,31 @@ class Capabilities {
   final String? workingHwaccelEncoder;
   final List<String> fonts;
 }
+
+/// Secrets are never sent back by the backend — only whether they're set.
+class BackendSettings {
+  BackendSettings({
+    required this.chimegeSttUrl,
+    required this.chimegeTokenSet,
+    required this.chimegeMaxAudioSec,
+    required this.openaiModel,
+    required this.openaiBaseUrl,
+    required this.openaiApiKeySet,
+  });
+
+  factory BackendSettings.fromJson(Map<String, dynamic> j) => BackendSettings(
+        chimegeSttUrl: j['chimege_stt_url'] as String,
+        chimegeTokenSet: j['chimege_token_set'] as bool,
+        chimegeMaxAudioSec: _i(j['chimege_max_audio_sec']),
+        openaiModel: j['openai_model'] as String,
+        openaiBaseUrl: j['openai_base_url'] as String,
+        openaiApiKeySet: j['openai_api_key_set'] as bool,
+      );
+
+  final String chimegeSttUrl;
+  final bool chimegeTokenSet;
+  final int chimegeMaxAudioSec;
+  final String openaiModel;
+  final String openaiBaseUrl;
+  final bool openaiApiKeySet;
+}

@@ -79,6 +79,33 @@ class Repository {
 
   Stream<Job> jobEvents(String jobId) => _client.jobEvents(jobId).map(Job.fromJson);
 
+  Future<Result<BackendSettings>> getSettings() async {
+    final r = await _client.get('/settings');
+    return r.when(ok: (v) => Ok(BackendSettings.fromJson(v as Map<String, dynamic>)), err: (e) => Err(e));
+  }
+
+  /// Only non-null fields are sent/updated; secrets are write-only (never
+  /// read back) — pass an empty string to clear one.
+  Future<Result<BackendSettings>> updateSettings({
+    String? chimegeSttUrl,
+    String? chimegeToken,
+    int? chimegeMaxAudioSec,
+    String? openaiApiKey,
+    String? openaiModel,
+    String? openaiBaseUrl,
+  }) async {
+    final body = <String, dynamic>{
+      'chimege_stt_url': ?chimegeSttUrl,
+      'chimege_token': ?chimegeToken,
+      'chimege_max_audio_sec': ?chimegeMaxAudioSec,
+      'openai_api_key': ?openaiApiKey,
+      'openai_model': ?openaiModel,
+      'openai_base_url': ?openaiBaseUrl,
+    };
+    final r = await _client.put('/settings', body: body);
+    return r.when(ok: (v) => Ok(BackendSettings.fromJson(v as Map<String, dynamic>)), err: (e) => Err(e));
+  }
+
   /// URL to fetch a backend-produced file (thumbnail, preview, export) via
   /// GET /files?path=... — pass straight to Image.network / media_kit.
   String fileUrl(String path) => '${_client.baseUrl}/files?path=${Uri.encodeQueryComponent(path)}';

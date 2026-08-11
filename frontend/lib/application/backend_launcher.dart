@@ -31,6 +31,11 @@ class BackendLauncher {
     final process = await Process.start(
       backendExe.path,
       const [],
+      // Without this, the child inherits *our* cwd, not its own folder — and
+      // Settings.model_config's env_file=".env" (backend/app/config.py) is
+      // resolved relative to cwd, so a wrong cwd means .env silently fails
+      // to load in packaged mode.
+      workingDirectory: backendExe.parent.path,
       environment: {'MANAGED': 'true'},
       includeParentEnvironment: true,
       mode: ProcessStartMode.normal,

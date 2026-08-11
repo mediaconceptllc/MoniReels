@@ -16,7 +16,15 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import routes_ai, routes_export, routes_jobs, routes_media, routes_project, routes_stt
+from app.api import (
+    routes_ai,
+    routes_export,
+    routes_jobs,
+    routes_media,
+    routes_project,
+    routes_settings,
+    routes_stt,
+)
 from app.config import get_settings
 from app.utils.logging import get_logger, setup_logging
 from app.video.capabilities import Capabilities, build_capabilities
@@ -97,6 +105,7 @@ app.include_router(routes_project.router)
 app.include_router(routes_stt.router)
 app.include_router(routes_ai.router)
 app.include_router(routes_export.router)
+app.include_router(routes_settings.router)
 app.include_router(routes_media.router)
 
 

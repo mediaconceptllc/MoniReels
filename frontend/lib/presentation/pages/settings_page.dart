@@ -4,6 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers.dart';
+import '../../core/errors.dart';
+import '../../core/result.dart';
+import '../../domain/models.dart';
+import '../widgets/error_view.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -88,13 +92,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                   const Divider(height: 32),
                   Text('Credentials', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   const Text(
-                    'Chimege STT and OpenAI credentials are configured via the backend\'s '
-                    '.env file (CHIMEGE_STT_URL, CHIMEGE_TOKEN, OPENAI_API_KEY, OPENAI_MODEL) — '
-                    'never entered here, so secrets never live in this app\'s state or logs.',
-                    style: TextStyle(color: Colors.white54),
+                    'Saved to the backend\'s .env file and applied immediately — no restart needed.',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
                   ),
+                  const SizedBox(height: 12),
+                  const _CredentialsSection(),
                   const Divider(height: 32),
                   Text('Logs', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
@@ -117,5 +121,216 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (appData == null) return;
     final logsDir = '$appData\\AIVideoEditor\\logs';
     Process.run('explorer', [logsDir]);
+  }
+}
+
+class _CredentialsSection extends ConsumerWidget {
+  const _CredentialsSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settingsAsync = ref.watch(backendSettingsProvider);
+
+    return settingsAsync.when(
+      data: (settings) => _CredentialsForm(settings: settings),
+      loading: () => const LinearProgressIndicator(),
+      error: (e, _) => ErrorView(error: e is AppError ? e : UnknownError(e.toString())),
+    );
+  }
+}
+
+class _CredentialsForm extends ConsumerStatefulWidget {
+  const _CredentialsForm({required this.settings});
+  final BackendSettings settings;
+
+  @override
+  ConsumerState<_CredentialsForm> createState() => _CredentialsFormState();
+}
+
+class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
+  late final _chimegeTokenController = TextEditingController();
+  late final _openaiKeyController = TextEditingController();
+  late final _openaiModelController = TextEditingController(text: widget.settings.openaiModel);
+  late final _chimegeUrlController = TextEditingController(text: widget.settings.chimegeSttUrl);
+  late final _openaiBaseUrlController = TextEditingController(text: widget.settings.openaiBaseUrl);
+  late final _chimegeMaxAudioController =
+      TextEditingController(text: widget.settings.chimegeMaxAudioSec.toString());
+
+  bool _expandedAdvanced = false;
+
+  @override
+  void dispose() {
+    _chimegeTokenController.dispose();
+    _openaiKeyController.dispose();
+    _openaiModelController.dispose();
+    _chimegeUrlController.dispose();
+    _openaiBaseUrlController.dispose();
+    _chimegeMaxAudioController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 2)));
+  }
+
+  Future<void> _saveField(Future<Result<BackendSettings>> Function() call, {VoidCallback? onSaved}) async {
+    final result = await call();
+    result.when(
+      ok: (_) {
+        onSaved?.call();
+        ref.read(settingsGenerationProvider.notifier).state++;
+        _showMessage('Saved.');
+      },
+      err: (e) => _showMessage('Save failed: ${e.message}'),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final repo = ref.read(repositoryProvider);
+    final settings = widget.settings;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _TokenField(
+          label: 'Chimege token',
+          hint: settings.chimegeTokenSet ? 'Currently set — enter a new value to replace it' : 'Not set',
+          controller: _chimegeTokenController,
+          onSave: () => _saveField(
+            () => repo.updateSettings(chimegeToken: _chimegeTokenController.text.trim()),
+            onSaved: _chimegeTokenController.clear,
+          ),
+        ),
+        const SizedBox(height: 12),
+        _TokenField(
+          label: 'OpenAI API key',
+          hint: settings.openaiApiKeySet ? 'Currently set — enter a new value to replace it' : 'Not set',
+          controller: _openaiKeyController,
+          onSave: () => _saveField(
+            () => repo.updateSettings(openaiApiKey: _openaiKeyController.text.trim()),
+            onSaved: _openaiKeyController.clear,
+          ),
+        ),
+        const SizedBox(height: 12),
+        _PlainField(
+          label: 'OpenAI model',
+          hintText: 'e.g. gpt-4.1',
+          controller: _openaiModelController,
+          onSave: () => _saveField(() => repo.updateSettings(openaiModel: _openaiModelController.text.trim())),
+        ),
+        const SizedBox(height: 8),
+        ExpansionTile(
+          title: const Text('Advanced'),
+          initiallyExpanded: _expandedAdvanced,
+          onExpansionChanged: (v) => setState(() => _expandedAdvanced = v),
+          tilePadding: EdgeInsets.zero,
+          children: [
+            _PlainField(
+              label: 'Chimege STT base URL',
+              controller: _chimegeUrlController,
+              onSave: () =>
+                  _saveField(() => repo.updateSettings(chimegeSttUrl: _chimegeUrlController.text.trim())),
+            ),
+            const SizedBox(height: 12),
+            _PlainField(
+              label: 'OpenAI base URL',
+              controller: _openaiBaseUrlController,
+              onSave: () =>
+                  _saveField(() => repo.updateSettings(openaiBaseUrl: _openaiBaseUrlController.text.trim())),
+            ),
+            const SizedBox(height: 12),
+            _PlainField(
+              label: 'Chimege max sync-transcribe audio (seconds)',
+              controller: _chimegeMaxAudioController,
+              keyboardType: TextInputType.number,
+              onSave: () {
+                final parsed = int.tryParse(_chimegeMaxAudioController.text.trim());
+                if (parsed == null) {
+                  _showMessage('Enter a whole number of seconds.');
+                  return;
+                }
+                _saveField(() => repo.updateSettings(chimegeMaxAudioSec: parsed));
+              },
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _TokenField extends StatefulWidget {
+  const _TokenField({required this.label, required this.hint, required this.controller, required this.onSave});
+  final String label;
+  final String hint;
+  final TextEditingController controller;
+  final VoidCallback onSave;
+
+  @override
+  State<_TokenField> createState() => _TokenFieldState();
+}
+
+class _TokenFieldState extends State<_TokenField> {
+  bool _obscure = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: TextField(
+            controller: widget.controller,
+            obscureText: _obscure,
+            decoration: InputDecoration(
+              labelText: widget.label,
+              hintText: widget.hint,
+              suffixIcon: IconButton(
+                icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18),
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        FilledButton(onPressed: widget.onSave, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+class _PlainField extends StatelessWidget {
+  const _PlainField({
+    required this.label,
+    required this.controller,
+    required this.onSave,
+    this.hintText,
+    this.keyboardType,
+  });
+
+  final String label;
+  final TextEditingController controller;
+  final VoidCallback onSave;
+  final String? hintText;
+  final TextInputType? keyboardType;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: TextField(
+            controller: controller,
+            keyboardType: keyboardType,
+            decoration: InputDecoration(labelText: label, hintText: hintText),
+          ),
+        ),
+        const SizedBox(width: 12),
+        FilledButton(onPressed: onSave, child: const Text('Save')),
+      ],
+    );
   }
 }

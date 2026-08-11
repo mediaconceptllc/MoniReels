@@ -39,6 +39,16 @@ final projectsListProvider = FutureProvider.autoDispose<List<Project>>((ref) asy
   return result.when(ok: (v) => v, err: (e) => throw e);
 });
 
+/// Bumped after a settings save so the Settings page's "currently set" status refreshes.
+final settingsGenerationProvider = StateProvider<int>((ref) => 0);
+
+final backendSettingsProvider = FutureProvider.autoDispose<BackendSettings>((ref) async {
+  ref.watch(settingsGenerationProvider);
+  ref.watch(backendGenerationProvider);
+  final result = await ref.watch(repositoryProvider).getSettings();
+  return result.when(ok: (v) => v, err: (e) => throw e);
+});
+
 /// The single project every page reads from, per spec §9.
 final currentProjectProvider = StateNotifierProvider<ProjectController, ProjectState>((ref) {
   return ProjectController(ref.watch(repositoryProvider));

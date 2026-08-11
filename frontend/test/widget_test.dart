@@ -36,6 +36,16 @@ void main() {
             ),
           ),
           projectsListProvider.overrideWith((ref) async => <Project>[]),
+          backendSettingsProvider.overrideWith(
+            (ref) async => BackendSettings(
+              chimegeSttUrl: 'https://api.chimege.com/v1.2',
+              chimegeTokenSet: false,
+              chimegeMaxAudioSec: 60,
+              openaiModel: '',
+              openaiBaseUrl: 'https://api.openai.com/v1',
+              openaiApiKeySet: false,
+            ),
+          ),
         ],
         child: const AiVideoEditorApp(),
       ),
