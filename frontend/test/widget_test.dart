@@ -54,6 +54,12 @@ void main() {
 
     expect(find.text('Dashboard'), findsWidgets);
     expect(find.text('Settings'), findsWidgets);
-    expect(find.byIcon(Icons.movie_creation_outlined), findsOneWidget);
+    expect(find.text('autoReel'), findsWidgets);
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is Image && w.image is AssetImage && (w.image as AssetImage).assetName == 'assets/icon_mark.png',
+      ),
+      findsWidgets,
+    );
   });
 }

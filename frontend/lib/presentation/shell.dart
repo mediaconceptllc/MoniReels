@@ -61,7 +61,7 @@ class AppShell extends ConsumerWidget {
                   labelType: NavigationRailLabelType.all,
                   leading: const Padding(
                     padding: EdgeInsets.symmetric(vertical: 12),
-                    child: Icon(Icons.movie_creation_outlined, size: 28),
+                    child: Image(image: AssetImage('assets/icon_mark.png'), width: 32, height: 32),
                   ),
                   destinations: [
                     for (final d in _destinations)
