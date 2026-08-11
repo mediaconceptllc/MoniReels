@@ -1,38 +1,46 @@
 """Chimege adapter unit tests — no network, no real ffmpeg/API calls.
 
-The offset-merge test is the one the spec explicitly calls out as covering
-the most common bug in chunked STT pipelines: forgetting to add each chunk's
-start offset to its returned timestamps before merging.
+Confirmed against the real Chimege OpenAPI spec (v1.2). The offset-merge test
+covers the most common bug in chunked STT pipelines: forgetting to add each
+chunk's start offset to its returned timestamps before merging — here the
+chunks come from Chimege's own /stt-long-transcript response array rather
+than client-side splitting, but the bug (and the fix) is identical.
 """
 from __future__ import annotations
+
+import wave
 
 import httpx
 import pytest
 
-from app.models import Segment, Transcript, Word
+from app.models import Segment, Transcript
 from app.stt.chimege_client import (
     ChimegeClient,
     ChimegeConfig,
     ChimegeError,
-    compute_chunk_boundaries,
     merge_transcripts,
-    parse_silencedetect_output,
+    poll_timeout_sec,
     shift_transcript,
     synthesize_segments_from_text,
+    text_to_transcript,
     wav_duration_sec,
 )
 
 
-def _segment(
-    start: float, end: float, text: str, words: list[tuple[float, float, str]] | None = None
-) -> Segment:
-    return Segment(
-        id="seg",
-        start=start,
-        end=end,
-        text=text,
-        words=[Word(start=s, end=e, text=t) for s, e, t in (words or [])],
-    )
+def _segment(start: float, end: float, text: str) -> Segment:
+    return Segment(id="seg", start=start, end=end, text=text)
+
+
+def _write_wav(path, duration_sec: float, framerate: int = 1000) -> None:
+    """Writes a WAV whose duration is `duration_sec` at a fake low framerate,
+    so tests stay fast without needing realistic audio data.
+    """
+    nframes = int(duration_sec * framerate)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(framerate)
+        w.writeframes(b"\x00\x00" * nframes)
 
 
 # --------------------------------------------------------------------------
@@ -40,21 +48,11 @@ def _segment(
 # --------------------------------------------------------------------------
 
 
-def test_shift_transcript_adds_offset_to_segments_and_words():
-    transcript = Transcript(
-        language="mn",
-        full_text="hello world",
-        segments=[_segment(0.0, 1.5, "hello", [(0.0, 0.5, "hel"), (0.5, 1.5, "lo")])],
-    )
+def test_shift_transcript_adds_offset_to_segments():
+    transcript = Transcript(language="mn", full_text="hello", segments=[_segment(0.0, 1.5, "hello")])
     shifted = shift_transcript(transcript, offset_sec=10.0)
-
-    seg = shifted.segments[0]
-    assert seg.start == 10.0
-    assert seg.end == 11.5
-    assert seg.words[0].start == 10.0
-    assert seg.words[0].end == 10.5
-    assert seg.words[1].start == 10.5
-    assert seg.words[1].end == 11.5
+    assert shifted.segments[0].start == 10.0
+    assert shifted.segments[0].end == 11.5
 
 
 def test_shift_transcript_zero_offset_is_noop():
@@ -82,15 +80,6 @@ def test_merge_transcripts_offsets_each_chunk_independently():
     assert merged.full_text == "a b c"
 
 
-def test_merge_transcripts_preserves_word_offsets_too():
-    chunk = Transcript(
-        language="mn", full_text="hi", segments=[_segment(0.0, 1.0, "hi", [(0.0, 1.0, "hi")])]
-    )
-    merged = merge_transcripts([(50.0, chunk)])
-    assert merged.segments[0].words[0].start == 50.0
-    assert merged.segments[0].words[0].end == 51.0
-
-
 def test_merge_transcripts_empty_list():
     merged = merge_transcripts([])
     assert merged.segments == []
@@ -105,51 +94,8 @@ def test_merge_transcripts_propagates_timings_estimated():
 
 
 # --------------------------------------------------------------------------
-# Chunk boundary computation.
-# --------------------------------------------------------------------------
-
-
-def test_compute_chunk_boundaries_short_audio_single_chunk():
-    boundaries = compute_chunk_boundaries(total_duration=30.0, max_chunk_sec=55.0)
-    assert boundaries == [(0.0, 30.0)]
-
-
-def test_compute_chunk_boundaries_cuts_in_silence_near_target():
-    # 100s audio, 40s max chunks. Silence at [39, 40.4] should be used as the
-    # first cut instead of a hard cut at 40.0.
-    boundaries = compute_chunk_boundaries(
-        total_duration=100.0, max_chunk_sec=40.0, silences=[(39.0, 40.4)]
-    )
-    assert boundaries[0] == (0.0, 39.7)  # midpoint of the silence interval, no overlap needed
-    assert boundaries[1][0] == 39.7  # second chunk picks up exactly where the first left off
-    # chunks must cover the whole file with no gaps (overlap from later fallback cuts is fine)
-    assert boundaries[-1][1] == 100.0
-    for (_s1, e1), (s2, _e2) in zip(boundaries, boundaries[1:], strict=False):
-        assert s2 <= e1
-
-
-def test_compute_chunk_boundaries_falls_back_to_overlap_without_silence():
-    boundaries = compute_chunk_boundaries(total_duration=90.0, max_chunk_sec=40.0, silences=[])
-    # first chunk hard-cuts at 40.0, second chunk starts 0.5s earlier (overlap)
-    assert boundaries[0] == (0.0, 40.0)
-    assert boundaries[1][0] == 39.5
-    assert boundaries[-1][1] == 90.0
-
-
-def test_compute_chunk_boundaries_covers_full_duration_no_gaps():
-    boundaries = compute_chunk_boundaries(total_duration=257.3, max_chunk_sec=55.0, silences=[])
-    assert boundaries[0][0] == 0.0
-    assert boundaries[-1][1] == 257.3
-    for (_s1, e1), (s2, _e2) in zip(boundaries, boundaries[1:], strict=False):
-        assert s2 <= e1  # overlap allowed, gaps are not
-
-
-def test_compute_chunk_boundaries_zero_duration():
-    assert compute_chunk_boundaries(0.0, 55.0) == []
-
-
-# --------------------------------------------------------------------------
-# Sentence-boundary proportional segment synthesis (no-timings fallback).
+# Sentence-boundary proportional segment synthesis — Chimege never returns
+# word/segment timings on either endpoint, so this is the only timing source.
 # --------------------------------------------------------------------------
 
 
@@ -159,7 +105,6 @@ def test_synthesize_segments_proportional_to_char_count():
     assert len(segments) == 2
     assert segments[0].text == "Hi."
     assert segments[1].text == "This is a much longer sentence indeed."
-    # shorter sentence gets proportionally less time
     assert segments[0].end - segments[0].start < segments[1].end - segments[1].start
     assert segments[0].start == 0.0
     assert abs(segments[-1].end - 10.0) < 1e-6
@@ -180,29 +125,16 @@ def test_synthesize_segments_zero_duration():
     assert synthesize_segments_from_text("hello.", duration_sec=0.0) == []
 
 
-# --------------------------------------------------------------------------
-# silencedetect stderr parsing.
-# --------------------------------------------------------------------------
+def test_text_to_transcript_marks_timings_estimated():
+    transcript = text_to_transcript("Сайн байна уу.", duration_sec=3.0)
+    assert transcript.timings_estimated is True
+    assert transcript.full_text == "Сайн байна уу."
+    assert transcript.language == "mn"
 
 
-def test_parse_silencedetect_output_basic():
-    stderr = (
-        "[silencedetect @ 0x1] silence_start: 12.34\n"
-        "[silencedetect @ 0x1] silence_end: 13.01 | silence_duration: 0.67\n"
-        "[silencedetect @ 0x1] silence_start: 45.0\n"
-        "[silencedetect @ 0x1] silence_end: 45.9 | silence_duration: 0.9\n"
-    )
-    intervals = parse_silencedetect_output(stderr)
-    assert intervals == [(12.34, 13.01), (45.0, 45.9)]
-
-
-def test_parse_silencedetect_output_unclosed_interval_dropped():
-    stderr = "[silencedetect @ 0x1] silence_start: 12.34\n"
-    assert parse_silencedetect_output(stderr) == []
-
-
-def test_parse_silencedetect_output_no_matches():
-    assert parse_silencedetect_output("nothing relevant here\n") == []
+def test_poll_timeout_scales_with_duration_but_has_a_floor():
+    assert poll_timeout_sec(10.0) == 180.0  # floor
+    assert poll_timeout_sec(3600.0) == 1800.0  # 1h audio -> 30min budget (spec: ~4min actual)
 
 
 # --------------------------------------------------------------------------
@@ -211,8 +143,6 @@ def test_parse_silencedetect_output_no_matches():
 
 
 def test_wav_duration_sec(tmp_path):
-    import wave
-
     path = tmp_path / "test.wav"
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -224,54 +154,133 @@ def test_wav_duration_sec(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Retry policy against a fake httpx transport (no real network).
+# /transcribe (short, synchronous) path against a fake httpx transport.
 # --------------------------------------------------------------------------
 
 
 def _fake_client(handler) -> httpx.AsyncClient:
-    transport = httpx.MockTransport(handler)
-    return httpx.AsyncClient(transport=transport)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 @pytest.mark.asyncio
-async def test_transcribe_short_audio_single_request(tmp_path):
-    import wave
-
+async def test_transcribe_short_uses_transcribe_endpoint_and_token_header(tmp_path):
     wav_path = tmp_path / "short.wav"
-    with wave.open(str(wav_path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x00" * 16000 * 2)  # 2 seconds
+    _write_wav(wav_path, duration_sec=2.0)
 
-    call_count = {"n": 0}
+    seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        call_count["n"] += 1
-        return httpx.Response(200, json={"language": "mn", "text": "sain baina uu"})
+        seen["url"] = str(request.url)
+        seen["token"] = request.headers.get("token")
+        seen["punctuate"] = request.headers.get("punctuate")
+        seen["content_type"] = request.headers.get("content-type")
+        return httpx.Response(200, text="sain baina uu")
 
     client = ChimegeClient(
-        ChimegeConfig(url="https://fake.chimege.mn/asr", token="tok", max_audio_sec=55),
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok-123", max_audio_sec=55),
         http_client=_fake_client(handler),
     )
     transcript = await client.transcribe(wav_path)
     await client.aclose()
 
-    assert call_count["n"] == 1
+    assert seen["url"] == "https://api.chimege.com/v1.2/transcribe"
+    assert seen["token"] == "tok-123"  # raw token, not "Bearer tok-123"
+    assert seen["punctuate"] == "true"
+    assert seen["content_type"] == "application/octet-stream"
     assert transcript.timings_estimated is True
     assert transcript.full_text == "sain baina uu"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_retries_on_503_then_succeeds(tmp_path):
-    import wave
+async def test_transcribe_long_pushes_then_polls_and_merges_with_correct_offsets(tmp_path):
+    """The core regression test: /stt-long-transcript returns a time-ordered
+    array of chunks with durations but no start/end — merging must place the
+    second chunk's segment at the first chunk's duration, not at 0.
+    """
+    wav_path = tmp_path / "long.wav"
+    _write_wav(wav_path, duration_sec=10.0)
 
+    poll_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/stt-long"):
+            assert request.headers.get("token") == "tok-123"
+            assert request.headers.get("content-type") == "audio/wav"
+            return httpx.Response(200, json={"uuid": "job-abc", "duration": 10.0})
+        if request.url.path.endswith("/stt-long-transcript"):
+            assert request.headers.get("uuid") == "job-abc"
+            poll_calls["n"] += 1
+            if poll_calls["n"] < 2:
+                return httpx.Response(200, json=[{"done": False, "transcription": "", "duration": 0}])
+            return httpx.Response(
+                200,
+                json=[
+                    {"done": True, "transcription": "Эхний хэсэг.", "duration": 4.0},
+                    {"done": True, "transcription": "Хоёр дахь хэсэг.", "duration": 6.0},
+                ],
+            )
+        raise AssertionError(f"unexpected request to {request.url}")
+
+    client = ChimegeClient(
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok-123", max_audio_sec=2),
+        http_client=_fake_client(handler),
+    )
+    import app.stt.chimege_client as mod
+
+    orig_sleep = mod.asyncio.sleep
+    mod.asyncio.sleep = lambda _s: orig_sleep(0)
+    try:
+        transcript = await client.transcribe(wav_path)
+    finally:
+        mod.asyncio.sleep = orig_sleep
+        await client.aclose()
+
+    assert poll_calls["n"] == 2
+    assert len(transcript.segments) == 2
+    assert transcript.segments[0].start == 0.0
+    assert transcript.segments[0].text == "Эхний хэсэг."
+    assert transcript.segments[1].start == 4.0  # offset by chunk 1's duration, not 0
+    assert transcript.segments[1].text == "Хоёр дахь хэсэг."
+
+
+@pytest.mark.asyncio
+async def test_transcribe_long_times_out_if_never_done(tmp_path):
+    wav_path = tmp_path / "long.wav"
+    _write_wav(wav_path, duration_sec=10.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/stt-long"):
+            return httpx.Response(200, json={"uuid": "job-abc", "duration": 10.0})
+        return httpx.Response(200, json=[{"done": False, "transcription": "", "duration": 0}])
+
+    client = ChimegeClient(
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=2),
+        http_client=_fake_client(handler),
+    )
+    import app.stt.chimege_client as mod
+
+    orig_sleep = mod.asyncio.sleep
+    mod.asyncio.sleep = lambda _s: orig_sleep(0)
+    orig_poll_timeout = mod.poll_timeout_sec
+    mod.poll_timeout_sec = lambda _d: 0.0  # force immediate timeout
+    try:
+        with pytest.raises(ChimegeError, match="did not finish"):
+            await client.transcribe(wav_path)
+    finally:
+        mod.asyncio.sleep = orig_sleep
+        mod.poll_timeout_sec = orig_poll_timeout
+        await client.aclose()
+
+
+# --------------------------------------------------------------------------
+# Retry policy and error mapping.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transcribe_retries_on_503_then_succeeds(tmp_path):
     wav_path = tmp_path / "short.wav"
-    with wave.open(str(wav_path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x00" * 16000)
+    _write_wav(wav_path, duration_sec=1.0)
 
     attempts = {"n": 0}
 
@@ -279,13 +288,12 @@ async def test_transcribe_retries_on_503_then_succeeds(tmp_path):
         attempts["n"] += 1
         if attempts["n"] < 3:
             return httpx.Response(503)
-        return httpx.Response(200, json={"language": "mn", "text": "ok"})
+        return httpx.Response(200, text="ok")
 
     client = ChimegeClient(
-        ChimegeConfig(url="https://fake.chimege.mn/asr", token="tok", max_audio_sec=55),
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=55),
         http_client=_fake_client(handler),
     )
-    # Speed the test up: patch the sleep used between retries.
     import app.stt.chimege_client as mod
 
     orig_sleep = mod.asyncio.sleep
@@ -302,30 +310,41 @@ async def test_transcribe_retries_on_503_then_succeeds(tmp_path):
 
 @pytest.mark.asyncio
 async def test_transcribe_does_not_retry_on_400(tmp_path):
-    import wave
-
     wav_path = tmp_path / "short.wav"
-    with wave.open(str(wav_path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x00" * 16000)
+    _write_wav(wav_path, duration_sec=1.0)
 
     attempts = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         attempts["n"] += 1
-        return httpx.Response(400, json={"error": "bad request"})
+        return httpx.Response(400, headers={"Error-Code": "2003"}, text="audio too short")
 
     client = ChimegeClient(
-        ChimegeConfig(url="https://fake.chimege.mn/asr", token="tok", max_audio_sec=55),
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=55),
         http_client=_fake_client(handler),
     )
-    with pytest.raises(ChimegeError):
+    with pytest.raises(ChimegeError, match="too short"):
         await client.transcribe(wav_path)
     await client.aclose()
 
     assert attempts["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_transcribe_403_maps_invalid_token_error_code(tmp_path):
+    wav_path = tmp_path / "short.wav"
+    _write_wav(wav_path, duration_sec=1.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"Error-Code": "1000"}, text="forbidden")
+
+    client = ChimegeClient(
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="bad-tok", max_audio_sec=55),
+        http_client=_fake_client(handler),
+    )
+    with pytest.raises(ChimegeError, match="Invalid API token"):
+        await client.transcribe(wav_path)
+    await client.aclose()
 
 
 @pytest.mark.asyncio

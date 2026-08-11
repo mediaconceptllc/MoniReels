@@ -1,107 +1,143 @@
 # Chimege.mn STT API — implementation contract
 
-**Status: UNVERIFIED ASSUMPTION.** I could not obtain a Chimege API token or
-reach a rendered copy of `docs.api.chimege.com/v1.2/en/` (it's a JS-rendered
-doc site that returned no extractable content, and no credentials were
-available in this environment). Everything below is a best-guess REST
-contract based on how comparable STT vendors shape their APIs. **Do not trust
-it until it's been checked against a real account.**
+**Status: CONFIRMED.** This document reflects the real Chimege OpenAPI spec
+(v1.2) — see [`chimege-openapi.yml`](./chimege-openapi.yml) in this folder
+for the full source spec (covers STT, TTS, spell-check, and script
+conversion; this doc only covers the STT slice this app uses). All
+Chimege-specific code lives in `backend/app/stt/chimege_client.py`; nothing
+downstream of `ChimegeClient.transcribe()` needs to know any of this, since
+it only ever sees a normalized `Transcript`.
 
-All Chimege-specific code lives in `backend/app/stt/chimege_client.py`. If the
-real contract differs, only that file (and this document) need to change —
-nothing downstream of `ChimegeClient.transcribe()` should need to move, since
-everything past that point only ever sees the normalized `Transcript` model.
-
-## What to verify against a real account
-
-1. Get a `CHIMEGE_TOKEN` and the real `CHIMEGE_STT_URL` from Chimege (contact
-   info: info@chimege.mn, or via console.chimege.com).
-2. Send one short WAV file through the real endpoint and compare the actual
-   response JSON against the "Assumed response" section below.
-3. Update `_to_transcript()` in `chimege_client.py` to match, and update this
-   file to reflect the confirmed contract.
-
-## Assumed request
-
-```
-POST {CHIMEGE_STT_URL}
-Authorization: Bearer {CHIMEGE_TOKEN}
-Content-Type: multipart/form-data
-
-  audio: <16kHz, mono, 16-bit PCM WAV file>
-```
-
-Audio is always pre-converted to 16 kHz mono 16-bit PCM WAV before being sent
-(see `app/video/audio.py`), regardless of what the real Chimege API turns out
-to require — that conversion is cheap and correct for any ASR vendor, so it
-stays even if the request shape above changes.
-
-## Assumed response (with timings)
-
-```json
-{
-  "language": "mn",
-  "text": "Full transcript text ...",
-  "segments": [
-    {
-      "start": 0.0,
-      "end": 2.34,
-      "text": "Сайн байна уу",
-      "words": [
-        {"start": 0.0, "end": 0.4, "text": "Сайн"},
-        {"start": 0.45, "end": 0.9, "text": "байна"},
-        {"start": 0.95, "end": 1.3, "text": "уу"}
-      ]
-    }
-  ]
-}
-```
-
-## Assumed response (no timings — fallback path)
-
-Some ASR APIs return plain text with no per-segment timing. If Chimege does
-this, the response is assumed to look like:
-
-```json
-{ "language": "mn", "text": "Full transcript text ..." }
-```
-
-In this case `chimege_client._to_transcript()` synthesizes segment timings by
-splitting on sentence boundaries and allocating duration proportional to each
-sentence's share of the total character count, and sets
-`Transcript.timings_estimated = true` so the UI can indicate the timings are
-approximate.
-
-## Chunking (audio longer than `CHIMEGE_MAX_AUDIO_SEC`)
-
-1. Run `ffmpeg -af silencedetect=noise=-30dB:d=0.5` over the WAV to find
-   silence intervals.
-2. Walk forward from `0`, and for each `max_chunk_sec` boundary, cut at the
-   midpoint of the nearest silence interval that ends before the boundary.
-3. If no usable silence is found near a boundary, fall back to a hard cut at
-   the boundary, with the next chunk starting `0.5s` earlier (overlap) so
-   words spoken right at the cut aren't lost.
-4. Transcribe each chunk independently, then **add that chunk's start offset
-   to every timestamp** in its transcript before merging
-   (`chimege_client.shift_transcript` / `merge_transcripts`). This offset
-   addition is unit-tested in `tests/test_chimege_client.py` — it's the
-   single most common bug in chunked-STT pipelines.
-
-## Retry policy
-
-3 attempts, exponential backoff (`1s, 2s, 4s`), only on:
-- HTTP 429
-- HTTP 5xx
-- request timeout
-
-Any other error (4xx other than 429, connection refused, malformed response)
-fails the job immediately with a typed `ChimegeError` rather than retrying.
+Base URL: `https://api.chimege.com/v1.2` (`CHIMEGE_STT_URL` in `.env`).
+Get a token via [console.chimege.com](https://console.chimege.com).
 
 ## Auth
 
-Assumed to be a static bearer token (`CHIMEGE_TOKEN`) sent as
-`Authorization: Bearer <token>` on every request. If Chimege instead uses an
-API-key header, query param, or short-lived OAuth token, update
-`ChimegeClient._post_chunk()` accordingly — the config plumbing
-(`CHIMEGE_TOKEN` in `.env`) does not need to change shape unless it becomes a
-credential pair instead of a single token.
+Every request carries the token in a `Token` header (HTTP headers are
+case-insensitive; the spec uses both `token` and `Token` depending on the
+endpoint) as the **raw token value** — no `Bearer ` prefix, no OAuth flow.
+
+```
+Token: <CHIMEGE_TOKEN>
+```
+
+## Two STT endpoints, chosen by audio length
+
+Chimege exposes both a synchronous short-audio endpoint and an asynchronous
+long-audio endpoint. `ChimegeClient.transcribe()` picks between them based on
+`CHIMEGE_MAX_AUDIO_SEC` (default 60s) and a byte-size safety check.
+
+### `POST /transcribe` — synchronous, short audio
+
+```
+POST {base}/transcribe
+Token: <token>
+Content-Type: application/octet-stream
+Punctuate: true            # optional; adds punctuation to the output
+
+<raw audio bytes as the request body — NOT multipart/form-data>
+```
+
+Response is **plain text** (`text/plain`), not JSON — just the transcribed
+string. No timestamps, no segments, no words.
+
+Hard limits (return HTTP 400 with an `Error-Code` header):
+- Max file size: **3MB** (~98s of 16kHz mono 16-bit PCM WAV — the format
+  this app always sends, see `app/video/audio.py`)
+- Min file size: 50KB for WAV, 2KB for other formats
+- Min duration: 0.5s
+- Must be valid WAV audio
+
+| Error-Code | Meaning |
+|---|---|
+| 2000 | Error receiving audio data |
+| 2001 | Audio file too large (>3MB) |
+| 2002 | Audio file too small |
+| 2003 | Audio too short (<0.5s) |
+| 2004 | Invalid audio encoding (must be WAV) |
+| 2005 | Failed to convert audio to WAV |
+
+### `POST /stt-long` + `GET /stt-long-transcript` — asynchronous, any length
+
+Designed for "хэдэн ч цагийн яриа" (speech of any number of hours) — no
+documented size limit. Push-then-poll by UUID:
+
+```
+POST {base}/stt-long
+Token: <token>
+Content-Type: audio/wav
+
+<raw audio bytes>
+```
+```json
+{"uuid": "...", "duration": 3600.0}
+```
+
+Then poll (spec: no more often than every 1 second; ~1h of audio takes ~4
+minutes to fully transcribe):
+
+```
+GET {base}/stt-long-transcript
+Token: <token>
+UUID: <uuid from the push response>
+```
+
+Response is a JSON **array** of chunk results, in time order:
+
+```json
+[
+  {"done": true, "transcription": "Эхний хэсэг.", "duration": 187.3},
+  {"done": true, "transcription": "Хоёр дахь хэсэг.", "duration": 212.9},
+  {"done": false, "transcription": "", "duration": 0}
+]
+```
+
+Poll until **every** item has `done: true`. `/stt-long-hq` +
+`/stt-long-hq-transcript` are identical, higher-quality variants (not
+currently used — swap the path in `chimege_client.py` if needed).
+
+**Critical detail: no `start`/`end` fields on these chunks, but they're
+ordered with a known `duration` each.** That's exactly what
+`chimege_client.merge_transcripts()` needs: treat each array item as one
+"chunk" with `offset = sum(duration of all earlier items)`, run it through
+`text_to_transcript()`, and merge — the same offset-shift logic a
+client-side-chunked provider would need, just fed by Chimege's own chunking
+instead of ours. See `test_transcribe_long_pushes_then_polls_and_merges_with_correct_offsets`
+in `tests/test_chimege_client.py` for the regression coverage — forgetting
+to add the cumulative offset here is the classic bug in any chunked-STT
+pipeline.
+
+## No word- or segment-level timestamps, ever
+
+Neither endpoint returns per-word or per-segment timing — just flat text
+(plus, for `/stt-long-transcript`, a duration per chunk). `timings_estimated`
+is therefore **always `true`** coming out of this client:
+`text_to_transcript()` synthesizes segment timings by splitting on sentence
+boundaries and allocating each sentence a share of the chunk's duration
+proportional to its character count.
+
+## Retry policy
+
+3 attempts, exponential backoff (`1s, 2s, 4s`), on:
+- HTTP 429, 500, 502, 503, 504
+- Request timeout
+
+Any other error (400, 403, malformed response) fails immediately with a
+typed `ChimegeError` — `_describe_http_error()` reads the `Error-Code`
+response header and maps known codes (audio errors 2000s, token errors
+1000s) to a human-readable message where possible.
+
+| Error-Code | Meaning |
+|---|---|
+| 1000 | Invalid API token |
+| 1001 | API token missing |
+| 1002 | Inactive API token |
+| 1003 | Suspended API token |
+
+## Other endpoints in the spec (not used by this app)
+
+The full Chimege/Bolorsoft API also covers text-to-speech (`/synthesize`),
+text normalization (`/normalize-text`), spell-check (`/spell-check`,
+`/spell-check-short`, `/spell-suggest`), and Mongolian-script conversion
+(`/kimo`, `/kimo-short`). None of these are needed for this app's STT-only
+usage (see HARD RULES §0) and are not implemented here.

@@ -26,9 +26,13 @@ class Settings(BaseSettings):
 
     ffmpeg_path: str = ""  # explicit dir or exe path override
 
-    chimege_stt_url: str = ""
+    chimege_stt_url: str = "https://api.chimege.com/v1.2"  # base URL; endpoints appended in chimege_client.py
     chimege_token: str = ""
-    chimege_max_audio_sec: int = 55  # seconds; chunk audio longer than this
+    # Threshold (seconds) below which we use the synchronous /transcribe
+    # endpoint; at/above it we use the async /stt-long push+poll flow instead.
+    # /transcribe is capped at 3MB, which is ~98s of 16kHz mono 16-bit PCM
+    # audio — this default leaves a safety margin under that hard cap.
+    chimege_max_audio_sec: int = 60
 
     openai_api_key: str = ""
     openai_model: str = ""
