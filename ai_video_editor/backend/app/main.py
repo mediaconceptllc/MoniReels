@@ -16,7 +16,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import routes_jobs, routes_media, routes_project, routes_stt
+from app.api import routes_ai, routes_jobs, routes_media, routes_project, routes_stt
 from app.config import get_settings
 from app.utils.logging import get_logger, setup_logging
 from app.video.capabilities import Capabilities, build_capabilities
@@ -88,6 +88,7 @@ async def _track_activity(request: Request, call_next):
 app.include_router(routes_jobs.router)
 app.include_router(routes_project.router)
 app.include_router(routes_stt.router)
+app.include_router(routes_ai.router)
 app.include_router(routes_media.router)
 
 
