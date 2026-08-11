@@ -25,6 +25,14 @@ venv/
 **/backend/build_pyinstaller/
 **/backend/bin/*.exe
 
+# Ad-hoc dev-server logs/pids left behind by manual test runs
+server_out.log
+server_err.log
+server.pid
+flutter_run_out.log
+flutter_run_err.log
+flutter_run.pid
+
 # Editors / OS
 .vscode/
 .idea/
