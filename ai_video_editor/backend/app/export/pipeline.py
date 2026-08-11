@@ -22,10 +22,15 @@ from app.export.presets import (
     resolve_dimensions,
 )
 from app.jobs.manager import JobCancelled, JobHandle
+from app.models import Segment, SubtitleStyle
+from app.subtitle.ass import build_ass_document
+from app.subtitle.shift import retime_segments_for_output
+from app.subtitle.srt import segments_to_srt
 from app.timeline.models import Clip, Transition
 from app.transition.filtergraph import TransitionPlan, build_xfade_filtergraph, plan_transition
 from app.transition.registry import resolve as resolve_transition
 from app.utils.logging import get_logger
+from app.utils.paths import atomic_write_text
 from app.video.ffmpeg import FfmpegBinaries, FfmpegCancelled, FfmpegRun
 from app.video.probe import probe_video
 
@@ -91,14 +96,14 @@ async def _join_concat(
     normalized_paths: list[Path],
     total_duration: float,
     workdir: Path,
-    part_path: Path,
+    out_path: Path,
 ) -> None:
     list_path = workdir / "concat_list.txt"
     list_path.write_text("\n".join(f"file '{p.name}'" for p in normalized_paths), encoding="utf-8")
 
     concat_args = [
         "-f", "concat", "-safe", "0", "-i", "concat_list.txt",
-        "-c", "copy", "-movflags", "+faststart", str(part_path),
+        "-c", "copy", "-movflags", "+faststart", str(out_path),
     ]
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
@@ -120,7 +125,7 @@ async def _join_xfade(
     crf: int,
     preset: str,
     encoder: str,
-    part_path: Path,
+    out_path: Path,
 ) -> None:
     filter_complex, v_out, a_out = build_xfade_filtergraph(len(normalized_paths), xfade_name, plan)
 
@@ -130,7 +135,7 @@ async def _join_xfade(
     args += ["-filter_complex", filter_complex, "-map", f"[{v_out}]", "-map", f"[{a_out}]"]
     args += build_video_encoder_args(encoder, crf, preset)
     args += build_audio_encoder_args()
-    args += ["-movflags", "+faststart", str(part_path)]
+    args += ["-movflags", "+faststart", str(out_path)]
 
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
@@ -140,6 +145,47 @@ async def _join_xfade(
         expected_duration_sec=plan.final_duration,
         on_progress=_scaled_progress(handle, 0.6, 0.9, "join"),
     )
+
+
+async def _burn_subtitles(
+    binaries: FfmpegBinaries,
+    handle: JobHandle,
+    input_path: Path,
+    out_path: Path,
+    workdir: Path,
+    crf: int,
+    preset: str,
+    encoder: str,
+    expected_duration: float,
+) -> None:
+    """Burns workdir/subs.ass into input_path. `subs.ass` is referenced by bare
+    filename with cwd=workdir on purpose — passing an absolute Windows path
+    (with a drive letter) into the `subtitles=` filter option string breaks on
+    the colon, since ffmpeg's filter-option parser also uses ':' as a separator.
+    """
+    args = ["-i", str(input_path), "-vf", "subtitles=subs.ass"]
+    args += build_video_encoder_args(encoder, crf, preset)
+    args += build_audio_encoder_args()
+    args += ["-movflags", "+faststart", str(out_path)]
+
+    run = FfmpegRun()
+    handle.set_cancel_hook(run.cancel)
+    await run.run(
+        binaries.ffmpeg,  # type: ignore[arg-type]
+        args,
+        expected_duration_sec=expected_duration,
+        cwd=workdir,
+        on_progress=_scaled_progress(handle, 0.9, 1.0, "subtitles"),
+    )
+
+
+def _cumulative_starts(durations: list[float]) -> list[float]:
+    starts = []
+    running = 0.0
+    for d in durations:
+        starts.append(running)
+        running += d
+    return starts
 
 
 async def render_timeline(
@@ -156,6 +202,10 @@ async def render_timeline(
     supported_xfade: list[str],
     workdir: Path,
     output_path: Path,
+    write_srt: bool = False,
+    burn_subtitles: bool = False,
+    subtitle_style: SubtitleStyle | None = None,
+    transcript_segments: list[Segment] | None = None,
 ) -> Path:
     if not clips:
         raise ValueError("Cannot render an empty clip list")
@@ -163,12 +213,14 @@ async def render_timeline(
     validate_portrait_fill(portrait_fill)
     width, height = resolve_dimensions(orientation)
     encoder = choose_encoder(use_hwaccel, working_hwaccel_encoder)
+    want_subtitles = bool(transcript_segments) and (write_srt or burn_subtitles)
 
     ordered_clips = sorted(clips, key=lambda c: c.order)
     workdir.mkdir(parents=True, exist_ok=True)
     # Keep the extension (output.part.mp4, not output.mp4.part) so ffmpeg's
     # muxer can still infer the output format from the temp filename.
     part_path = output_path.with_name(f"{output_path.stem}.part{output_path.suffix}")
+    joined_path = workdir / f"joined{output_path.suffix}"
     normalized_paths: list[Path] = []
 
     try:
@@ -194,21 +246,49 @@ async def render_timeline(
         handle.raise_if_cancelled()
         await handle.set_progress(0.6, stage="join", message="Joining clips")
 
+        need_burn_pass = burn_subtitles and bool(transcript_segments)
+        join_target = joined_path if need_burn_pass else part_path
+
         if transition.duration <= 0 or n == 1:
-            await _join_concat(binaries, handle, normalized_paths, sum(clip_durations), workdir, part_path)
+            clip_output_starts = _cumulative_starts(clip_durations)
+            final_duration = sum(clip_durations)
+            await _join_concat(binaries, handle, normalized_paths, final_duration, workdir, join_target)
         else:
             xfade_name = resolve_transition(transition.type, supported_xfade)
             plan = plan_transition(clip_durations, transition.duration)
+            clip_output_starts = [0.0, *plan.offsets]
+            final_duration = plan.final_duration
             if plan.reduced:
                 await handle.set_progress(
                     0.6, stage="join",
                     message=f"Transition duration reduced to {plan.duration:.2f}s to fit the shortest clip",
                 )
             await _join_xfade(
-                binaries, handle, normalized_paths, xfade_name, plan, crf, preset, encoder, part_path
+                binaries, handle, normalized_paths, xfade_name, plan, crf, preset, encoder, join_target
             )
 
         handle.raise_if_cancelled()
+
+        retimed_segments: list[Segment] = []
+        if want_subtitles and transcript_segments:
+            retimed_segments = retime_segments_for_output(
+                transcript_segments, ordered_clips, clip_output_starts
+            )
+
+        if write_srt and retimed_segments:
+            atomic_write_text(output_path.with_suffix(".srt"), segments_to_srt(retimed_segments))
+
+        if need_burn_pass and retimed_segments:
+            ass_content = build_ass_document(retimed_segments, subtitle_style or SubtitleStyle())
+            (workdir / "subs.ass").write_text(ass_content, encoding="utf-8")
+            await _burn_subtitles(
+                binaries, handle, joined_path, part_path, workdir, crf, preset, encoder, final_duration
+            )
+        elif need_burn_pass:
+            # Subtitles were requested but there was nothing to burn (e.g. no
+            # segment overlapped the kept ranges) — the joined file IS final.
+            joined_path.replace(part_path)
+
         await handle.set_progress(0.95, stage="finalize", message="Finalizing output")
         part_path.replace(output_path)
         await handle.set_progress(1.0, stage="done", message="Render complete")
@@ -218,7 +298,9 @@ async def render_timeline(
     finally:
         if part_path.exists():
             part_path.unlink(missing_ok=True)
+        if joined_path.exists():
+            joined_path.unlink(missing_ok=True)
         for p in normalized_paths:
             p.unlink(missing_ok=True)
-        concat_list = workdir / "concat_list.txt"
-        concat_list.unlink(missing_ok=True)
+        (workdir / "concat_list.txt").unlink(missing_ok=True)
+        (workdir / "subs.ass").unlink(missing_ok=True)

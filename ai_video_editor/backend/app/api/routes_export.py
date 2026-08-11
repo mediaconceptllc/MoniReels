@@ -69,6 +69,9 @@ async def preview_project(
             working_hwaccel_encoder=capabilities.working_hwaccel_encoder,
             supported_xfade=capabilities.xfade_transitions,
             workdir=new_job_workdir(handle.job_id), output_path=output_path,
+            write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
+            subtitle_style=project.subtitle_style,
+            transcript_segments=project.transcript.segments if project.transcript else None,
         )
         return {"output_path": str(output_path)}
 
@@ -95,6 +98,9 @@ async def export_project(
             working_hwaccel_encoder=capabilities.working_hwaccel_encoder,
             supported_xfade=capabilities.xfade_transitions,
             workdir=new_job_workdir(handle.job_id), output_path=output_path,
+            write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
+            subtitle_style=project.subtitle_style,
+            transcript_segments=project.transcript.segments if project.transcript else None,
         )
         return {"output_path": str(output_path)}
 
