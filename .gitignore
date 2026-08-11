@@ -14,16 +14,16 @@ venv/
 !.env.example
 
 # Flutter
-frontend/build/
-frontend/.dart_tool/
-frontend/.flutter-plugin-dependencies-registrant/
-frontend/windows/flutter/ephemeral/
+**/frontend/build/
+**/frontend/.dart_tool/
+**/frontend/windows/flutter/ephemeral/
 **/*.g.dart
 
 # Backend build artifacts
-backend/dist/
-backend/build/
-backend/bin/*.exe
+**/backend/dist/
+**/backend/build/
+**/backend/build_pyinstaller/
+**/backend/bin/*.exe
 
 # Editors / OS
 .vscode/

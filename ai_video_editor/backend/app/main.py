@@ -47,6 +47,13 @@ async def lifespan(app: FastAPI):
     if settings.managed:
         idle_task = asyncio.create_task(_idle_shutdown_watcher(settings.idle_shutdown_sec))
 
+    # Printed here (ASGI lifespan startup), not before uvicorn.run(): uvicorn
+    # only reaches this point after its listen socket is already bound, so a
+    # client reading this line is guaranteed the port is actually accepting
+    # connections. Printing it earlier (pre-bind) is a real race that makes
+    # the very first request after spawn fail intermittently.
+    print(f"READY {app.state.startup_port}", flush=True)
+
     yield
 
     if idle_task:
@@ -118,7 +125,7 @@ def _find_free_port(host: str) -> int:
 def main() -> None:
     settings = get_settings()
     port = settings.app_port or _find_free_port(settings.app_host)
-    print(f"READY {port}", flush=True)
+    app.state.startup_port = port
     uvicorn.run(app, host=settings.app_host, port=port, log_level=settings.log_level.lower())
 
 

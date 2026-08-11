@@ -2,9 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ai_video_editor_frontend/application/backend_launcher.dart';
 import 'package:ai_video_editor_frontend/application/providers.dart';
 import 'package:ai_video_editor_frontend/domain/models.dart';
 import 'package:ai_video_editor_frontend/main.dart';
+
+/// Skips real process spawning/networking — just echoes back the dev URL
+/// as if a backend were already running there.
+class _FakeBackendLauncher extends BackendLauncher {
+  @override
+  Future<Uri> ensureRunning({required Uri devUrl}) async => devUrl;
+
+  @override
+  void killIfSpawned() {}
+}
 
 void main() {
   testWidgets('App shell renders the nav rail with all pages', (WidgetTester tester) async {
@@ -13,6 +24,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          backendLauncherProvider.overrideWithValue(_FakeBackendLauncher()),
           healthProvider.overrideWith((ref) async => {'status': 'ok', 'ffmpeg': true, 'version': 'test'}),
           capabilitiesProvider.overrideWith(
             (ref) async => Capabilities(

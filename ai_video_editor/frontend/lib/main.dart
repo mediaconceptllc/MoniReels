@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'core/theme.dart';
-import 'presentation/shell.dart';
+import 'presentation/bootstrap.dart';
 
 void main() {
   MediaKit.ensureInitialized();
@@ -21,7 +21,7 @@ class AiVideoEditorApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       darkTheme: buildAppTheme(),
       theme: buildAppTheme(),
-      home: const AppShell(),
+      home: const AppBootstrap(),
     );
   }
 }

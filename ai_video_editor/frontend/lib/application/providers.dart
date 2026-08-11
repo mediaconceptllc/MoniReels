@@ -3,9 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
 import '../data/repository.dart';
 import '../domain/models.dart';
+import 'backend_launcher.dart';
 import 'project_controller.dart';
 
 const kDefaultBackendUrl = 'http://127.0.0.1:8000';
+
+/// Overridden in widget tests with a fake that skips real process spawning
+/// and networking.
+final backendLauncherProvider = Provider<BackendLauncher>((ref) => BackendLauncher());
 
 /// Mutable so Settings can repoint at a different backend without restarting
 /// the app — the backend's actual port is only known once it's running
