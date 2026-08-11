@@ -30,3 +30,6 @@ backend/bin/*.exe
 .idea/
 Thumbs.db
 .DS_Store
+
+# Claude Code harness state
+.claude/
