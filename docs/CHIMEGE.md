@@ -21,13 +21,34 @@ endpoint) as the **raw token value** — no `Bearer ` prefix, no OAuth flow.
 Token: <CHIMEGE_TOKEN>
 ```
 
-## Two STT endpoints, chosen by audio length
+## How long audio is actually handled: client-side pause splitting
 
-Chimege exposes both a synchronous short-audio endpoint and an asynchronous
-long-audio endpoint. `ChimegeClient.transcribe()` picks between them based on
-`CHIMEGE_MAX_AUDIO_SEC` (default 60s) and a byte-size safety check.
+Chimege's real API has two STT paths — a synchronous short-audio endpoint
+and an asynchronous long-audio endpoint (both documented below) — but this
+client only ever calls the **synchronous** one. Audio at or under
+`CHIMEGE_MAX_AUDIO_SEC` (default 60s) goes straight to `/transcribe`. Audio
+longer than that is first split into pieces on `ChimegeClient`'s side, at
+detected pauses in the audio (ffmpeg `silencedetect`) — an "almost sentence
+by sentence" split, since a pause is the only signal available for where a
+sentence might end *before* we have a transcript. Every resulting piece is
+guaranteed `<= CHIMEGE_MAX_AUDIO_SEC` by construction (`compute_pause_boundaries`
+forces a hard cut, with a small overlap, if no pause appears for too long),
+so every piece always fits the sync endpoint's limits — there's nothing left
+for the async long-audio path to do.
 
-### `POST /transcribe` — synchronous, short audio
+This also fixes a real bug found against a live account: `/stt-long-transcript`
+returned a list of plain strings (not the documented `{done, transcription,
+duration}` objects) while a job was still processing, crashing the client.
+Since that path is no longer called, the failure mode is moot — though the
+defensive fix (treat unexpected shapes as "still processing" rather than
+crash) is worth keeping in mind if `/stt-long` is ever reintroduced.
+
+The payoff of client-side chunking: each piece's `[start, end]` is known
+*exactly*, since we're the ones who cut it — no more guessing full-file
+segment timing from character counts. See `compute_pause_boundaries` in
+`chimege_client.py`.
+
+### `POST /transcribe` — synchronous, short audio (the only endpoint used)
 
 ```
 POST {base}/transcribe
@@ -57,10 +78,13 @@ Hard limits (return HTTP 400 with an `Error-Code` header):
 | 2004 | Invalid audio encoding (must be WAV) |
 | 2005 | Failed to convert audio to WAV |
 
-### `POST /stt-long` + `GET /stt-long-transcript` — asynchronous, any length
+### `POST /stt-long` + `GET /stt-long-transcript` — asynchronous, any length (documented, not currently used)
 
 Designed for "хэдэн ч цагийн яриа" (speech of any number of hours) — no
-documented size limit. Push-then-poll by UUID:
+documented size limit. Push-then-poll by UUID. **Not called by this client**
+(see above) — documented here in case a case turns up later where
+client-side pause chunking isn't the right call, e.g. wanting fewer, larger
+requests for long silence-free audio.
 
 ```
 POST {base}/stt-long
@@ -96,25 +120,52 @@ Poll until **every** item has `done: true`. `/stt-long-hq` +
 `/stt-long-hq-transcript` are identical, higher-quality variants (not
 currently used — swap the path in `chimege_client.py` if needed).
 
-**Critical detail: no `start`/`end` fields on these chunks, but they're
-ordered with a known `duration` each.** That's exactly what
-`chimege_client.merge_transcripts()` needs: treat each array item as one
-"chunk" with `offset = sum(duration of all earlier items)`, run it through
-`text_to_transcript()`, and merge — the same offset-shift logic a
-client-side-chunked provider would need, just fed by Chimege's own chunking
-instead of ours. See `test_transcribe_long_pushes_then_polls_and_merges_with_correct_offsets`
-in `tests/test_chimege_client.py` for the regression coverage — forgetting
-to add the cumulative offset here is the classic bug in any chunked-STT
-pipeline.
+No `start`/`end` fields on these chunks, only a `duration` each — if this
+path is ever reintroduced, `chimege_client.merge_transcripts()` already
+knows how to consume exactly this shape: treat each array item as one chunk
+with `offset = sum(duration of all earlier items)`, run it through
+`text_to_transcript()`, and merge. It's the same offset-shift logic used for
+our own pause-based chunks (`shift_transcript`/`merge_transcripts` don't
+care whether a chunk's offset came from real audio cutting or from summing
+a provider's self-reported durations) — forgetting to add the cumulative
+offset here is the classic bug in any chunked-STT pipeline, and is what
+`test_transcribe_long_audio_splits_into_pause_chunks_with_correct_offsets`
+in `tests/test_chimege_client.py` guards against for the path actually used.
 
 ## No word- or segment-level timestamps, ever
 
-Neither endpoint returns per-word or per-segment timing — just flat text
-(plus, for `/stt-long-transcript`, a duration per chunk). `timings_estimated`
-is therefore **always `true`** coming out of this client:
-`text_to_transcript()` synthesizes segment timings by splitting on sentence
-boundaries and allocating each sentence a share of the chunk's duration
-proportional to its character count.
+Chimege never returns per-word or per-segment timing on either endpoint —
+just flat text. For a chunk this client itself cut (the normal case), that
+chunk's `[start, end]` is exact (we cut it), but if that chunk's text still
+contains more than one sentence, `timings_estimated` is `true` and
+`text_to_transcript()` estimates the sub-splits by allocating the chunk's
+(exactly known) duration proportional to each sentence's character count.
+
+## Pause-detection tuning and trade-offs
+
+Constants in `chimege_client.py`:
+- `SILENCE_NOISE_DB` (default `-30dB`) / `SILENCE_MIN_DURATION_SEC` (default
+  `0.35`) — passed to ffmpeg's `silencedetect` filter. Untuned against real
+  speech; if chunks come out too fragmented (every breath treated as a
+  sentence break) or barely split at all, adjust these first.
+- `MIN_CHUNK_SEC` (default `2.0`) — candidate cuts closer together than this
+  are merged away. Set just above Chimege's own `/transcribe` minimums
+  (0.5s duration, 50KB ≈ 1.56s in our WAV format) so no chunk gets rejected
+  as "too short"/"too small".
+- `FORCED_CUT_OVERLAP_SEC` (default `0.4`) — only applied when a stretch has
+  no pause for longer than `CHIMEGE_MAX_AUDIO_SEC` and a cut has to happen
+  mid-speech anyway; genuine pause cuts don't need it, the gap is the buffer.
+
+Known trade-offs (by design, not bugs):
+- **Not grammatically exact** — a chunk may be half a sentence (mid-thought
+  pause) or several short sentences run together (no pause between them).
+  "Almost sentence by sentence," not exactly.
+- **More requests than the async path would need** — one `/transcribe` call
+  per pause-bounded chunk, which can be dozens for a long video. Sequential
+  today, not parallelized.
+- **Forced-cut overlap can duplicate a word** at the boundary between two
+  chunks in a long pause-free stretch — same word may appear in both chunks'
+  text. Minor and rare in normal speech.
 
 ## Retry policy
 

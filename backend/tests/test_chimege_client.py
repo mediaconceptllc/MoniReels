@@ -1,10 +1,9 @@
-"""Chimege adapter unit tests — no network, no real ffmpeg/API calls.
+"""Chimege adapter unit tests — no network, no real ffmpeg/API calls (a
+separate live-ffmpeg integration check is run ad hoc; see project notes).
 
 Confirmed against the real Chimege OpenAPI spec (v1.2). The offset-merge test
 covers the most common bug in chunked STT pipelines: forgetting to add each
-chunk's start offset to its returned timestamps before merging — here the
-chunks come from Chimege's own /stt-long-transcript response array rather
-than client-side splitting, but the bug (and the fix) is identical.
+chunk's start offset to its returned timestamps before merging.
 """
 from __future__ import annotations
 
@@ -15,11 +14,13 @@ import pytest
 
 from app.models import Segment, Transcript
 from app.stt.chimege_client import (
+    MIN_CHUNK_SEC,
     ChimegeClient,
     ChimegeConfig,
     ChimegeError,
+    compute_pause_boundaries,
     merge_transcripts,
-    poll_timeout_sec,
+    parse_silencedetect_output,
     shift_transcript,
     synthesize_segments_from_text,
     text_to_transcript,
@@ -41,6 +42,89 @@ def _write_wav(path, duration_sec: float, framerate: int = 1000) -> None:
         w.setsampwidth(2)
         w.setframerate(framerate)
         w.writeframes(b"\x00\x00" * nframes)
+
+
+# --------------------------------------------------------------------------
+# Pause-boundary computation — the "almost sentence by sentence" split.
+# --------------------------------------------------------------------------
+
+
+def test_compute_pause_boundaries_short_audio_single_chunk():
+    assert compute_pause_boundaries(30.0, silences=[], max_chunk_sec=55.0) == [(0.0, 30.0)]
+
+
+def test_compute_pause_boundaries_cuts_at_silence_midpoints():
+    # Two clean pauses in a 30s clip -> three "sentence" chunks.
+    boundaries = compute_pause_boundaries(
+        30.0, silences=[(9.0, 9.4), (19.0, 19.6)], max_chunk_sec=55.0
+    )
+    assert boundaries == [(0.0, 9.2), (9.2, 19.3), (19.3, 30.0)]
+
+
+def test_compute_pause_boundaries_covers_whole_duration_no_gaps():
+    boundaries = compute_pause_boundaries(30.0, silences=[(9.0, 9.4), (19.0, 19.6)], max_chunk_sec=55.0)
+    assert boundaries[0][0] == 0.0
+    assert boundaries[-1][1] == 30.0
+    for (_s1, e1), (s2, _e2) in zip(boundaries, boundaries[1:], strict=False):
+        assert s2 == e1  # genuine pause cuts have no overlap, unlike forced cuts
+
+
+def test_compute_pause_boundaries_forces_cut_when_no_pause_for_too_long():
+    # No silences at all in 100s -> forced cuts every max_chunk_sec, with overlap.
+    boundaries = compute_pause_boundaries(100.0, silences=[], max_chunk_sec=40.0)
+    assert boundaries[0] == (0.0, 40.0)
+    assert boundaries[1][0] == 40.0 - 0.4  # FORCED_CUT_OVERLAP_SEC
+    assert boundaries[-1][1] == 100.0
+    for start, end in boundaries:
+        assert end - start <= 40.0 + 1e-9
+
+
+def test_compute_pause_boundaries_merges_cuts_closer_than_min_chunk():
+    # Two pauses only 1s apart (< MIN_CHUNK_SEC=2.0) collapse into one cut.
+    boundaries = compute_pause_boundaries(30.0, silences=[(9.0, 9.2), (10.0, 10.2)], max_chunk_sec=55.0)
+    assert len(boundaries) == 2
+    assert boundaries[0][1] == boundaries[1][0]
+    assert boundaries[0][1] - boundaries[0][0] >= MIN_CHUNK_SEC or boundaries[0][0] == 0.0
+
+
+def test_compute_pause_boundaries_merges_too_short_first_chunk_forward():
+    # A pause at 0.5s would make the first chunk shorter than MIN_CHUNK_SEC on
+    # its own, with nothing before it to merge into — must merge forward.
+    boundaries = compute_pause_boundaries(30.0, silences=[(0.4, 0.6)], max_chunk_sec=55.0)
+    assert boundaries[0][0] == 0.0
+    assert boundaries[0][1] - boundaries[0][0] >= MIN_CHUNK_SEC
+
+
+def test_compute_pause_boundaries_zero_duration():
+    assert compute_pause_boundaries(0.0, silences=[], max_chunk_sec=55.0) == []
+
+
+def test_compute_pause_boundaries_every_chunk_at_least_min_chunk_sec():
+    boundaries = compute_pause_boundaries(
+        60.0,
+        silences=[(5.0, 5.1), (5.5, 5.6), (40.0, 40.2)],
+        max_chunk_sec=55.0,
+    )
+    for start, end in boundaries:
+        assert end - start >= MIN_CHUNK_SEC - 1e-9
+
+
+def test_parse_silencedetect_output_basic():
+    stderr = (
+        "[silencedetect @ 0x1] silence_start: 12.34\n"
+        "[silencedetect @ 0x1] silence_end: 13.01 | silence_duration: 0.67\n"
+        "[silencedetect @ 0x1] silence_start: 45.0\n"
+        "[silencedetect @ 0x1] silence_end: 45.9 | silence_duration: 0.9\n"
+    )
+    assert parse_silencedetect_output(stderr) == [(12.34, 13.01), (45.0, 45.9)]
+
+
+def test_parse_silencedetect_output_unclosed_interval_dropped():
+    assert parse_silencedetect_output("[silencedetect @ 0x1] silence_start: 12.34\n") == []
+
+
+def test_parse_silencedetect_output_no_matches():
+    assert parse_silencedetect_output("nothing relevant here\n") == []
 
 
 # --------------------------------------------------------------------------
@@ -94,8 +178,8 @@ def test_merge_transcripts_propagates_timings_estimated():
 
 
 # --------------------------------------------------------------------------
-# Sentence-boundary proportional segment synthesis — Chimege never returns
-# word/segment timings on either endpoint, so this is the only timing source.
+# Sentence-boundary proportional segment synthesis — for the rare case a
+# single pause-bounded chunk still contains more than one sentence.
 # --------------------------------------------------------------------------
 
 
@@ -132,11 +216,6 @@ def test_text_to_transcript_marks_timings_estimated():
     assert transcript.language == "mn"
 
 
-def test_poll_timeout_scales_with_duration_but_has_a_floor():
-    assert poll_timeout_sec(10.0) == 180.0  # floor
-    assert poll_timeout_sec(3600.0) == 1800.0  # 1h audio -> 30min budget (spec: ~4min actual)
-
-
 # --------------------------------------------------------------------------
 # WAV duration reading.
 # --------------------------------------------------------------------------
@@ -154,7 +233,9 @@ def test_wav_duration_sec(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# /transcribe (short, synchronous) path against a fake httpx transport.
+# transcribe() orchestration against a fake httpx transport. Chunk
+# extraction/silence-detection (real ffmpeg calls) are monkeypatched here so
+# this suite stays hermetic; see the ad hoc script for a real-ffmpeg check.
 # --------------------------------------------------------------------------
 
 
@@ -192,84 +273,76 @@ async def test_transcribe_short_uses_transcribe_endpoint_and_token_header(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_transcribe_long_pushes_then_polls_and_merges_with_correct_offsets(tmp_path):
-    """The core regression test: /stt-long-transcript returns a time-ordered
-    array of chunks with durations but no start/end — merging must place the
-    second chunk's segment at the first chunk's duration, not at 0.
+async def test_transcribe_long_audio_splits_into_pause_chunks_with_correct_offsets(tmp_path, monkeypatch):
+    """The core regression test: each pause-bounded chunk must be transcribed
+    and merged at its own real (not estimated) [start, end] — the second
+    chunk's text must land at the first chunk's exact end, not at 0.
     """
     wav_path = tmp_path / "long.wav"
     _write_wav(wav_path, duration_sec=10.0)
 
-    poll_calls = {"n": 0}
+    # Fake a single detected pause at the midpoint -> two chunks: [0,5), [5,10).
+    async def fake_detect_silences(self, path):
+        return [(4.9, 5.1)]
+
+    extracted = []
+
+    async def fake_extract_chunk(self, wav_path, out_path, start, end):
+        extracted.append((start, end))
+        out_path.write_bytes(b"fake-chunk-audio")
+
+    monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
+    monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
+
+    call_texts = iter(["Эхний өгүүлбэр.", "Хоёр дахь өгүүлбэр."])
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/stt-long"):
-            assert request.headers.get("token") == "tok-123"
-            assert request.headers.get("content-type") == "audio/wav"
-            return httpx.Response(200, json={"uuid": "job-abc", "duration": 10.0})
-        if request.url.path.endswith("/stt-long-transcript"):
-            assert request.headers.get("uuid") == "job-abc"
-            poll_calls["n"] += 1
-            if poll_calls["n"] < 2:
-                return httpx.Response(200, json=[{"done": False, "transcription": "", "duration": 0}])
-            return httpx.Response(
-                200,
-                json=[
-                    {"done": True, "transcription": "Эхний хэсэг.", "duration": 4.0},
-                    {"done": True, "transcription": "Хоёр дахь хэсэг.", "duration": 6.0},
-                ],
-            )
-        raise AssertionError(f"unexpected request to {request.url}")
+        return httpx.Response(200, text=next(call_texts))
 
     client = ChimegeClient(
-        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok-123", max_audio_sec=2),
+        # max_audio_sec is both "trigger chunking above this" and the
+        # per-chunk max_chunk_sec — needs to be > 5.0 or the forced-cut
+        # fallback would add extra cuts before reaching the fake pause.
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=6),
         http_client=_fake_client(handler),
     )
-    import app.stt.chimege_client as mod
+    transcript = await client.transcribe(wav_path)
+    await client.aclose()
 
-    orig_sleep = mod.asyncio.sleep
-    mod.asyncio.sleep = lambda _s: orig_sleep(0)
-    try:
-        transcript = await client.transcribe(wav_path)
-    finally:
-        mod.asyncio.sleep = orig_sleep
-        await client.aclose()
-
-    assert poll_calls["n"] == 2
+    assert extracted == [(0.0, 5.0), (5.0, 10.0)]
     assert len(transcript.segments) == 2
     assert transcript.segments[0].start == 0.0
-    assert transcript.segments[0].text == "Эхний хэсэг."
-    assert transcript.segments[1].start == 4.0  # offset by chunk 1's duration, not 0
-    assert transcript.segments[1].text == "Хоёр дахь хэсэг."
+    assert transcript.segments[0].text == "Эхний өгүүлбэр."
+    assert transcript.segments[1].start == 5.0  # offset by chunk 1's real end, not 0
+    assert transcript.segments[1].text == "Хоёр дахь өгүүлбэр."
 
 
 @pytest.mark.asyncio
-async def test_transcribe_long_times_out_if_never_done(tmp_path):
+async def test_transcribe_pause_chunks_cleans_up_temp_files(tmp_path, monkeypatch):
     wav_path = tmp_path / "long.wav"
     _write_wav(wav_path, duration_sec=10.0)
 
+    async def fake_detect_silences(self, path):
+        return []  # no pauses -> forced cuts, still exercises the chunk workdir
+
+    async def fake_extract_chunk(self, wav_path, out_path, start, end):
+        out_path.write_bytes(b"fake")
+
+    monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
+    monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/stt-long"):
-            return httpx.Response(200, json={"uuid": "job-abc", "duration": 10.0})
-        return httpx.Response(200, json=[{"done": False, "transcription": "", "duration": 0}])
+        return httpx.Response(200, text="ok")
 
     client = ChimegeClient(
-        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=2),
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=4),
         http_client=_fake_client(handler),
     )
-    import app.stt.chimege_client as mod
+    await client.transcribe(wav_path)
+    await client.aclose()
 
-    orig_sleep = mod.asyncio.sleep
-    mod.asyncio.sleep = lambda _s: orig_sleep(0)
-    orig_poll_timeout = mod.poll_timeout_sec
-    mod.poll_timeout_sec = lambda _d: 0.0  # force immediate timeout
-    try:
-        with pytest.raises(ChimegeError, match="did not finish"):
-            await client.transcribe(wav_path)
-    finally:
-        mod.asyncio.sleep = orig_sleep
-        mod.poll_timeout_sec = orig_poll_timeout
-        await client.aclose()
+    workdir = wav_path.parent / f"{wav_path.stem}_chunks"
+    assert not workdir.exists()
 
 
 # --------------------------------------------------------------------------

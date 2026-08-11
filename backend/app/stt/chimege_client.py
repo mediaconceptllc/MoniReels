@@ -1,27 +1,34 @@
 """Chimege.mn STT client — the ONLY speech-to-text implementation (see HARD RULES §0).
 
-Confirmed against the real Chimege OpenAPI spec (v1.2) provided by the user —
-this is no longer a guess. Two endpoints are used:
+Confirmed against the real Chimege OpenAPI spec (v1.2) provided by the user.
+Audio longer than CHIMEGE_MAX_AUDIO_SEC is split at detected pauses (ffmpeg
+`silencedetect`) before sending — an "almost sentence by sentence" split,
+since a pause is the only sentence-boundary signal available before we have
+a transcript. Every resulting chunk is guaranteed <= CHIMEGE_MAX_AUDIO_SEC by
+construction (a hard cut is forced if no pause appears for too long), so
+every chunk always goes through the synchronous:
 
-- POST /transcribe: synchronous, plain-text response, capped at 3MB request
-  body (~98s of 16kHz mono 16-bit PCM audio). Used for short clips.
-- POST /stt-long + GET /stt-long-transcript: asynchronous push-then-poll by
-  UUID, built for arbitrarily long audio ("хэдэн ч цагийн яриа" — any number
-  of hours). Used for anything at/above CHIMEGE_MAX_AUDIO_SEC.
+    POST /transcribe  — plain-text response, capped at 3MB (~98s of our
+                         16kHz mono 16-bit PCM WAV format)
 
-Chimege never returns word- or segment-level timestamps in either path.
-/stt-long-transcript does return a time-ordered array of
-`{done, transcription, duration}` chunks, though — no start/end per chunk,
-but ordered with a known duration each, so exact offsets are reconstructed
-by cumulative-summing durations and reusing the same shift/merge logic a
-client-side-chunked provider would need. That's what `merge_transcripts`
-below is for; it doesn't care whether the chunks came from our own splitting
-or the provider's.
+Chimege's real API also has an async long-audio path (POST /stt-long + GET
+/stt-long-transcript, push-then-poll by UUID, built for "any number of
+hours" of audio) — see docs/CHIMEGE.md. It's not used here: chunks produced
+by our own pause-splitting never exceed the sync endpoint's limits, so there
+is nothing left for it to do. Revisit that document if a case turns up where
+client-side chunking isn't the right call (e.g. wanting fewer, larger
+requests for silence-free audio).
+
+Chimege never returns word- or segment-level timestamps at all — a chunk's
+own [start, end] (known exactly, since *we* cut it) becomes that chunk's
+timing, and `synthesize_segments_from_text` further estimates sentence-level
+sub-splits *within* a chunk proportional to character count, for the rare
+case a single pause-bounded chunk still contains multiple sentences.
 
 Every Chimege-specific detail lives in this one file, driven by
-CHIMEGE_STT_URL / CHIMEGE_TOKEN / CHIMEGE_MAX_AUDIO_SEC from config. See
-docs/CHIMEGE.md for the confirmed contract. Everything downstream of
-`transcribe()` only ever sees a normalized `Transcript`.
+CHIMEGE_STT_URL / CHIMEGE_TOKEN / CHIMEGE_MAX_AUDIO_SEC from config.
+Everything downstream of `transcribe()` only ever sees a normalized
+`Transcript`.
 """
 from __future__ import annotations
 
@@ -50,8 +57,20 @@ BACKOFF_FACTOR = 2.0
 # even when duration-based routing already chose the short path.
 TRANSCRIBE_MAX_BYTES = 3 * 1024 * 1024
 
-POLL_INTERVAL_SEC = 1.5  # spec: poll no more often than every 1s
-POLL_TIMEOUT_MIN_SEC = 180.0  # spec: ~1h of audio takes ~4min to transcribe
+# Pause detection (ffmpeg silencedetect) — tuned for sentence-scale pauses,
+# not just big gaps. Will likely need tuning against real speech.
+SILENCE_NOISE_DB = "-30dB"
+SILENCE_MIN_DURATION_SEC = 0.35
+
+# Chimege's own /transcribe minimums are 0.5s duration and 50KB (~1.56s in
+# our WAV format) — stay safely above both so no chunk gets rejected as
+# "too short" (error 2003) or "too small" (error 2002).
+MIN_CHUNK_SEC = 2.0
+
+# Applied only on a forced (no-pause-found) cut, so a word split across that
+# boundary isn't lost entirely — genuine pause cuts don't need this, the gap
+# itself is the buffer.
+FORCED_CUT_OVERLAP_SEC = 0.4
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
@@ -80,9 +99,9 @@ T = TypeVar("T")
 
 
 # --------------------------------------------------------------------------
-# Pure helpers: timestamp shifting, merging, no-timing-info synthesis.
-# Kept dependency-free (no network, no subprocess) so they're unit-testable
-# with canned data.
+# Pure helpers: pause-boundary math, timestamp shifting, merging, no-timing
+# text synthesis. Kept dependency-free (no network, no subprocess) so
+# they're unit-testable with canned data.
 # --------------------------------------------------------------------------
 
 
@@ -91,6 +110,72 @@ def wav_duration_sec(wav_path: Path) -> float:
         frames = w.getnframes()
         rate = w.getframerate()
         return frames / float(rate) if rate else 0.0
+
+
+def parse_silencedetect_output(stderr_text: str) -> list[tuple[float, float]]:
+    """Parses ffmpeg `silencedetect` filter stderr into (start, end) intervals.
+
+    Lines look like:
+      [silencedetect @ 0x...] silence_start: 12.34
+      [silencedetect @ 0x...] silence_end: 13.01 | silence_duration: 0.67
+    A trailing silence_start with no matching silence_end is dropped (the
+    interval never closes, so it isn't usable as a cut point).
+    """
+    intervals: list[tuple[float, float]] = []
+    pending_start: float | None = None
+    for line in stderr_text.splitlines():
+        start_m = re.search(r"silence_start:\s*([\d.]+)", line)
+        if start_m:
+            pending_start = float(start_m.group(1))
+            continue
+        end_m = re.search(r"silence_end:\s*([\d.]+)", line)
+        if end_m and pending_start is not None:
+            intervals.append((pending_start, float(end_m.group(1))))
+            pending_start = None
+    return intervals
+
+
+def compute_pause_boundaries(
+    total_duration: float,
+    silences: list[tuple[float, float]],
+    max_chunk_sec: float,
+    min_chunk_sec: float = MIN_CHUNK_SEC,
+    overlap_sec: float = FORCED_CUT_OVERLAP_SEC,
+) -> list[tuple[float, float]]:
+    """"Almost sentence by sentence": cuts at the midpoint of every detected
+    pause. A stretch with no pause for longer than max_chunk_sec is force-cut
+    anyway (with a small overlap, since there's no safe gap to cut in), so
+    every returned chunk is guaranteed <= max_chunk_sec. Candidate cuts
+    closer together than min_chunk_sec are merged away, so no chunk is ever
+    too short for Chimege's own /transcribe minimums.
+    """
+    if total_duration <= 0:
+        return []
+
+    candidates = sorted((s + e) / 2 for s, e in silences if 0 < (s + e) / 2 < total_duration)
+
+    boundaries: list[list[float]] = []
+    start = 0.0
+    for cp in [*candidates, total_duration]:
+        if cp <= start:
+            continue
+        while cp - start > max_chunk_sec:
+            forced_end = start + max_chunk_sec
+            boundaries.append([start, forced_end])
+            start = max(start, forced_end - overlap_sec)
+        if cp <= start:
+            continue
+        if boundaries and cp - start < min_chunk_sec:
+            boundaries[-1][1] = cp  # too short on its own - fold into the previous chunk
+        else:
+            boundaries.append([start, cp])
+        start = cp
+
+    result = [(s, e) for s, e in boundaries]
+    if len(result) > 1 and (result[0][1] - result[0][0]) < min_chunk_sec:
+        result[1] = (result[0][0], result[1][1])  # first chunk had nothing before it to merge into
+        result = result[1:]
+    return result
 
 
 def shift_transcript(transcript: Transcript, offset_sec: float) -> Transcript:
@@ -146,9 +231,10 @@ def merge_transcripts(chunk_results: list[tuple[float, Transcript]]) -> Transcri
 
 
 def synthesize_segments_from_text(text: str, duration_sec: float) -> list[Segment]:
-    """Chimege never returns word/segment timings (either endpoint): splits on
-    sentence boundaries and allocates time proportional to each sentence's
-    share of the total character count.
+    """Chimege never returns word/segment timings: splits a chunk's text on
+    sentence boundaries and allocates that chunk's (exactly known) duration
+    proportional to each sentence's share of the character count — only
+    needed when a single pause-bounded chunk still contains >1 sentence.
     """
     text = text.strip()
     if not text or duration_sec <= 0:
@@ -183,11 +269,6 @@ def text_to_transcript(text: str, duration_sec: float, language: str = "mn") -> 
     return Transcript(language=language, segments=segments, full_text=text.strip(), timings_estimated=True)
 
 
-def poll_timeout_sec(duration_sec: float) -> float:
-    """~1h of audio transcribes in ~4min per the spec; scale with a healthy margin."""
-    return max(POLL_TIMEOUT_MIN_SEC, duration_sec * 0.5)
-
-
 # --------------------------------------------------------------------------
 # The client itself.
 # --------------------------------------------------------------------------
@@ -214,37 +295,32 @@ class ChimegeClient:
         if not self._config.url or not self._config.token:
             raise ChimegeError("CHIMEGE_STT_URL / CHIMEGE_TOKEN are not configured")
 
-        duration = wav_duration_sec(wav_path)
-        size = wav_path.stat().st_size
+        total_duration = wav_duration_sec(wav_path)
 
-        if duration <= self._config.max_audio_sec and size <= TRANSCRIBE_MAX_BYTES:
+        if total_duration <= self._config.max_audio_sec:
             text = await self._request_with_retry(self._transcribe_short, wav_path)
-            return text_to_transcript(text, duration)
+            return text_to_transcript(text, total_duration)
 
-        return await self._transcribe_long(wav_path, duration)
+        return await self._transcribe_in_pause_chunks(wav_path, total_duration)
 
-    async def _transcribe_long(self, wav_path: Path, duration: float) -> Transcript:
-        push_result = await self._request_with_retry(self._stt_long_push, wav_path)
-        job_uuid = push_result["uuid"]
+    async def _transcribe_in_pause_chunks(self, wav_path: Path, total_duration: float) -> Transcript:
+        silences = await self._detect_silences(wav_path)
+        boundaries = compute_pause_boundaries(total_duration, silences, self._config.max_audio_sec)
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + poll_timeout_sec(duration)
-        while True:
-            items = await self._request_with_retry(self._stt_long_poll, job_uuid)
-            if items and all(item.get("done") for item in items):
-                chunk_results: list[tuple[float, Transcript]] = []
-                offset = 0.0
-                for item in items:
-                    chunk_duration = float(item.get("duration") or 0.0)
-                    chunk_transcript = text_to_transcript(item.get("transcription", ""), chunk_duration)
-                    chunk_results.append((offset, chunk_transcript))
-                    offset += chunk_duration
-                return merge_transcripts(chunk_results)
-
-            if loop.time() > deadline:
-                timeout = poll_timeout_sec(duration)
-                raise ChimegeError(f"Chimege stt-long job {job_uuid} did not finish within {timeout:.0f}s")
-            await asyncio.sleep(POLL_INTERVAL_SEC)
+        workdir = wav_path.parent / f"{wav_path.stem}_chunks"
+        workdir.mkdir(parents=True, exist_ok=True)
+        try:
+            chunk_results: list[tuple[float, Transcript]] = []
+            for i, (start, end) in enumerate(boundaries):
+                chunk_path = workdir / f"chunk_{i:03d}.wav"
+                await self._extract_chunk(wav_path, chunk_path, start, end)
+                text = await self._request_with_retry(self._transcribe_short, chunk_path)
+                chunk_results.append((start, text_to_transcript(text, end - start)))
+            return merge_transcripts(chunk_results)
+        finally:
+            for f in workdir.glob("*.wav"):
+                f.unlink(missing_ok=True)
+            workdir.rmdir()
 
     async def _request_with_retry(self, call: Callable[..., Awaitable[T]], *args: object) -> T:
         last_error: Exception | None = None
@@ -279,18 +355,43 @@ class ChimegeClient:
         response.raise_for_status()
         return response.text
 
-    async def _stt_long_push(self, wav_path: Path) -> dict:
-        headers = {"Token": self._config.token, "Content-Type": "audio/wav"}
-        data = wav_path.read_bytes()
-        response = await self._client.post(f"{self._config.url}/stt-long", headers=headers, content=data)
-        response.raise_for_status()
-        return response.json()
+    async def _detect_silences(self, wav_path: Path) -> list[tuple[float, float]]:
+        from app.video.ffmpeg import discover_ffmpeg
 
-    async def _stt_long_poll(self, job_uuid: str) -> list[dict]:
-        headers = {"Token": self._config.token, "UUID": job_uuid}
-        response = await self._client.get(f"{self._config.url}/stt-long-transcript", headers=headers)
-        response.raise_for_status()
-        return response.json()
+        binaries = discover_ffmpeg()
+        if binaries.ffmpeg is None:
+            logger.warning("FFmpeg not available for pause detection; falling back to fixed-length chunking")
+            return []
+        args = [
+            str(binaries.ffmpeg), "-hide_banner", "-i", str(wav_path),
+            "-af", f"silencedetect=noise={SILENCE_NOISE_DB}:d={SILENCE_MIN_DURATION_SEC}",
+            "-f", "null", "-",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        return parse_silencedetect_output(stderr.decode(errors="replace"))
+
+    async def _extract_chunk(self, wav_path: Path, out_path: Path, start: float, end: float) -> None:
+        from app.video.ffmpeg import discover_ffmpeg
+
+        binaries = discover_ffmpeg()
+        if binaries.ffmpeg is None:
+            raise ChimegeError("FFmpeg not available for audio chunking")
+        args = [
+            str(binaries.ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(wav_path),
+            "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+            "-c", "copy",
+            str(out_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise ChimegeError(f"Audio chunk extraction failed: {stderr.decode(errors='replace')[-300:]}")
 
 
 def _describe_http_error(e: httpx.HTTPStatusError) -> str:
