@@ -7,6 +7,7 @@ chunk's start offset to its returned timestamps before merging.
 """
 from __future__ import annotations
 
+import itertools
 import wave
 
 import httpx
@@ -15,6 +16,7 @@ import pytest
 from app.models import Segment, Transcript
 from app.stt.chimege_client import (
     MIN_CHUNK_SEC,
+    TARGET_CHUNK_MIN_SEC,
     ChimegeClient,
     ChimegeConfig,
     ChimegeError,
@@ -22,6 +24,7 @@ from app.stt.chimege_client import (
     merge_transcripts,
     parse_silencedetect_output,
     shift_transcript,
+    split_into_sentences,
     synthesize_segments_from_text,
     text_to_transcript,
     wav_duration_sec,
@@ -97,6 +100,27 @@ def test_compute_pause_boundaries_merges_too_short_first_chunk_forward():
 
 def test_compute_pause_boundaries_zero_duration():
     assert compute_pause_boundaries(0.0, silences=[], max_chunk_sec=55.0) == []
+
+
+def test_compute_pause_boundaries_forced_cut_tail_stays_short_instead_of_ballooning():
+    """A forced cut can leave a leftover tail shorter than min_chunk_sec.
+    Folding it into the previous chunk would push that chunk past
+    max_chunk_sec — it must stay a short trailing chunk instead.
+    """
+    # No pauses at all -> one forced cut at max_chunk_sec, leaving a short
+    # tail below TARGET_CHUNK_MIN_SEC but still above Chimege's real minimum.
+    # This is a pure-function test of compute_pause_boundaries itself, so
+    # max_chunk_sec here is just a test value, not tied to any client config.
+    max_chunk_sec = 8.0
+    total = max_chunk_sec + 2.4
+    boundaries = compute_pause_boundaries(
+        total, silences=[], max_chunk_sec=max_chunk_sec, min_chunk_sec=TARGET_CHUNK_MIN_SEC
+    )
+
+    assert boundaries[0] == (0.0, max_chunk_sec)
+    assert boundaries[-1][1] == total
+    for start, end in boundaries:
+        assert end - start <= max_chunk_sec + 1e-9
 
 
 def test_compute_pause_boundaries_every_chunk_at_least_min_chunk_sec():
@@ -209,6 +233,18 @@ def test_synthesize_segments_zero_duration():
     assert synthesize_segments_from_text("hello.", duration_sec=0.0) == []
 
 
+def test_split_into_sentences_basic():
+    assert split_into_sentences("Hi. This is a test.") == ["Hi.", "This is a test."]
+
+
+def test_split_into_sentences_no_terminal_punctuation_returns_whole_text():
+    assert split_into_sentences("just one clause") == ["just one clause"]
+
+
+def test_split_into_sentences_empty_text():
+    assert split_into_sentences("") == []
+
+
 def test_text_to_transcript_marks_timings_estimated():
     transcript = text_to_transcript("Сайн байна уу.", duration_sec=3.0)
     assert transcript.timings_estimated is True
@@ -243,19 +279,77 @@ def _fake_client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-@pytest.mark.asyncio
-async def test_transcribe_short_uses_transcribe_endpoint_and_token_header(tmp_path):
-    wav_path = tmp_path / "short.wav"
-    _write_wav(wav_path, duration_sec=2.0)
-
-    seen = {}
+def _stt_long_handler(texts, seen: dict | None = None):
+    """Simulates /stt-long (push, returns a uuid) + /stt-long-transcript
+    (poll, always done on first poll) against `texts`, an iterator of
+    transcription strings - one per push, in push order. If `seen` is
+    given, the last push request is recorded into it (url/headers) for
+    assertions.
+    """
+    uuid_to_text: dict[str, str] = {}
+    push_count = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        seen["token"] = request.headers.get("token")
-        seen["punctuate"] = request.headers.get("punctuate")
-        seen["content_type"] = request.headers.get("content-type")
-        return httpx.Response(200, text="sain baina uu")
+        if request.url.path.endswith("/stt-long"):
+            push_count["n"] += 1
+            job_uuid = f"uuid-{push_count['n']}"
+            uuid_to_text[job_uuid] = next(texts)
+            if seen is not None:
+                seen["url"] = str(request.url)
+                seen["token"] = request.headers.get("token")
+                seen["content_type"] = request.headers.get("content-type")
+            return httpx.Response(200, json={"uuid": job_uuid, "duration": 1.0})
+
+        assert request.url.path.endswith("/stt-long-transcript")
+        job_uuid = request.headers.get("uuid")
+        return httpx.Response(200, json={"done": True, "transcription": uuid_to_text[job_uuid], "duration": 1.0})
+
+    return handler
+
+
+@pytest.fixture(autouse=True)
+def _fast_sleep(monkeypatch):
+    """_transcribe_chunk() sleeps STT_LONG_POLL_INTERVAL_SEC before every
+    poll, and _request_with_retry sleeps between retries - skip both so the
+    suite stays fast, without changing call counts/order.
+    """
+    import app.stt.chimege_client as mod
+
+    orig_sleep = mod.asyncio.sleep
+    monkeypatch.setattr(mod.asyncio, "sleep", lambda _s: orig_sleep(0))
+
+
+def _patch_chunking(monkeypatch, silences: list[tuple[float, float]] | None = None) -> None:
+    """Every transcribe() call now goes through pause-chunking, which calls
+    real ffmpeg via _detect_silences/_extract_chunk - patch both so plain
+    orchestration tests (retry policy, error mapping, etc.) stay hermetic.
+    """
+
+    async def fake_detect_silences(self, path):
+        return silences or []
+
+    async def fake_extract_chunk(self, wav_path, out_path, start, end):
+        out_path.write_bytes(b"fake-chunk-audio")
+
+    monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
+    monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
+
+
+@pytest.mark.asyncio
+async def test_transcribe_uses_stt_long_endpoint_and_token_header(tmp_path, monkeypatch):
+    """Even audio well under CHIMEGE_MAX_AUDIO_SEC still goes through the
+    pause-chunking path (a single chunk, since it's shorter than the 5-8s
+    target) rather than being sent whole - every file gets pause-split. And
+    every chunk goes via push (/stt-long) + poll (/stt-long-transcript), not
+    the synchronous /transcribe endpoint - see chimege_client.py's module
+    docstring for why (a real token 403'd on /transcribe but not /stt-long).
+    """
+    wav_path = tmp_path / "short.wav"
+    _write_wav(wav_path, duration_sec=2.0)
+    _patch_chunking(monkeypatch)
+
+    seen: dict = {}
+    handler = _stt_long_handler(iter(["sain baina uu"]), seen=seen)
 
     client = ChimegeClient(
         ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok-123", max_audio_sec=55),
@@ -264,9 +358,8 @@ async def test_transcribe_short_uses_transcribe_endpoint_and_token_header(tmp_pa
     transcript = await client.transcribe(wav_path)
     await client.aclose()
 
-    assert seen["url"] == "https://api.chimege.com/v1.2/transcribe"
+    assert seen["url"] == "https://api.chimege.com/v1.2/stt-long"
     assert seen["token"] == "tok-123"  # raw token, not "Bearer tok-123"
-    assert seen["punctuate"] == "true"
     assert seen["content_type"] == "application/octet-stream"
     assert transcript.timings_estimated is True
     assert transcript.full_text == "sain baina uu"
@@ -294,15 +387,11 @@ async def test_transcribe_long_audio_splits_into_pause_chunks_with_correct_offse
     monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
     monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
 
-    call_texts = iter(["Эхний өгүүлбэр.", "Хоёр дахь өгүүлбэр."])
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=next(call_texts))
+    handler = _stt_long_handler(iter(["Эхний өгүүлбэр.", "Хоёр дахь өгүүлбэр."]))
 
     client = ChimegeClient(
-        # max_audio_sec is both "trigger chunking above this" and the
-        # per-chunk max_chunk_sec — needs to be > 5.0 or the forced-cut
-        # fallback would add extra cuts before reaching the fake pause.
+        # max_audio_sec=6 here is comfortably above the 5s real pause found
+        # at 4.9-5.1s, so the genuine pause drives the split, not a forced cut.
         ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=6),
         http_client=_fake_client(handler),
     )
@@ -331,8 +420,7 @@ async def test_transcribe_pause_chunks_cleans_up_temp_files(tmp_path, monkeypatc
     monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
     monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="ok")
+    handler = _stt_long_handler(itertools.repeat("ok"))
 
     client = ChimegeClient(
         ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=4),
@@ -345,46 +433,89 @@ async def test_transcribe_pause_chunks_cleans_up_temp_files(tmp_path, monkeypatc
     assert not workdir.exists()
 
 
+@pytest.mark.asyncio
+async def test_transcribe_forced_cut_ceiling_matches_configured_max_audio_sec(tmp_path, monkeypatch):
+    """Continuous, pause-free speech should only get force-cut at
+    max_audio_sec (the configured Chimege per-request ceiling) — not chopped
+    into small pieces regardless of how long someone actually talks without
+    pausing. Real pauses (tested elsewhere) still drive finer splitting when
+    they occur; this covers the no-pause fallback specifically.
+    """
+    wav_path = tmp_path / "long.wav"
+    _write_wav(wav_path, duration_sec=20.0)
+
+    async def fake_detect_silences(self, path):
+        return []  # no pauses -> every cut is a forced cut at the ceiling
+
+    boundaries_seen = []
+
+    async def fake_extract_chunk(self, wav_path, out_path, start, end):
+        boundaries_seen.append((start, end))
+        out_path.write_bytes(b"fake")
+
+    monkeypatch.setattr(ChimegeClient, "_detect_silences", fake_detect_silences)
+    monkeypatch.setattr(ChimegeClient, "_extract_chunk", fake_extract_chunk)
+
+    handler = _stt_long_handler(itertools.repeat("ok"))
+
+    client = ChimegeClient(
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=15),
+        http_client=_fake_client(handler),
+    )
+    await client.transcribe(wav_path)
+    await client.aclose()
+
+    assert len(boundaries_seen) >= 2
+    for start, end in boundaries_seen:
+        assert end - start <= 15.0 + 1e-9
+    # At least one chunk should actually reach close to the ceiling, not
+    # stay artificially tiny the way the old 8s hardcoded target did.
+    assert max(end - start for start, end in boundaries_seen) > 10.0
+
+
 # --------------------------------------------------------------------------
 # Retry policy and error mapping.
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_transcribe_retries_on_503_then_succeeds(tmp_path):
+async def test_transcribe_retries_on_503_then_succeeds(tmp_path, monkeypatch):
+    """A 503 on the push (/stt-long) request is retried; _request_with_retry
+    wraps the whole push+poll unit, so a retry re-pushes from scratch rather
+    than re-polling an existing job — acceptable since chunks are cheap to
+    resubmit (see docs/CHIMEGE.md's async-overhead trade-off note).
+    """
     wav_path = tmp_path / "short.wav"
     _write_wav(wav_path, duration_sec=1.0)
+    _patch_chunking(monkeypatch)
 
     attempts = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        attempts["n"] += 1
-        if attempts["n"] < 3:
-            return httpx.Response(503)
-        return httpx.Response(200, text="ok")
+        if request.url.path.endswith("/stt-long"):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                return httpx.Response(503)
+            return httpx.Response(200, json={"uuid": "uuid-1", "duration": 1.0})
+        assert request.url.path.endswith("/stt-long-transcript")
+        return httpx.Response(200, json={"done": True, "transcription": "ok", "duration": 1.0})
 
     client = ChimegeClient(
         ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=55),
         http_client=_fake_client(handler),
     )
-    import app.stt.chimege_client as mod
-
-    orig_sleep = mod.asyncio.sleep
-    mod.asyncio.sleep = lambda _s: orig_sleep(0)
-    try:
-        transcript = await client.transcribe(wav_path)
-    finally:
-        mod.asyncio.sleep = orig_sleep
-        await client.aclose()
+    transcript = await client.transcribe(wav_path)
+    await client.aclose()
 
     assert attempts["n"] == 3
     assert transcript.full_text == "ok"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_does_not_retry_on_400(tmp_path):
+async def test_transcribe_does_not_retry_on_400(tmp_path, monkeypatch):
     wav_path = tmp_path / "short.wav"
     _write_wav(wav_path, duration_sec=1.0)
+    _patch_chunking(monkeypatch)
 
     attempts = {"n": 0}
 
@@ -404,9 +535,10 @@ async def test_transcribe_does_not_retry_on_400(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transcribe_403_maps_invalid_token_error_code(tmp_path):
+async def test_transcribe_403_maps_invalid_token_error_code(tmp_path, monkeypatch):
     wav_path = tmp_path / "short.wav"
     _write_wav(wav_path, duration_sec=1.0)
+    _patch_chunking(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, headers={"Error-Code": "1000"}, text="forbidden")
@@ -418,6 +550,28 @@ async def test_transcribe_403_maps_invalid_token_error_code(tmp_path):
     with pytest.raises(ChimegeError, match="Invalid API token"):
         await client.transcribe(wav_path)
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_chunk_text_returns_raw_text_and_max_audio_sec_is_exposed(tmp_path):
+    """These two are the reusable primitives app.stt.pipeline builds its
+    own VAD-driven chunking on top of, instead of chimege_client's internal
+    silencedetect-based chunking.
+    """
+    wav_path = tmp_path / "chunk.wav"
+    wav_path.write_bytes(b"fake-chunk-audio")
+    handler = _stt_long_handler(iter(["hello"]))
+
+    client = ChimegeClient(
+        ChimegeConfig(url="https://api.chimege.com/v1.2", token="tok", max_audio_sec=42),
+        http_client=_fake_client(handler),
+    )
+    assert client.max_audio_sec == 42
+
+    text = await client.transcribe_chunk_text(wav_path)
+    await client.aclose()
+
+    assert text == "hello"
 
 
 @pytest.mark.asyncio

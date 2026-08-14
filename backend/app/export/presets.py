@@ -44,13 +44,21 @@ def build_video_encoder_args(encoder: str, crf: int, preset: str) -> list[str]:
     already confirmed by app.video.capabilities.probe_hwaccel_encoder — this
     function does not itself validate that the encoder is available.
     """
+    # yuv420p is forced on every branch, not just libx264: each clip is
+    # already normalized to yuv420p going in (see normalize.build_video_filter),
+    # but the xfade/subtitle-burn filtergraphs re-encode and can upconvert
+    # chroma (observed: yuv444p) without an explicit target format. A
+    # hwaccel encoder will happily encode that into a "High 4:4:4 Predictive"
+    # stream that only permissive decoders (VLC/ffmpeg-based) can play -
+    # every standard player (Windows Media Player, phones, browsers) fails
+    # on it outright, which is indistinguishable from "broken export".
     if encoder == "h264_nvenc":
         nvenc_preset = _NVENC_PRESET_MAP.get(preset, "p4")
-        return ["-c:v", "h264_nvenc", "-cq", str(crf), "-preset", nvenc_preset]
+        return ["-c:v", "h264_nvenc", "-cq", str(crf), "-preset", nvenc_preset, "-pix_fmt", "yuv420p"]
     if encoder == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-global_quality", str(crf), "-preset", preset]
+        return ["-c:v", "h264_qsv", "-global_quality", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
     if encoder == "h264_amf":
-        return ["-c:v", "h264_amf", "-qp_i", str(crf), "-qp_p", str(crf), "-quality", preset]
+        return ["-c:v", "h264_amf", "-qp_i", str(crf), "-qp_p", str(crf), "-quality", preset, "-pix_fmt", "yuv420p"]
     return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
 
 

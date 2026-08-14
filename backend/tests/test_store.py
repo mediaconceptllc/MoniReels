@@ -1,7 +1,10 @@
+import json
+
 import pytest
 
-from app.models import Project
+from app.models import SCHEMA_VERSION, Project
 from app.store import ProjectNotFound, delete_project, list_projects, load_project, save_project
+from app.utils.paths import project_dir
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +24,41 @@ def test_save_and_load_roundtrip():
     loaded = load_project(project.id)
     assert loaded.id == project.id
     assert loaded.name == "My Project"
-    assert loaded.schema_version == 1
+    assert loaded.schema_version == SCHEMA_VERSION
+
+
+def test_load_migrates_v1_youtube_object_to_list():
+    """v1 on-disk files have suggestions.youtube as a single object-or-null;
+    v2 expects a list (0 or 3 items) - see models.py's _migrate_v1_to_v2.
+    """
+    project = Project(name="Old Project")
+    save_project(project)
+    path = project_dir(project.id) / "project.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["schema_version"] = 1
+    data["suggestions"] = {
+        "shorts": [],
+        "youtube": {"title": "t", "description": "d", "ranges": [], "total_duration": 0.0},
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_project(project.id)
+    assert loaded.schema_version == SCHEMA_VERSION
+    assert loaded.suggestions.youtube == [loaded.suggestions.youtube[0]]
+    assert loaded.suggestions.youtube[0].title == "t"
+
+
+def test_load_migrates_v1_null_youtube_to_empty_list():
+    project = Project(name="Old Project 2")
+    save_project(project)
+    path = project_dir(project.id) / "project.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["schema_version"] = 1
+    data["suggestions"] = {"shorts": [], "youtube": None}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_project(project.id)
+    assert loaded.suggestions.youtube == []
 
 
 def test_load_missing_project_raises():

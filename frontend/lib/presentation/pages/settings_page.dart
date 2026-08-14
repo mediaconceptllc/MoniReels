@@ -196,7 +196,7 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
       children: [
         _TokenField(
           label: 'Chimege token',
-          hint: settings.chimegeTokenSet ? 'Currently set — enter a new value to replace it' : 'Not set',
+          isSet: settings.chimegeTokenSet,
           controller: _chimegeTokenController,
           onSave: () => _saveField(
             () => repo.updateSettings(chimegeToken: _chimegeTokenController.text.trim()),
@@ -206,7 +206,7 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
         const SizedBox(height: 12),
         _TokenField(
           label: 'OpenAI API key',
-          hint: settings.openaiApiKeySet ? 'Currently set — enter a new value to replace it' : 'Not set',
+          isSet: settings.openaiApiKeySet,
           controller: _openaiKeyController,
           onSave: () => _saveField(
             () => repo.updateSettings(openaiApiKey: _openaiKeyController.text.trim()),
@@ -221,11 +221,10 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
           onSave: () => _saveField(() => repo.updateSettings(openaiModel: _openaiModelController.text.trim())),
         ),
         const SizedBox(height: 8),
-        ExpansionTile(
-          title: const Text('Advanced'),
-          initiallyExpanded: _expandedAdvanced,
-          onExpansionChanged: (v) => setState(() => _expandedAdvanced = v),
-          tilePadding: EdgeInsets.zero,
+        _CollapsibleSection(
+          title: 'Advanced',
+          expanded: _expandedAdvanced,
+          onToggle: () => setState(() => _expandedAdvanced = !_expandedAdvanced),
           children: [
             _PlainField(
               label: 'Chimege STT base URL',
@@ -262,9 +261,14 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
 }
 
 class _TokenField extends StatefulWidget {
-  const _TokenField({required this.label, required this.hint, required this.controller, required this.onSave});
+  const _TokenField({
+    required this.label,
+    required this.isSet,
+    required this.controller,
+    required this.onSave,
+  });
   final String label;
-  final String hint;
+  final bool isSet;
   final TextEditingController controller;
   final VoidCallback onSave;
 
@@ -280,22 +284,104 @@ class _TokenFieldState extends State<_TokenField> {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // A hidden field left empty after saving still *looks* empty at a
+        // glance (hintText is faint and disappears once you start typing),
+        // which reads as "did my token even save?" - this status line is
+        // separate from the field itself and never depends on its content,
+        // so it stays visible and unambiguous regardless of what's typed.
         Expanded(
-          child: TextField(
-            controller: widget.controller,
-            obscureText: _obscure,
-            decoration: InputDecoration(
-              labelText: widget.label,
-              hintText: widget.hint,
-              suffixIcon: IconButton(
-                icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18),
-                onPressed: () => setState(() => _obscure = !_obscure),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    widget.isSet ? Icons.check_circle : Icons.radio_button_unchecked,
+                    size: 14,
+                    color: widget.isSet ? Colors.greenAccent : Colors.white38,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    widget.isSet ? '${widget.label}: key saved' : '${widget.label}: not set',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: widget.isSet ? Colors.greenAccent : Colors.white54,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
               ),
-            ),
+              const SizedBox(height: 4),
+              TextField(
+                controller: widget.controller,
+                obscureText: _obscure,
+                decoration: InputDecoration(
+                  labelText: widget.label,
+                  hintText: widget.isSet ? 'Enter a new value to replace it' : 'Paste key/token here',
+                  suffixIcon: IconButton(
+                    icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility, size: 18),
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
         const SizedBox(width: 12),
-        FilledButton(onPressed: widget.onSave, child: const Text('Save')),
+        Padding(
+          padding: const EdgeInsets.only(top: 26),
+          child: FilledButton(onPressed: widget.onSave, child: const Text('Save')),
+        ),
+      ],
+    );
+  }
+}
+
+/// Deliberately not ExpansionTile: expanding/collapsing it fires a
+/// SemanticsService accessibility announcement that crashes on Windows in
+/// Flutter 3.38+ ("Announce message 'viewId' property must be a
+/// FlutterViewId", https://github.com/flutter/flutter/issues/179563).
+/// This does the same collapsible-section job without going anywhere near
+/// that code path.
+class _CollapsibleSection extends StatelessWidget {
+  const _CollapsibleSection({
+    required this.title,
+    required this.expanded,
+    required this.onToggle,
+    required this.children,
+  });
+  final String title;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: onToggle,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                Icon(expanded ? Icons.expand_less : Icons.expand_more, size: 20),
+                const SizedBox(width: 4),
+                Text(title, style: Theme.of(context).textTheme.titleSmall),
+              ],
+            ),
+          ),
+        ),
+        AnimatedCrossFade(
+          firstChild: const SizedBox(width: double.infinity),
+          secondChild: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
+          ),
+          crossFadeState: expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+          duration: const Duration(milliseconds: 150),
+        ),
       ],
     );
   }

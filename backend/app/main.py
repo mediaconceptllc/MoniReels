@@ -74,9 +74,20 @@ async def _idle_shutdown_watcher(idle_shutdown_sec: int) -> None:
     This is the fallback to a Windows Job Object for making sure the backend
     never survives as an orphan if the Flutter shell is killed without a
     clean shutdown signal.
+
+    A long-running job (e.g. transcribing a long video through many small
+    Chimege chunks) makes outbound HTTP calls, not inbound ones — it never
+    touches _last_request_time, so without this check the watcher could kill
+    the process mid-job the moment the frontend stops polling for that long.
+    Confirmed as a real near-miss: a real transcription reached its very
+    last chunk right as this watcher's timer was about to fire.
     """
+    from app.jobs.manager import get_job_manager
+
     while True:
         await asyncio.sleep(5)
+        if get_job_manager().has_active_jobs():
+            continue
         if time.time() - _last_request_time > idle_shutdown_sec:
             logger.warning("Idle timeout (%ss) reached in managed mode; shutting down.", idle_shutdown_sec)
             sys.exit(0)

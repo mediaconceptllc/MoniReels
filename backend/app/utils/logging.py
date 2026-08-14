@@ -26,6 +26,19 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # Spawned headless by the Flutter shell, sys.stdout's encoding defaults to
+    # the legacy Windows codepage (cp1252) rather than UTF-8. Any log message
+    # containing non-Latin1 text (Mongolian/Cyrillic suggestion titles, e.g.
+    # render_all_ideas logging a title) then raises UnicodeEncodeError out of
+    # the handler; logging's fallback error path tries to print that
+    # traceback to stderr, which nothing ever drains on the Dart side - the
+    # write blocks on the full pipe and freezes the entire single-threaded
+    # event loop. Reconfiguring to UTF-8 with a replacing error handler means
+    # a log write can never raise on its own text again.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     root.addHandler(console)

@@ -1,6 +1,8 @@
 """Project CRUD + import (probe/thumbnail runs as a background job)."""
 from __future__ import annotations
 
+import asyncio
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,13 +47,22 @@ async def create_project(
         await handle.set_progress(0.1, stage="probing", message="Reading video metadata")
         raw = await probe_video(binaries.ffprobe, video_path)  # type: ignore[arg-type]
 
+        # Copies the source video into the project directory so the project
+        # is self-contained (still works if the original file is moved,
+        # renamed, or the source drive is unavailable later) — everything
+        # downstream (thumbnail, transcription, export) reads project.video.path,
+        # so pointing it at the copy is transparent to the rest of the app.
+        await handle.set_progress(0.3, stage="copying", message="Copying video into project")
+        dest_video_path = project_dir(project.id) / f"source{video_path.suffix}"
+        await asyncio.to_thread(shutil.copy2, video_path, dest_video_path)
+
         thumb_path = project_dir(project.id) / "thumbnail.jpg"
-        await handle.set_progress(0.5, stage="thumbnail", message="Extracting thumbnail")
+        await handle.set_progress(0.7, stage="thumbnail", message="Extracting thumbnail")
         seek = min(1.0, max(0.0, raw["duration_sec"] / 2))
-        await generate_thumbnail(binaries.ffmpeg, video_path, thumb_path, at_sec=seek)  # type: ignore[arg-type]
+        await generate_thumbnail(binaries.ffmpeg, dest_video_path, thumb_path, at_sec=seek)  # type: ignore[arg-type]
 
         video_meta = VideoMeta(
-            path=str(video_path),
+            path=str(dest_video_path),
             duration_sec=raw["duration_sec"],
             width=raw["width"],
             height=raw["height"],

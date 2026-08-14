@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.timeline.models import Clip, Transition
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class VideoMeta(BaseModel):
@@ -48,31 +48,48 @@ class Transcript(BaseModel):
     timings_estimated: bool = False
 
 
+class Cut(BaseModel):
+    """One piece of a ShortIdea's edit — 3-5 of these, each a separate
+    non-contiguous range from the source video, assembled in the order
+    given (not necessarily chronological order in the source)."""
+
+    start: float
+    end: float
+    role: str  # "hook" | "context" | "proof" | "payoff"
+    reason: str
+
+
 class ShortIdea(BaseModel):
     id: str
     title: str
-    hook: str
-    description: str
-    start: float
-    end: float
+    hook_text: str  # on-screen text for the first 3 seconds
+    hook_quote: str  # verbatim transcript substring the hook is drawn from
+    cuts: list[Cut]  # 3-5, ordered as they appear in the final edit
+    on_screen_texts: list[str] = Field(default_factory=list)
+    b_roll: list[str] = Field(default_factory=list)
+    caption: str
+    hashtags: list[str] = Field(default_factory=list)
+    why_it_works: str
 
 
 class KeepRange(BaseModel):
     start: float
     end: float
-    reason: str
+    reason: str = ""
 
 
 class YoutubePlan(BaseModel):
     title: str
-    description: str
+    throughline: str
     ranges: list[KeepRange]
     total_duration: float
 
 
 class Suggestions(BaseModel):
     shorts: list[ShortIdea]  # always exactly 3, enforced by post-validation
-    youtube: YoutubePlan | None = None
+    # 0 items (video < 20min) or exactly 3 (video >= 20min), enforced by
+    # post-validation. Empty list, not None, when not wanted.
+    youtube: list[YoutubePlan] = Field(default_factory=list)
 
 
 class SubtitleStyle(BaseModel):
@@ -114,15 +131,58 @@ class Project(BaseModel):
     export: ExportSettings = Field(default_factory=ExportSettings)
 
 
+def _migrate_v1_to_v2(data: dict) -> dict:
+    """v1 suggestions.youtube was a single object-or-null; v2 is always a list
+    (0 or 3 items) to support multiple independent YouTube-highlight ideas.
+    """
+    suggestions = data.get("suggestions")
+    if suggestions is not None:
+        youtube = suggestions.get("youtube")
+        if youtube is None:
+            suggestions["youtube"] = []
+        elif isinstance(youtube, dict):
+            suggestions["youtube"] = [youtube]
+    return data
+
+
+def _migrate_v2_to_v3(data: dict) -> dict:
+    """v2 ShortIdea/YoutubePlan used a flat single-range shape (title/hook/
+    description/start/end, and youtube.description); v3 replaces shorts with
+    multi-cut edits (hook_text/hook_quote/cuts/on_screen_texts/b_roll/caption/
+    hashtags/why_it_works) and renames youtube.description to .throughline.
+    There's no principled way to synthesize the new required short fields
+    from old data, so an old-shape suggestions block is simply cleared - the
+    user re-runs suggestion generation. (A youtube-only re-shape would be
+    possible, but shorts and youtube share one `suggestions` block and the
+    shorts side can't be salvaged, so the whole block goes.)
+    """
+    suggestions = data.get("suggestions")
+    if suggestions is None:
+        return data
+    shorts = suggestions.get("shorts") or []
+    if any("cuts" not in s for s in shorts):
+        data["suggestions"] = None
+        return data
+    for plan in suggestions.get("youtube") or []:
+        if "throughline" not in plan and "description" in plan:
+            plan["throughline"] = plan.pop("description")
+    return data
+
+
 def migrate_project_dict(data: dict) -> dict:
     """Upgrade an on-disk project.json to the current schema_version in place.
 
-    Stub: no migrations exist yet (schema_version is still 1). Add version-gated
-    transforms here as the schema evolves; never mutate old on-disk files directly.
+    Add version-gated transforms here as the schema evolves; never mutate old
+    on-disk files directly (callers only ever hold the migrated dict in memory).
     """
     version = data.get("schema_version", 1)
     if version == SCHEMA_VERSION:
         return data
-    # Future: if version == 1: data = _migrate_v1_to_v2(data); version = 2
+    if version == 1:
+        data = _migrate_v1_to_v2(data)
+        version = 2
+    if version == 2:
+        data = _migrate_v2_to_v3(data)
+        version = 3
     data["schema_version"] = SCHEMA_VERSION
     return data

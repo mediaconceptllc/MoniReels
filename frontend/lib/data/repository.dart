@@ -62,6 +62,10 @@ class Repository {
   Future<Result<String>> preview(String projectId) => _startJob('/projects/$projectId/preview');
   Future<Result<String>> export(String projectId) => _startJob('/projects/$projectId/export');
 
+  /// Renders one standalone output file per suggested idea (up to 3 reels +
+  /// up to 3 YouTube compilations) — the wizard's Step 3, no per-clip picking.
+  Future<Result<String>> exportAll(String projectId) => _startJob('/projects/$projectId/export-all');
+
   Future<Result<String>> _startJob(String path) async {
     final r = await _client.post(path);
     return r.when(ok: (v) => Ok((v as Map<String, dynamic>)['job_id'] as String), err: (e) => Err(e));

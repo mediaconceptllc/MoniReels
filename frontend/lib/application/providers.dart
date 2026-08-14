@@ -15,7 +15,26 @@ final backendLauncherProvider = Provider<BackendLauncher>((ref) => BackendLaunch
 /// Mutable so Settings can repoint at a different backend without restarting
 /// the app — the backend's actual port is only known once it's running
 /// (see spec §10), so this defaults to the common dev value.
-final apiClientProvider = Provider<ApiClient>((ref) => ApiClient(baseUrl: kDefaultBackendUrl));
+///
+/// Also wires up self-healing: if the backend has died mid-session (idle
+/// timeout, the app was closed and reopened, a crash), the next failed
+/// request re-runs BackendLauncher.ensureRunning() and retries once,
+/// instead of leaving every screen stuck on "Could not reach the backend"
+/// until the whole app is restarted.
+final apiClientProvider = Provider<ApiClient>((ref) {
+  final client = ApiClient(baseUrl: kDefaultBackendUrl);
+  client.onConnectionLost = () async {
+    try {
+      final launcher = ref.read(backendLauncherProvider);
+      final url = await launcher.ensureRunning(devUrl: Uri.parse(client.baseUrl));
+      ref.read(backendGenerationProvider.notifier).state++;
+      return url.toString();
+    } catch (_) {
+      return null;
+    }
+  };
+  return client;
+});
 
 final repositoryProvider = Provider<Repository>((ref) => Repository(ref.watch(apiClientProvider)));
 

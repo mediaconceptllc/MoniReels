@@ -8,6 +8,23 @@ httpx==0.28.1
 python-multipart==0.0.20
 aiofiles==24.1.0
 
+# audio separation / VAD (app/audio/) - CPU-only torch build to keep the
+# installer small; --extra-index-url adds PyTorch's CPU wheel index without
+# replacing PyPI for everything else. Model *weights* (htdemucs, silero-vad)
+# are downloaded on first use and cached under resolved_data_dir, not bundled.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchaudio==2.5.1+cpu
+demucs==4.0.1
+silero-vad==6.2.1
+# torchaudio has no working load/save backend on Windows without this -
+# confirmed via a real torchaudio.load/save round trip in this venv.
+soundfile==0.14.0
+# Loudness normalization (app/audio/normalize.py) - wraps ffmpeg's own
+# loudnorm (EBU R128) filter; uses the same ffmpeg binary this app already
+# discovers (see app/video/ffmpeg.py), not a bundled one of its own.
+ffmpeg-normalize==1.41.1
+
 # packaging
 pyinstaller==6.11.1
 

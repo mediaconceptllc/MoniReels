@@ -67,6 +67,13 @@ class JobManager:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def has_active_jobs(self) -> bool:
+        """True while any job's worker task hasn't finished (RUNNING or still
+        being scheduled) — `_run`'s finally clause pops `_tasks[job_id]` the
+        moment a job settles, so a non-empty map means real work in flight.
+        """
+        return bool(self._tasks)
+
     def start(self, worker: WorkerFunc) -> Job:
         job = Job(id=uuid.uuid4().hex)
         self._jobs[job.id] = job

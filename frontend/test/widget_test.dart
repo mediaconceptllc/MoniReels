@@ -18,7 +18,7 @@ class _FakeBackendLauncher extends BackendLauncher {
 }
 
 void main() {
-  testWidgets('App shell renders the nav rail with all pages', (WidgetTester tester) async {
+  testWidgets('Wizard opens on Step 1, ready for a video to be picked', (WidgetTester tester) async {
     // Override the backend-hitting providers so this test never opens a real
     // socket (Dio's IO client doesn't respect flutter_test's fake clock).
     await tester.pumpWidget(
@@ -50,16 +50,21 @@ void main() {
         child: const AiVideoEditorApp(),
       ),
     );
+    // Two pumps: AppBootstrap now waits for its own _launch() (the fake
+    // launcher resolving) before it even starts watching healthProvider,
+    // so getting from the initial loading screen to WizardPage takes two
+    // sequential async resolutions rather than one.
+    await tester.pump();
     await tester.pump();
 
-    expect(find.text('Dashboard'), findsWidgets);
-    expect(find.text('Settings'), findsWidgets);
-    expect(find.text('autoReel'), findsWidgets);
+    expect(find.text('1. Import & Analyze'), findsOneWidget);
+    expect(find.text('Pick a video to get started'), findsOneWidget);
+    expect(find.text('Choose video file...'), findsOneWidget);
     expect(
       find.byWidgetPredicate(
         (w) => w is Image && w.image is AssetImage && (w.image as AssetImage).assetName == 'assets/icon_mark.png',
       ),
-      findsWidgets,
+      findsOneWidget,
     );
   });
 }

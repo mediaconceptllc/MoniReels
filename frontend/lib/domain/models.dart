@@ -129,40 +129,90 @@ class Transcript {
   final bool timingsEstimated;
 }
 
+/// One piece of a ShortIdea's edit — 3-5 of these, each a separate
+/// non-contiguous range from the source video, assembled in the order
+/// given (not necessarily chronological order in the source).
+class Cut {
+  Cut({required this.start, required this.end, required this.role, required this.reason});
+
+  factory Cut.fromJson(Map<String, dynamic> j) => Cut(
+        start: _d(j['start']),
+        end: _d(j['end']),
+        role: j['role'] as String, // "hook" | "context" | "proof" | "payoff"
+        reason: j['reason'] as String,
+      );
+
+  Map<String, dynamic> toJson() => {'start': start, 'end': end, 'role': role, 'reason': reason};
+
+  final double start;
+  final double end;
+  final String role;
+  final String reason;
+
+  double get duration => end - start;
+}
+
 class ShortIdea {
   ShortIdea({
     required this.id,
     required this.title,
-    required this.hook,
-    required this.description,
-    required this.start,
-    required this.end,
+    required this.hookText,
+    required this.hookQuote,
+    required this.cuts,
+    this.onScreenTexts = const [],
+    this.bRoll = const [],
+    required this.caption,
+    this.hashtags = const [],
+    required this.whyItWorks,
   });
 
   factory ShortIdea.fromJson(Map<String, dynamic> j) => ShortIdea(
         id: j['id'] as String,
         title: j['title'] as String,
-        hook: j['hook'] as String,
-        description: j['description'] as String,
-        start: _d(j['start']),
-        end: _d(j['end']),
+        hookText: j['hook_text'] as String,
+        hookQuote: j['hook_quote'] as String,
+        cuts: (j['cuts'] as List<dynamic>).map((c) => Cut.fromJson(c as Map<String, dynamic>)).toList(),
+        onScreenTexts: (j['on_screen_texts'] as List<dynamic>? ?? []).map((e) => e as String).toList(),
+        bRoll: (j['b_roll'] as List<dynamic>? ?? []).map((e) => e as String).toList(),
+        caption: j['caption'] as String,
+        hashtags: (j['hashtags'] as List<dynamic>? ?? []).map((e) => e as String).toList(),
+        whyItWorks: j['why_it_works'] as String,
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'hook_text': hookText,
+        'hook_quote': hookQuote,
+        'cuts': cuts.map((c) => c.toJson()).toList(),
+        'on_screen_texts': onScreenTexts,
+        'b_roll': bRoll,
+        'caption': caption,
+        'hashtags': hashtags,
+        'why_it_works': whyItWorks,
+      };
 
   final String id;
   final String title;
-  final String hook;
-  final String description;
-  final double start;
-  final double end;
+  final String hookText;
+  final String hookQuote;
+  final List<Cut> cuts;
+  final List<String> onScreenTexts;
+  final List<String> bRoll;
+  final String caption;
+  final List<String> hashtags;
+  final String whyItWorks;
 
-  double get duration => end - start;
+  double get duration => cuts.fold(0.0, (sum, c) => sum + c.duration);
 }
 
 class KeepRange {
-  KeepRange({required this.start, required this.end, required this.reason});
+  KeepRange({required this.start, required this.end, this.reason = ''});
 
   factory KeepRange.fromJson(Map<String, dynamic> j) =>
-      KeepRange(start: _d(j['start']), end: _d(j['end']), reason: j['reason'] as String);
+      KeepRange(start: _d(j['start']), end: _d(j['end']), reason: j['reason'] as String? ?? '');
+
+  Map<String, dynamic> toJson() => {'start': start, 'end': end, 'reason': reason};
 
   final double start;
   final double end;
@@ -170,33 +220,48 @@ class KeepRange {
 }
 
 class YoutubePlan {
-  YoutubePlan({required this.title, required this.description, required this.ranges, required this.totalDuration});
+  YoutubePlan({required this.title, required this.throughline, required this.ranges, required this.totalDuration});
 
   factory YoutubePlan.fromJson(Map<String, dynamic> j) => YoutubePlan(
         title: j['title'] as String,
-        description: j['description'] as String,
+        throughline: j['throughline'] as String,
         ranges:
             (j['ranges'] as List<dynamic>).map((r) => KeepRange.fromJson(r as Map<String, dynamic>)).toList(),
         totalDuration: _d(j['total_duration']),
       );
 
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'throughline': throughline,
+        'ranges': ranges.map((r) => r.toJson()).toList(),
+        'total_duration': totalDuration,
+      };
+
   final String title;
-  final String description;
+  final String throughline;
   final List<KeepRange> ranges;
   final double totalDuration;
 }
 
 class Suggestions {
-  Suggestions({required this.shorts, this.youtube});
+  Suggestions({required this.shorts, this.youtube = const []});
 
   factory Suggestions.fromJson(Map<String, dynamic> j) => Suggestions(
         shorts:
             (j['shorts'] as List<dynamic>).map((s) => ShortIdea.fromJson(s as Map<String, dynamic>)).toList(),
-        youtube: j['youtube'] == null ? null : YoutubePlan.fromJson(j['youtube'] as Map<String, dynamic>),
+        youtube: (j['youtube'] as List<dynamic>? ?? [])
+            .map((y) => YoutubePlan.fromJson(y as Map<String, dynamic>))
+            .toList(),
       );
 
+  Map<String, dynamic> toJson() => {
+        'shorts': shorts.map((s) => s.toJson()).toList(),
+        'youtube': youtube.map((y) => y.toJson()).toList(),
+      };
+
   final List<ShortIdea> shorts;
-  final YoutubePlan? youtube;
+  // 0 items (video < 20min) or exactly 3 (video >= 20min), enforced backend-side.
+  final List<YoutubePlan> youtube;
 }
 
 class Clip {
@@ -455,30 +520,7 @@ class Project {
                 'thumbnail_path': video!.thumbnailPath,
               },
         'transcript': transcript?.toJson(),
-        'suggestions': suggestions == null
-            ? null
-            : {
-                'shorts': suggestions!.shorts
-                    .map((s) => {
-                          'id': s.id,
-                          'title': s.title,
-                          'hook': s.hook,
-                          'description': s.description,
-                          'start': s.start,
-                          'end': s.end,
-                        })
-                    .toList(),
-                'youtube': suggestions!.youtube == null
-                    ? null
-                    : {
-                        'title': suggestions!.youtube!.title,
-                        'description': suggestions!.youtube!.description,
-                        'ranges': suggestions!.youtube!.ranges
-                            .map((r) => {'start': r.start, 'end': r.end, 'reason': r.reason})
-                            .toList(),
-                        'total_duration': suggestions!.youtube!.totalDuration,
-                      },
-              },
+        'suggestions': suggestions?.toJson(),
         'clips': clips.map((c) => c.toJson()).toList(),
         'transition': transition.toJson(),
         'subtitle_style': subtitleStyle.toJson(),

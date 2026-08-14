@@ -6,7 +6,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_capabilities, get_ffmpeg_binaries
-from app.export.pipeline import render_timeline
+from app.export.pipeline import render_all_ideas, render_timeline
 from app.jobs.manager import JobHandle, get_job_manager
 from app.store import ProjectNotFound, load_project
 from app.timeline.models import Clip
@@ -74,6 +74,42 @@ async def preview_project(
             transcript_segments=project.transcript.segments if project.transcript else None,
         )
         return {"output_path": str(output_path)}
+
+    job = get_job_manager().start(worker)
+    return {"job_id": job.id}
+
+
+@router.post("/{project_id}/export-all")
+async def export_all_ideas(
+    project_id: str,
+    binaries: FfmpegBinaries = Depends(get_ffmpeg_binaries),  # noqa: B008 - standard FastAPI DI pattern
+    capabilities: Capabilities = Depends(get_capabilities),  # noqa: B008 - standard FastAPI DI pattern
+) -> dict:
+    try:
+        project = load_project(project_id)
+    except ProjectNotFound as e:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found") from e
+    if project.video is None:
+        raise HTTPException(status_code=400, detail="Project has no imported video")
+    if project.suggestions is None or (not project.suggestions.shorts and not project.suggestions.youtube):
+        raise HTTPException(status_code=400, detail="Project has no AI suggestions to export")
+
+    async def worker(handle: JobHandle) -> dict:
+        outputs = await render_all_ideas(
+            handle, binaries, project.video.path, project.suggestions,  # type: ignore[union-attr]
+            project.transition,
+            crf=project.export.crf, preset=project.export.preset,
+            orientation=project.export.orientation, portrait_fill=project.export.portrait_fill,
+            use_hwaccel=project.export.use_hwaccel,
+            working_hwaccel_encoder=capabilities.working_hwaccel_encoder,
+            supported_xfade=capabilities.xfade_transitions,
+            container=project.export.container,
+            output_dir=project_output_dir(project_id), job_id=handle.job_id,
+            write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
+            subtitle_style=project.subtitle_style,
+            transcript_segments=project.transcript.segments if project.transcript else None,
+        )
+        return {"outputs": outputs}
 
     job = get_job_manager().start(worker)
     return {"job_id": job.id}

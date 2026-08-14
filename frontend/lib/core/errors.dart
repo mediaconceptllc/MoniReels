@@ -11,6 +11,13 @@ sealed class AppError {
 
 class NetworkError extends AppError {
   const NetworkError([String? details]) : super('Could not reach the backend. Is it running?', details);
+
+  /// For cases with a more specific, more actionable message than the
+  /// generic default above (e.g. "took too long to respond", "needed to
+  /// restart, try again") - the default constructor has no way to override
+  /// `message` (it's always the generic text), which silently swallowed a
+  /// couple of intended custom messages elsewhere in this codebase.
+  const NetworkError.withMessage(super.message, [super.details]);
 }
 
 class ServerError extends AppError {

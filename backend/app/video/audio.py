@@ -34,3 +34,30 @@ async def extract_audio_16k_mono_wav(ffmpeg_path: Path, video_path: Path, output
         raise AudioExtractionError(
             f"Audio extraction failed for {video_path}: {stderr.decode(errors='replace')[-500:]}"
         )
+
+
+async def extract_audio_native_wav(ffmpeg_path: Path, video_path: Path, output_path: Path) -> None:
+    """Extracts audio at its native sample rate/channel layout (no forced
+    16k/mono downmix) - used as Demucs' separation input (see
+    app/audio/separation.py), since source separation quality degrades on
+    audio already narrowed to the 16kHz mono STT contract. The 16kHz mono
+    Chimege/VAD contract is applied afterwards, downstream of separation.
+    """
+    args = [
+        str(ffmpeg_path),
+        "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vn",
+        "-c:a", "pcm_s16le",
+        str(output_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not output_path.exists():
+        raise AudioExtractionError(
+            f"Audio extraction failed for {video_path}: {stderr.decode(errors='replace')[-500:]}"
+        )

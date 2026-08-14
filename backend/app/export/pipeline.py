@@ -9,6 +9,7 @@ target path.
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from app.export.presets import (
     resolve_dimensions,
 )
 from app.jobs.manager import JobCancelled, JobHandle
-from app.models import Segment, SubtitleStyle
+from app.models import Segment, SubtitleStyle, Suggestions
 from app.subtitle.ass import build_ass_document
 from app.subtitle.shift import retime_segments_for_output
 from app.subtitle.srt import segments_to_srt
@@ -30,7 +31,7 @@ from app.timeline.models import Clip, Transition
 from app.transition.filtergraph import TransitionPlan, build_xfade_filtergraph, plan_transition
 from app.transition.registry import resolve as resolve_transition
 from app.utils.logging import get_logger
-from app.utils.paths import atomic_write_text
+from app.utils.paths import ascii_safe_filename, atomic_write_text, new_job_workdir
 from app.video.ffmpeg import FfmpegBinaries, FfmpegCancelled, FfmpegRun
 from app.video.probe import probe_video
 
@@ -304,3 +305,100 @@ async def render_timeline(
             p.unlink(missing_ok=True)
         (workdir / "concat_list.txt").unlink(missing_ok=True)
         (workdir / "subs.ass").unlink(missing_ok=True)
+
+
+def _idea_clips(video_path: str, suggestions: Suggestions) -> list[tuple[str, str, list[Clip]]]:
+    """Every suggested idea as its own (kind, title, clips) render request: a
+    reel is its 3-5 non-contiguous cuts stitched together, a youtube idea is
+    its keep-ranges stitched together (the render is identical either way -
+    render_timeline already handles an N-clip list, falling back to no
+    transition needed when N==1).
+    """
+    ideas: list[tuple[str, str, list[Clip]]] = []
+    for short in suggestions.shorts:
+        clips = [
+            Clip(id=uuid.uuid4().hex, source_path=video_path, start=cut.start, end=cut.end, order=i)
+            for i, cut in enumerate(short.cuts)
+        ]
+        ideas.append(("reel", short.title, clips))
+    for plan in suggestions.youtube:
+        clips = [
+            Clip(id=uuid.uuid4().hex, source_path=video_path, start=r.start, end=r.end, order=i)
+            for i, r in enumerate(plan.ranges)
+        ]
+        ideas.append(("youtube", plan.title, clips))
+    return ideas
+
+
+async def render_all_ideas(
+    handle: JobHandle,
+    binaries: FfmpegBinaries,
+    video_path: str,
+    suggestions: Suggestions,
+    transition: Transition,
+    crf: int,
+    preset: str,
+    orientation: str,
+    portrait_fill: str,
+    use_hwaccel: bool,
+    working_hwaccel_encoder: str | None,
+    supported_xfade: list[str],
+    container: str,
+    output_dir: Path,
+    job_id: str,
+    write_srt: bool = False,
+    burn_subtitles: bool = False,
+    subtitle_style: SubtitleStyle | None = None,
+    transcript_segments: list[Segment] | None = None,
+) -> list[dict]:
+    """Renders one standalone output file per suggested idea (up to 3 reels +
+    up to 3 youtube compilations), reusing render_timeline unchanged for each.
+
+    Progress is per-idea (0..1 within each render_timeline call, including
+    its own final 1.0), not smoothed across the whole batch - it visibly
+    resets between ideas rather than climbing smoothly end to end. Simpler
+    than threading a progress window through render_timeline's many internal
+    set_progress calls, and `stage`/`message` still identify which idea is
+    currently rendering.
+    """
+    ext = "mov" if container == "mov" else "mp4"
+    ideas = _idea_clips(video_path, suggestions)
+    if not ideas:
+        raise ValueError("No suggested ideas to export")
+
+    results: list[dict] = []
+    kind_totals = {"reel": len(suggestions.shorts), "youtube": len(suggestions.youtube)}
+    kind_counts: dict[str, int] = {}
+    n = len(ideas)
+
+    for i, (kind, title, clips) in enumerate(ideas):
+        handle.raise_if_cancelled()
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        idx = kind_counts[kind]
+
+        if not clips:
+            # A youtube plan can degenerate to zero ranges after clamping
+            # (all raw ranges fell outside the video) - skip it rather than
+            # let one bad idea fail the whole batch.
+            logger.warning("Skipping %s %d/%d (%r): no valid clips", kind, idx, kind_totals[kind], title)
+            continue
+
+        logger.info("Exporting idea %d/%d: %s %d/%d (%r)", i + 1, n, kind, idx, kind_totals[kind], title)
+        await handle.set_progress(i / n, stage="rendering", message=f"Rendering {kind} {idx}/{kind_totals[kind]}")
+
+        filename = f"{kind}_{idx}_{ascii_safe_filename(f'{title}.{ext}')}"
+        output_path = output_dir / filename
+        idea_workdir = new_job_workdir(f"{job_id}_{i}")
+
+        await render_timeline(
+            handle, binaries, clips, transition,
+            crf=crf, preset=preset, orientation=orientation, portrait_fill=portrait_fill,
+            use_hwaccel=use_hwaccel, working_hwaccel_encoder=working_hwaccel_encoder,
+            supported_xfade=supported_xfade, workdir=idea_workdir, output_path=output_path,
+            write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
+            transcript_segments=transcript_segments,
+        )
+        results.append({"kind": kind, "title": title, "output_path": str(output_path)})
+
+    await handle.set_progress(1.0, stage="done", message="All exports complete")
+    return results

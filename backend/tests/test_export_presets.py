@@ -33,6 +33,17 @@ def test_build_video_encoder_args_nvenc_uses_cq_not_crf():
     assert "23" in args
 
 
+def test_build_video_encoder_args_nvenc_forces_yuv420p():
+    """A filtergraph re-encode (xfade/subtitle burn) can upconvert chroma to
+    yuv444p without this - nvenc encodes it anyway, producing a "High 4:4:4
+    Predictive" stream only permissive decoders (VLC) can play, which reads
+    as a broken export in every standard player.
+    """
+    args = build_video_encoder_args("h264_nvenc", crf=23, preset="medium")
+    idx = args.index("-pix_fmt")
+    assert args[idx + 1] == "yuv420p"
+
+
 def test_build_video_encoder_args_nvenc_maps_unknown_preset_to_default():
     args = build_video_encoder_args("h264_nvenc", crf=23, preset="totally-unknown")
     idx = args.index("-preset")
@@ -41,7 +52,7 @@ def test_build_video_encoder_args_nvenc_maps_unknown_preset_to_default():
 
 def test_build_video_encoder_args_qsv():
     args = build_video_encoder_args("h264_qsv", crf=25, preset="fast")
-    assert args == ["-c:v", "h264_qsv", "-global_quality", "25", "-preset", "fast"]
+    assert args == ["-c:v", "h264_qsv", "-global_quality", "25", "-preset", "fast", "-pix_fmt", "yuv420p"]
 
 
 def test_build_video_encoder_args_amf():
