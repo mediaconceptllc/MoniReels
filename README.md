@@ -1,88 +1,63 @@
 # autoReel
 
-autoReel turns a long video into short-form clips automatically. Import a
-video, it transcribes the audio, an AI picks the best moments and writes
-hooks/captions for you, and you export ready-to-post Shorts/Reels plus a
-condensed YouTube version — all from one desktop app on Windows.
+autoReel нь урт хэмжээний видеог автоматаар богино хэмжээний видео болгон хувиргадаг. Видео оруулахад аудиог нь текст болгон хөрвүүлж, хиймэл оюун ухаан хамгийн сонирхолтой хэсгүүдийг сонгон, эхлэл (hook) болон хадмал текстийг бэлдэж өгнө. Үүний дараа Instagram Reels, YouTube Shorts болон товчилсон YouTube хувилбарыг бүгдийг нь нэг Windows програм дотроос экспортлох боломжтой.
 
-## Download
+## Татаж авах
 
-**[Download autoReel for Windows (autoReel-Setup-1.0.0.exe)](https://github.com/tuvshinorg/autoReel/releases/latest)**
+**[Windows-д зориулсан autoReel татах (autoReel-Setup-1.0.0.exe)](https://github.com/tuvshinorg/autoReel/releases/latest)**
 
 - Windows 10/11, 64-bit
-- No admin rights needed to install
-- Nothing else to install separately — the app, its backend, and FFmpeg are
-  all bundled in the installer
+- Суулгахад админ эрх шаардлагагүй
+- Нэмэлт програм суулгах шаардлагагүй — програм, backend болон FFmpeg бүгд суулгагчид багтсан
 
-Run the downloaded `.exe`, click through the installer, and launch autoReel
-from the Start Menu (or the desktop shortcut, if you checked that box).
+Татаж авсан `.exe` файлаа ажиллуулаад суулгах алхмуудыг дагана уу. Суулгасны дараа **Start Menu** (эсвэл суулгах үед сонгосон бол Desktop Shortcut)-оос autoReel-ийг ажиллуулна.
 
-> Windows SmartScreen may warn about an "unrecognized app" the first time,
-> since this build isn't code-signed yet. Click **More info → Run anyway**.
+> Windows SmartScreen анх удаа ажиллуулах үед **"Unrecognized app"** гэсэн анхааруулга гарч болно. Учир нь энэ хувилбар одоогоор code signing хийгдээгүй байгаа. **More info → Run anyway** дээр дарж үргэлжлүүлнэ үү.
 
-## What it does
+## Юу хийдэг вэ
 
-1. **Import** a video file.
-2. **Transcribe** — automatic speech-to-text (Mongolian, via
-   [Chimege](https://chimege.mn)).
-3. **AI suggestions** — an AI reads the transcript and proposes 3 short-form
-   edits (hook, context, proof, payoff) plus long-form YouTube highlight
-   reels for videos over 20 minutes. Choose **OpenAI (ChatGPT)** or
-   **Claude** as the provider — switchable anytime in Settings, or per
-   regeneration with the "Regenerate with ChatGPT / Regenerate with Claude"
-   buttons.
-4. **Review & edit** — fix any transcription mistakes, or hand-pick your own
-   lines to build a custom clip.
-5. **Export** — renders each suggestion as its own video file, with
-   transitions, captions, and your choice of hardware encoder if available.
+1. **Видео импортлох** — Видео файлаа сонгоно.
+2. **Текст болгон хөрвүүлэх** — Яриаг автоматаар текст болгоно (Монгол хэл, [Chimege](https://chimege.mn)-ийг ашиглана).
+3. **AI санал болгох** — Хиймэл оюун ухаан текстийг уншаад богино хэмжээний 3 видео санаа (hook, context, proof, payoff) болон 20 минутаас урт видеонд зориулсан YouTube highlight хувилбаруудыг санал болгоно. **OpenAI (ChatGPT)** эсвэл **Claude**-ийг ашиглах боломжтой бөгөөд Settings хэсгээс хүссэн үедээ сольж, эсвэл **Regenerate with ChatGPT / Regenerate with Claude** товчоор дахин үүсгэж болно.
+4. **Шалгаж засварлах** — Текстийн алдааг засах эсвэл өөрийн хүссэн мөрүүдийг сонгон custom видео үүсгэх боломжтой.
+5. **Экспортлох** — Сонгосон санал бүрийг тусдаа видео болгон transition, хадмал текст болон боломжтой бол hardware encoder ашиглан өндөр хурдтайгаар экспортлоно.
 
-## First-time setup
+## Анхны тохиргоо
 
-After installing, open **Settings** inside the app and paste in:
+Програмыг суулгасны дараа **Settings** хэсгийг нээгээд дараах мэдээллүүдийг оруулна уу.
 
-- A **Chimege API token** — get one at [console.chimege.com](https://console.chimege.com)
-  (required for transcription)
-- An **OpenAI API key** ([platform.openai.com](https://platform.openai.com)) and/or
-  an **Anthropic (Claude) API key** ([console.anthropic.com](https://console.anthropic.com))
-  — you only need one to get started, but having both lets you compare
-  results from each provider
+- **Chimege API Token** — [console.chimege.com](https://console.chimege.com)-оос авна (текст болгон хөрвүүлэхэд шаардлагатай).
+- **OpenAI API Key** ([platform.openai.com](https://platform.openai.com)) болон/эсвэл **Anthropic (Claude) API Key** ([console.anthropic.com](https://console.anthropic.com)) — Эхлэхэд аль нэг нь байхад хангалттай. Харин хоёуланг нь ашиглавал хоёр AI-ийн үр дүнг харьцуулж болно.
 
-Credentials are saved to a local `.env` file next to the installed app and
-are never sent anywhere except directly to Chimege/OpenAI/Anthropic's own
-APIs.
+Эдгээр түлхүүрүүд нь програмын хажууд байрлах локал `.env` файлд хадгалагдах бөгөөд зөвхөн Chimege, OpenAI болон Anthropic-ийн албан ёсны API руу шууд илгээгдэнэ. Өөр газар дамжуулахгүй.
 
-## Building from source
+## Эх кодоос ажиллуулах
 
-The Windows installer above is the easiest way to run autoReel. If you'd
-rather build it yourself:
+Windows суулгагч нь autoReel-ийг ашиглах хамгийн хялбар арга юм. Харин эх кодоос ажиллуулахыг хүсвэл:
 
 **Backend** (Python 3.11, FastAPI)
-```
+
+```bash
 cd backend
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m app.main
 ```
 
-**Frontend** (Flutter, Windows desktop)
-```
+**Frontend** (Flutter, Windows Desktop)
+
+```bash
 cd frontend
 flutter pub get
 flutter run -d windows
 ```
 
-With both running, the desktop app talks to the local backend automatically
-(see `frontend/lib/application/backend_launcher.dart`).
+Хоёуланг нь ажиллуулсны дараа desktop програм нь локал backend-тэй автоматаар холбогдоно (`frontend/lib/application/backend_launcher.dart`).
 
-To build the same installer this repo publishes, see `installer/setup.iss`
-(requires [Inno Setup 6](https://jrsoftware.org/isinfo.php), PyInstaller for
-the backend, and `flutter build windows --release` for the frontend).
+GitHub дээрхтэй ижил Windows суулгагчийг бүтээх бол `installer/setup.iss` файлыг ашиглана (Inno Setup 6, backend-д PyInstaller болон `flutter build windows --release` шаардлагатай).
 
-## Credits
+## Ашигласан технологи
 
-- Speech-to-text by [Chimege](https://chimege.mn)
-- Suggestion generation via [OpenAI](https://openai.com) or
-  [Anthropic Claude](https://www.anthropic.com)
-- Video processing via [FFmpeg](https://ffmpeg.org) (bundled in the
-  installer; FFmpeg is free software licensed under the LGPL/GPL — see
-  [ffmpeg.org/legal.html](https://ffmpeg.org/legal.html))
+- Яриаг текст болгох: [Chimege](https://chimege.mn)
+- AI санал боловсруулах: [OpenAI](https://openai.com) эсвэл [Anthropic Claude](https://www.anthropic.com)
+- Видео боловсруулах: [FFmpeg](https://ffmpeg.org) (суулгагчид багтсан. FFmpeg нь LGPL/GPL лицензтэй үнэгүй нээлттэй эхийн програм бөгөөд лицензийн мэдээллийг [ffmpeg.org/legal.html](https://ffmpeg.org/legal.html)-ээс үзнэ үү.)
