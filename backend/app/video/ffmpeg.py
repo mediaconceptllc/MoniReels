@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,8 +18,21 @@ from app.utils.timecode import ffmpeg_out_time_to_seconds
 
 logger = get_logger(__name__)
 
-BACKEND_DIR = Path(__file__).resolve().parents[2]  # .../backend
-LOCAL_BIN_DIR = BACKEND_DIR / "bin"
+
+def _local_bin_dir() -> Path:
+    """Same sys.frozen split as app.utils.env_file.env_file_path: once
+    PyInstaller freezes this module, __file__ resolves under the bundle's
+    _internal/ tree, not next to the exe - parents[2] from there lands on
+    _internal/, not the packaged backend/bin/ the installer actually places
+    ffmpeg.exe/ffprobe.exe in. Use the exe's own directory when frozen.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "bin"
+    # backend/app/video/ffmpeg.py -> backend/bin
+    return Path(__file__).resolve().parents[2] / "bin"
+
+
+LOCAL_BIN_DIR = _local_bin_dir()
 
 
 @dataclass(frozen=True)

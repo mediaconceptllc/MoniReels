@@ -25,6 +25,10 @@ venv/
 **/backend/build_pyinstaller/
 **/backend/bin/*.exe
 
+# Installer build artifacts (assembled payload + compiled setup exe) -
+# installer/setup.iss itself is the only part that's source-controlled.
+installer/build/
+
 # Ad-hoc dev-server logs/pids left behind by manual test runs
 server_out.log
 server_err.log
