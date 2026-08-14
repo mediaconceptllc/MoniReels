@@ -1,12 +1,15 @@
-"""AI suggestions: transcript -> OpenAI -> Suggestions, run as a background job."""
+"""AI suggestions: transcript -> Suggestions, run as a background job. Uses
+whichever provider Settings.ai_provider selects (OpenAI or Anthropic)."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from app.ai.openai_client import OpenAIClient, OpenAIConfig, OpenAIError
+from app.ai.anthropic_client import AnthropicClient, AnthropicConfig
+from app.ai.llm_client import LLMClient, LLMError
+from app.ai.openai_client import OpenAIClient, OpenAIConfig
 from app.ai.schema import SuggestionValidationError
 from app.ai.suggest import generate_suggestions
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.jobs.manager import JobHandle, get_job_manager
 from app.store import ProjectNotFound, load_project, save_project
 from app.utils.logging import get_logger
@@ -15,8 +18,24 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/projects", tags=["ai"])
 
 
+def _build_client(settings: Settings, provider: str) -> LLMClient:
+    if provider == "anthropic":
+        anthropic_config = AnthropicConfig(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
+        return AnthropicClient(anthropic_config)
+    openai_config = OpenAIConfig(
+        api_key=settings.openai_api_key, model=settings.openai_model, base_url=settings.openai_base_url
+    )
+    return OpenAIClient(openai_config)
+
+
 @router.post("/{project_id}/suggest")
-async def suggest_project(project_id: str) -> dict:
+async def suggest_project(project_id: str, provider: str | None = None) -> dict:
+    # `provider` lets a single regeneration override Settings.ai_provider
+    # (e.g. "try the same transcript with the other provider") without
+    # changing the persisted default for future runs.
+    if provider is not None and provider not in ("openai", "anthropic"):
+        detail = f"Unknown provider {provider!r} - must be 'openai' or 'anthropic'"
+        raise HTTPException(status_code=400, detail=detail)
     try:
         project = load_project(project_id)
     except ProjectNotFound as e:
@@ -29,20 +48,16 @@ async def suggest_project(project_id: str) -> dict:
     duration_sec = project.video.duration_sec
 
     async def worker(handle: JobHandle) -> dict:
-        await handle.set_progress(0.1, stage="requesting", message="Asking OpenAI for suggestions")
         settings = get_settings()
-        client = OpenAIClient(
-            OpenAIConfig(
-                api_key=settings.openai_api_key,
-                model=settings.openai_model,
-                base_url=settings.openai_base_url,
-            )
-        )
+        effective_provider = provider or settings.ai_provider
+        provider_label = "Claude" if effective_provider == "anthropic" else "OpenAI"
+        await handle.set_progress(0.1, stage="requesting", message=f"Asking {provider_label} for suggestions")
+        client = _build_client(settings, effective_provider)
         try:
             current = load_project(project_id)
             assert current.transcript is not None
             suggestions = await generate_suggestions(client, current.transcript, duration_sec)
-        except (OpenAIError, SuggestionValidationError) as e:
+        except (LLMError, SuggestionValidationError) as e:
             raise RuntimeError(f"Suggestion generation failed: {e}") from e
         finally:
             await client.aclose()

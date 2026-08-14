@@ -7,6 +7,9 @@ python-dotenv==1.0.1
 httpx==0.28.1
 python-multipart==0.0.20
 aiofiles==24.1.0
+# Claude (app/ai/anthropic_client.py) - alternate suggestion-generation
+# provider alongside OpenAI, switchable via Settings.ai_provider.
+anthropic==0.122.0
 
 # audio separation / VAD (app/audio/) - CPU-only torch build to keep the
 # installer small; --extra-index-url adds PyTorch's CPU wheel index without

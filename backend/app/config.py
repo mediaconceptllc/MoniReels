@@ -35,9 +35,17 @@ class Settings(BaseSettings):
     # audio — this default leaves a safety margin under that.
     chimege_max_audio_sec: int = 60
 
+    # Which provider app.ai.suggest uses for suggestion generation. "openai"
+    # or "anthropic" - both clients stay configured/switchable so the app
+    # isn't locked to whichever one happens to be having a bad day.
+    ai_provider: str = "openai"
+
     openai_api_key: str = ""
     openai_model: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+
+    anthropic_api_key: str = ""
+    anthropic_model: str = ""
 
     log_level: str = "INFO"
     data_dir: str = ""

@@ -58,7 +58,13 @@ class Repository {
   }
 
   Future<Result<String>> transcribe(String projectId) => _startJob('/projects/$projectId/transcribe');
-  Future<Result<String>> suggest(String projectId) => _startJob('/projects/$projectId/suggest');
+
+  /// [provider] ('openai' or 'anthropic') overrides the Settings default for
+  /// just this regeneration; omit to use whatever Settings has configured.
+  Future<Result<String>> suggest(String projectId, {String? provider}) => _startJob(
+        '/projects/$projectId/suggest${provider != null ? '?provider=$provider' : ''}',
+      );
+
   Future<Result<String>> preview(String projectId) => _startJob('/projects/$projectId/preview');
   Future<Result<String>> export(String projectId) => _startJob('/projects/$projectId/export');
 
@@ -94,17 +100,23 @@ class Repository {
     String? chimegeSttUrl,
     String? chimegeToken,
     int? chimegeMaxAudioSec,
+    String? aiProvider,
     String? openaiApiKey,
     String? openaiModel,
     String? openaiBaseUrl,
+    String? anthropicApiKey,
+    String? anthropicModel,
   }) async {
     final body = <String, dynamic>{
       'chimege_stt_url': ?chimegeSttUrl,
       'chimege_token': ?chimegeToken,
       'chimege_max_audio_sec': ?chimegeMaxAudioSec,
+      'ai_provider': ?aiProvider,
       'openai_api_key': ?openaiApiKey,
       'openai_model': ?openaiModel,
       'openai_base_url': ?openaiBaseUrl,
+      'anthropic_api_key': ?anthropicApiKey,
+      'anthropic_model': ?anthropicModel,
     };
     final r = await _client.put('/settings', body: body);
     return r.when(ok: (v) => Ok(BackendSettings.fromJson(v as Map<String, dynamic>)), err: (e) => Err(e));

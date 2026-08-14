@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from app.ai.schema import CUT_PAD_SEC
 from app.models import Transcript
 from app.utils.timecode import seconds_to_mmss
 
@@ -35,7 +36,12 @@ not summaries.
   continuous range is a failure — that is a trailer-less excerpt, not an edit.
 - Each cut is identified by segment indices (`start_index`, `end_index`, inclusive).
   Never output raw seconds. Never reference an index outside the transcript given.
-- Total duration across all cuts of one short: 35-60 seconds. Never exceed 60.
+- Total duration across all cuts of one short: 35-60 seconds. Never exceed 60. Before
+  finalizing a short, actually add up each cut's own span (its end mm:ss minus its
+  start mm:ss) and sum those spans across all its cuts — do not estimate by eye. If
+  the sum lands outside 35-60s, narrow/widen a cut's index range or swap one for a
+  shorter/longer cut, then re-add the sum. Overshooting by even 5-10 seconds is a
+  failure just like overshooting by 60.
 - Structure the cuts in this order, one `role` each:
     hook    - the conflict, the mystery, or the surprising claim. Never an intro.
     context - the minimum background needed to understand the payoff.
@@ -66,7 +72,9 @@ not summaries.
 
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.
-2. Draft 5 candidate shorts across those stories.
+2. Draft 5 candidate shorts across those stories. For each, sum the mm:ss span of
+   every cut and adjust cuts until that sum is 35-60s — a candidate whose cuts don't
+   actually add up in-range is not a valid candidate yet.
 3. Score each 1-10 on: hook strength, ease of sourcing b-roll, audience relevance.
 4. Return only the 3 highest-scoring. Put the three scores in `why_it_works`.
 
@@ -112,6 +120,20 @@ SHORT_SCHEMA = {
         "caption": {"type": "string"},
         "hashtags": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
         "why_it_works": {"type": "string"},
+    },
+}
+
+PICK_SCHEMA: dict = {
+    "name": "pick_best",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["short_indices", "youtube_indices"],
+        "properties": {
+            "short_indices": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer"}},
+            "youtube_indices": {"type": "array", "maxItems": 3, "items": {"type": "integer"}},
+        },
     },
 }
 
@@ -283,36 +305,44 @@ def build_candidates_prompt(
     )
 
 
-def build_pick_best_prompt(
-    candidate_summaries: list[str],
-    lines: list[str],
+def build_pick_indices_prompt(
+    short_summaries: list[str],
+    youtube_summaries: list[str],
     duration_sec: float,
     want_youtube: bool,
     audience: str | None = None,
 ) -> str:
-    """Unlike the previous version this re-sends the full segment lines alongside the
-    candidate summaries, so the final pass can re-cut a candidate rather than only
-    rubber-stamping ranges it can no longer see the text of.
+    """Selection only, from already-built candidates - deliberately does NOT
+    re-send the transcript. An earlier version re-sent the full transcript so
+    this pass could re-cut a candidate rather than only rubber-stamp it, but
+    on a long transcript in a token-dense language (e.g. Mongolian, ~2.4
+    chars/token vs English's ~4) that alone can exceed a low-tier OpenAI
+    account's tokens-per-minute cap before a single output token is
+    generated - and padding the transcript down to just the regions near
+    candidates doesn't help, since good candidates end up spread across
+    nearly the whole video anyway. Picking among candidates that were
+    already cut against the real transcript keeps requests small regardless
+    of video length, at the cost of no further re-cutting in this pass.
     """
     youtube_instruction = (
-        "Build exactly 3 final, independent YouTube long-form highlight plans from the "
-        "candidate keep-ranges below, each targeting a combined duration of about 600 "
-        "seconds and each meaningfully different from the others."
+        "Also choose exactly 3 of the candidate YouTube plans below (by index) - the 3 "
+        "that together take the most meaningfully different throughlines. List their "
+        "indices, in your preferred order, in `youtube_indices`."
         if want_youtube
-        else "Set `youtube` to an empty list."
+        else "Set `youtube_indices` to an empty list."
     )
-    candidates_block = "\n".join(candidate_summaries)
-    transcript_block = "\n".join(lines)
+    shorts_block = "\n".join(short_summaries) or "(none)"
+    youtube_block = "\n".join(youtube_summaries) or "(none)"
     return (
-        f"Video duration: {duration_sec:.1f} seconds. Below are candidate moments gathered "
-        f"from different portions of the video, followed by the full transcript. Select the "
-        f"best 3 candidates, and RE-CUT each one against the full transcript — you may pull "
-        f"a stronger payoff or proof cut from any part of the video, not only the portion the "
-        f"candidate came from.\n"
+        f"Video duration: {duration_sec:.1f} seconds. Below are candidate shorts gathered "
+        f"from different portions of the video - each already cut and ready to use. Choose "
+        f"exactly 3 (by index) that are the strongest and about MEANINGFULLY DIFFERENT "
+        f"topics from each other. List their indices, in your preferred order, in "
+        f"`short_indices`.\n"
         f"{_audience_block(audience)}"
         f"{youtube_instruction}\n\n"
-        f"Candidates:\n{candidates_block}\n\n"
-        f"Transcript segments:\n{transcript_block}"
+        f"Candidate shorts:\n{shorts_block}\n\n"
+        f"Candidate YouTube plans:\n{youtube_block}"
     )
 
 
@@ -351,10 +381,44 @@ def validate_shorts(shorts: list[dict], segments: list[tuple[float, float, str]]
             if not isinstance(s, int) or not isinstance(e, int) or not (0 <= s <= e <= last):
                 problems.append(f"Short {n}: cut [{s}, {e}] is out of range 0-{last}.")
                 continue
-            total += segments[e][1] - segments[s][0]
+            # + 2*CUT_PAD_SEC per cut to match schema.py's _resolve_cut, which
+            # pads every cut's start/end outward by CUT_PAD_SEC. Without this,
+            # a candidate measuring e.g. 59.6s raw here (passes the 35-60
+            # gate below) resolves to ~61s after padding is applied for real
+            # in postprocess_suggestions - which has no tolerance and no
+            # retry left, failing the whole job on a short this function had
+            # already called "usable".
+            total += (segments[e][1] - segments[s][0]) + 2 * CUT_PAD_SEC
 
-        if not 30 <= total <= 65:
-            problems.append(f"Short {n}: total duration {total:.0f}s, must be 35-60s.")
+        if not 35 <= total <= 60:
+            # Must match schema.py's MIN/MAX_SHORT_DURATION (35-60s) exactly -
+            # this function decides whether a candidate is "usable" for the
+            # chunked pipeline (app.ai.suggest), so any gap between this gate
+            # and postprocess_suggestions' real enforcement lets a duration
+            # (e.g. 32s, 62s) sail through here as fine, get treated as a
+            # keeper, and then die with no retry left when postprocess
+            # finally checks it for real - after the API calls that picked it
+            # are already spent. A restated constraint ("must be 35-60s")
+            # without a concrete target gave the model nothing to act on
+            # beyond retrying with a similar guess - observed producing the
+            # identical ~19s total on the repair retry as the original
+            # attempt. Naming the exact gap and a mechanical fix (widen/add
+            # vs narrow/drop a cut, using the real per-segment timestamps
+            # already in the prompt) is something a retry can actually
+            # follow.
+            if total < 35:
+                problems.append(
+                    f"Short {n}: total duration {total:.0f}s is too short, must be 35-60s. "
+                    f"Add {35 - total:.0f} to {60 - total:.0f} more seconds by widening an existing "
+                    f"cut's start_index/end_index further apart, or adding one more cut (up to 5 "
+                    f"total) - use the real segment timestamps shown to pick a range that size."
+                )
+            else:
+                problems.append(
+                    f"Short {n}: total duration {total:.0f}s is too long, must be 35-60s. "
+                    f"Cut {total - 60:.0f} to {total - 35:.0f} seconds by narrowing a cut's index "
+                    f"range, or dropping the weakest cut (down to 3 minimum)."
+                )
 
         roles = [c.get("role") for c in cuts]
         if roles and roles[-1] != "payoff":
@@ -367,3 +431,88 @@ def validate_shorts(shorts: list[dict], segments: list[tuple[float, float, str]]
             problems.append(f"Short {n}: hook_quote is not a verbatim transcript substring.")
 
     return problems
+
+
+# ---------------------------------------------------------------------------
+# Deterministic repair — code-side fixes for the two failure modes observed
+# most often (Claude models in particular): a too-long total duration and a
+# hook_quote that drifted from a true verbatim substring. Applied before
+# validate_shorts gets the final say, so a near-miss the model won't reliably
+# self-correct even with a specific repair prompt gets fixed outright instead
+# of spending (and possibly exhausting) a retry, or being discarded.
+# ---------------------------------------------------------------------------
+
+
+def _fix_hook_quote_if_invalid(short: dict, segments: list[tuple[float, float, str]]) -> dict:
+    """Replaces hook_quote with the literal text of the hook cut's own
+    segments when it isn't a verbatim transcript substring - guaranteed
+    verbatim by construction, rather than relying on the model recalling a
+    quote exactly (a common copying-fidelity slip, especially in non-Latin
+    scripts). Returns `short` unchanged if the quote is already fine or
+    there's no hook cut to source a replacement from.
+    """
+    quote = (short.get("hook_quote") or "").strip()
+    full_text = " ".join(text for _, _, text in segments)
+    if not quote or quote in full_text:
+        return short
+
+    cuts = short.get("cuts", [])
+    hook_cut = next((c for c in cuts if c.get("role") == "hook"), cuts[0] if cuts else None)
+    if not hook_cut:
+        return short
+    s, e = hook_cut.get("start_index"), hook_cut.get("end_index")
+    if not isinstance(s, int) or not isinstance(e, int) or not (0 <= s <= e < len(segments)):
+        return short
+
+    replacement = " ".join(segments[i][2] for i in range(s, e + 1)).strip()
+    if not replacement:
+        return short
+    return {**short, "hook_quote": replacement}
+
+
+def _shrink_short_to_fit(short: dict, segments: list[tuple[float, float, str]]) -> dict:
+    """If the short's total duration (including CUT_PAD_SEC, same as
+    validate_shorts) exceeds 60s, repeatedly drops the shortest droppable
+    interior cut - never the first cut, the last cut, or any cut whose role
+    is "hook" - until it fits or hits the 3-cut floor. Returns `short`
+    unchanged if it's not over 60s, or if dropping cuts can't bring it into
+    range. Never touches an under-length short: dropping cuts can't
+    manufacture more content, only a genuinely different cut selection can.
+    """
+    cuts = list(short.get("cuts", []))
+
+    def cut_span(c: dict) -> float:
+        s, e = c.get("start_index"), c.get("end_index")
+        if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < len(segments):
+            return segments[e][1] - segments[s][0]
+        return 0.0
+
+    def total_duration(cs: list[dict]) -> float:
+        return sum(cut_span(c) + 2 * CUT_PAD_SEC for c in cs)
+
+    if len(cuts) <= 3 or total_duration(cuts) <= 60:
+        return short
+
+    while len(cuts) > 3 and total_duration(cuts) > 60:
+        interior = [
+            (i, c) for i, c in enumerate(cuts) if i != 0 and i != len(cuts) - 1 and c.get("role") != "hook"
+        ]
+        if not interior:
+            break
+        drop_i, _ = min(interior, key=lambda ic: cut_span(ic[1]))
+        cuts.pop(drop_i)
+
+    if total_duration(cuts) <= 60:
+        return {**short, "cuts": cuts}
+    return short
+
+
+def repair_short_dict(short: dict, segments: list[tuple[float, float, str]]) -> dict:
+    """Best-effort code-side fixes for a candidate short, applied before
+    validate_shorts makes the final call. Doesn't guarantee validity (an
+    under-length short, or one broken in some other way, passes through
+    unchanged) - just improves the odds without spending another API call.
+    """
+    short = _fix_hook_quote_if_invalid(short, segments)
+    short = _shrink_short_to_fit(short, segments)
+    return short

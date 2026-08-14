@@ -167,23 +167,60 @@ async def test_generate_suggestions_retries_once_on_invalid_cut_structure():
 async def test_generate_suggestions_chunks_long_transcript_and_picks_best():
     # ~600 one-second segments -> well over the 45k char single-request budget.
     transcript = _transcript(600, text_len=80)
-    calls = {"candidates": 0, "suggestions": 0}
+    calls = {"candidates": 0, "pick_best": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = _schema_name(request)
         if name == "candidates":
             calls["candidates"] += 1
-            cand = _short_dict(f"cand-{calls['candidates']}", 0)
-            return _openai_response({"shorts": [cand], "youtube": []})
-        calls["suggestions"] += 1
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": []})
+            cands = [_short_dict(f"cand-{calls['candidates']}-{j}", j * 50) for j in range(2)]
+            return _openai_response({"shorts": cands, "youtube": []})
+        calls["pick_best"] += 1
+        assert name == "pick_best"
+        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": []})
 
     client = _client(handler)
     result = await generate_suggestions(client, transcript, duration_sec=600.0)
     await client.aclose()
 
     assert calls["candidates"] > 1  # transcript was actually chunked, not sent whole
-    assert calls["suggestions"] == 1  # exactly one final pick-best call
+    assert calls["pick_best"] == 1  # exactly one final pick call
+    assert len(result.shorts) == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_suggestions_candidates_retry_rescues_over_duration_short():
+    """A chunk's candidates response can come back with valid shape but an
+    over-duration cut (observed with Claude models: consistently 60-100%
+    over the 35-60s target) - that's exactly what build_repair_prompt's
+    specific "cut N to M seconds" guidance is for, so the candidates stage
+    must get the same one-retry chance the final pick call already has,
+    instead of silently discarding the near-miss.
+    """
+    transcript = _transcript(600, text_len=80)  # forces chunking
+    candidate_attempts = {"n": 0}
+    too_long_cuts = [
+        _cut_dict(0, 9, role="hook"),
+        _cut_dict(10, 39, role="context"),
+        _cut_dict(40, 79, role="payoff"),
+    ]  # 80s total - over the 60s max
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = _schema_name(request)
+        if name == "candidates":
+            candidate_attempts["n"] += 1
+            if candidate_attempts["n"] == 1:
+                bad_short = {**_short_dict("too-long", 0), "cuts": too_long_cuts}
+                return _openai_response({"shorts": [bad_short], "youtube": []})
+            cands = [_short_dict(f"fixed-{j}", j * 50) for j in range(3)]
+            return _openai_response({"shorts": cands, "youtube": []})
+        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": []})
+
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=600.0)
+    await client.aclose()
+
+    assert candidate_attempts["n"] >= 2  # the too-long candidate triggered a repair retry
     assert len(result.shorts) == 3
 
 
@@ -206,30 +243,34 @@ async def test_generate_suggestions_chunks_flatten_multiple_youtube_plans_from_c
     """Map-reduce branch: each chunk can return multiple candidate youtube
     plans (not just one) - the flattened `for plan in candidates.youtube:
     for r in plan.keep_ranges` loop must collect ranges from all of them,
-    not just the first, into the final pick-best prompt.
+    not just the first, into the final pick prompt.
     """
     transcript = _transcript(600, text_len=80)  # forces chunking
-    pick_best_bodies: list[str] = []
+    pick_bodies: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         name = _schema_name(request)
         if name == "candidates":
+            cands = [_short_dict(f"cand-{len(pick_bodies)}-{j}", j * 50) for j in range(2)]
             return _openai_response(
                 {
-                    "shorts": [_short_dict("cand", 0)],
+                    "shorts": cands,
                     "youtube": [_youtube_dict("A", [(0, 49)]), _youtube_dict("B", [(60, 99)])],
                 }
             )
-        pick_best_bodies.append(json.loads(request.content)["messages"][-1]["content"])
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": _three_youtube_dicts()})
+        pick_bodies.append(json.loads(request.content)["messages"][-1]["content"])
+        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": [0, 1, 2]})
 
     client = _client(handler)
     result = await generate_suggestions(client, transcript, duration_sec=1500.0)
     await client.aclose()
 
     assert len(result.youtube) == 3
-    assert len(pick_best_bodies) == 1
+    assert len(pick_bodies) == 1
     # Ranges from BOTH candidate plans (A's 0-49 and B's 60-99), from every
     # chunk - proves the nested loop didn't stop at the first plan per chunk.
-    assert "[0-49]" in pick_best_bodies[0]
-    assert "[60-99]" in pick_best_bodies[0]
+    assert "[0-49]" in pick_bodies[0]
+    assert "[60-99]" in pick_bodies[0]
+    # And the full transcript must NOT be resent in this final call - that's
+    # the whole point of the pick-indices redesign (see build_pick_indices_prompt).
+    assert "wwwwwwww" not in pick_bodies[0]

@@ -80,10 +80,11 @@ class _Step1ImportState extends ConsumerState<Step1Import> {
 
   /// Kicks off AI suggestion generation and moves to the suggesting stage —
   /// shared by the normal auto-chain (right after transcribing) and by
-  /// "Regenerate suggestions" on an already-done project.
-  Future<void> _startSuggestJob() async {
+  /// "Regenerate suggestions" on an already-done project. [provider]
+  /// ('openai'/'anthropic') overrides the Settings default for just this run.
+  Future<void> _startSuggestJob({String? provider}) async {
     if (_projectId == null) return;
-    final job = await ref.read(repositoryProvider).suggest(_projectId!);
+    final job = await ref.read(repositoryProvider).suggest(_projectId!, provider: provider);
     job.when(
       ok: (jobId) => setState(() {
         _jobId = jobId;
@@ -210,10 +211,21 @@ class _Step1ImportState extends ConsumerState<Step1Import> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      OutlinedButton.icon(
-                        onPressed: _startSuggestJob,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Regenerate suggestions'),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () => _startSuggestJob(provider: 'openai'),
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Regenerate with ChatGPT'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () => _startSuggestJob(provider: 'anthropic'),
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Regenerate with Claude'),
+                          ),
+                        ],
                       ),
                       FilledButton(onPressed: widget.onNext, child: const Text('Next')),
                     ],

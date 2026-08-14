@@ -18,9 +18,12 @@ _ENV_KEYS = {
     "chimege_stt_url": "CHIMEGE_STT_URL",
     "chimege_token": "CHIMEGE_TOKEN",
     "chimege_max_audio_sec": "CHIMEGE_MAX_AUDIO_SEC",
+    "ai_provider": "AI_PROVIDER",
     "openai_api_key": "OPENAI_API_KEY",
     "openai_model": "OPENAI_MODEL",
     "openai_base_url": "OPENAI_BASE_URL",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "anthropic_model": "ANTHROPIC_MODEL",
 }
 
 
@@ -28,18 +31,24 @@ class SettingsUpdateRequest(BaseModel):
     chimege_stt_url: str | None = None
     chimege_token: str | None = None
     chimege_max_audio_sec: int | None = None
+    ai_provider: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
     openai_base_url: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_model: str | None = None
 
 
 class SettingsResponse(BaseModel):
     chimege_stt_url: str
     chimege_token_set: bool
     chimege_max_audio_sec: int
+    ai_provider: str
     openai_model: str
     openai_base_url: str
     openai_api_key_set: bool
+    anthropic_model: str
+    anthropic_api_key_set: bool
 
 
 def _to_response(settings: Settings) -> SettingsResponse:
@@ -47,9 +56,12 @@ def _to_response(settings: Settings) -> SettingsResponse:
         chimege_stt_url=settings.chimege_stt_url,
         chimege_token_set=bool(settings.chimege_token),
         chimege_max_audio_sec=settings.chimege_max_audio_sec,
+        ai_provider=settings.ai_provider,
         openai_model=settings.openai_model,
         openai_base_url=settings.openai_base_url,
         openai_api_key_set=bool(settings.openai_api_key),
+        anthropic_model=settings.anthropic_model,
+        anthropic_api_key_set=bool(settings.anthropic_api_key),
     )
 
 

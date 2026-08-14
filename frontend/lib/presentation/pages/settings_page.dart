@@ -151,6 +151,8 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
   late final _chimegeTokenController = TextEditingController();
   late final _openaiKeyController = TextEditingController();
   late final _openaiModelController = TextEditingController(text: widget.settings.openaiModel);
+  late final _anthropicKeyController = TextEditingController();
+  late final _anthropicModelController = TextEditingController(text: widget.settings.anthropicModel);
   late final _chimegeUrlController = TextEditingController(text: widget.settings.chimegeSttUrl);
   late final _openaiBaseUrlController = TextEditingController(text: widget.settings.openaiBaseUrl);
   late final _chimegeMaxAudioController =
@@ -163,6 +165,8 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
     _chimegeTokenController.dispose();
     _openaiKeyController.dispose();
     _openaiModelController.dispose();
+    _anthropicKeyController.dispose();
+    _anthropicModelController.dispose();
     _chimegeUrlController.dispose();
     _openaiBaseUrlController.dispose();
     _chimegeMaxAudioController.dispose();
@@ -203,6 +207,18 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
             onSaved: _chimegeTokenController.clear,
           ),
         ),
+        const Divider(height: 32),
+        Text('Suggestion provider', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'openai', label: Text('OpenAI')),
+            ButtonSegment(value: 'anthropic', label: Text('Claude')),
+          ],
+          selected: {settings.aiProvider},
+          onSelectionChanged: (selection) =>
+              _saveField(() => repo.updateSettings(aiProvider: selection.first)),
+        ),
         const SizedBox(height: 12),
         _TokenField(
           label: 'OpenAI API key',
@@ -219,6 +235,24 @@ class _CredentialsFormState extends ConsumerState<_CredentialsForm> {
           hintText: 'e.g. gpt-4.1',
           controller: _openaiModelController,
           onSave: () => _saveField(() => repo.updateSettings(openaiModel: _openaiModelController.text.trim())),
+        ),
+        const SizedBox(height: 12),
+        _TokenField(
+          label: 'Claude API key',
+          isSet: settings.anthropicApiKeySet,
+          controller: _anthropicKeyController,
+          onSave: () => _saveField(
+            () => repo.updateSettings(anthropicApiKey: _anthropicKeyController.text.trim()),
+            onSaved: _anthropicKeyController.clear,
+          ),
+        ),
+        const SizedBox(height: 12),
+        _PlainField(
+          label: 'Claude model',
+          hintText: 'e.g. claude-sonnet-5',
+          controller: _anthropicModelController,
+          onSave: () =>
+              _saveField(() => repo.updateSettings(anthropicModel: _anthropicModelController.text.trim())),
         ),
         const SizedBox(height: 8),
         _CollapsibleSection(

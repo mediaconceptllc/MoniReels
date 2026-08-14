@@ -9,12 +9,25 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.ai.llm_client import LLMError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Without an explicit cap, OpenAI reserves the model's entire max-output
+# ceiling (tens of thousands of tokens for gpt-4.1/gpt-5) against the
+# account's tokens-per-minute rate limit, even though 3 shorts + 3 YouTube
+# plans of strict JSON only ever produce a few thousand tokens (measured:
+# ~3.3k tokens for a maximally-sized Mongolian response). That reservation,
+# not the transcript itself, is what tips small-tier accounts into 429
+# rate_limit_exceeded. Capping it here shrinks the counted request size
+# without touching real output. 8000 leaves ~3x headroom over the measured
+# worst case while still fitting under a 30k TPM account tier alongside the
+# largest chunk this app currently sends (~20k prompt tokens).
+MAX_COMPLETION_TOKENS = 8000
 
-class OpenAIError(Exception):
+
+class OpenAIError(LLMError):
     pass
 
 
@@ -87,6 +100,7 @@ class OpenAIClient:
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "schema": json_schema, "strict": True},
             },
+            "max_completion_tokens": MAX_COMPLETION_TOKENS,
         }
         if not self._temperature_unsupported:
             body["temperature"] = temperature

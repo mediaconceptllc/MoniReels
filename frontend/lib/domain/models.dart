@@ -642,24 +642,33 @@ class BackendSettings {
     required this.chimegeSttUrl,
     required this.chimegeTokenSet,
     required this.chimegeMaxAudioSec,
+    required this.aiProvider,
     required this.openaiModel,
     required this.openaiBaseUrl,
     required this.openaiApiKeySet,
+    required this.anthropicModel,
+    required this.anthropicApiKeySet,
   });
 
   factory BackendSettings.fromJson(Map<String, dynamic> j) => BackendSettings(
         chimegeSttUrl: j['chimege_stt_url'] as String,
         chimegeTokenSet: j['chimege_token_set'] as bool,
         chimegeMaxAudioSec: _i(j['chimege_max_audio_sec']),
+        aiProvider: j['ai_provider'] as String,
         openaiModel: j['openai_model'] as String,
         openaiBaseUrl: j['openai_base_url'] as String,
         openaiApiKeySet: j['openai_api_key_set'] as bool,
+        anthropicModel: j['anthropic_model'] as String,
+        anthropicApiKeySet: j['anthropic_api_key_set'] as bool,
       );
 
   final String chimegeSttUrl;
   final bool chimegeTokenSet;
   final int chimegeMaxAudioSec;
+  final String aiProvider;
   final String openaiModel;
   final String openaiBaseUrl;
   final bool openaiApiKeySet;
+  final String anthropicModel;
+  final bool anthropicApiKeySet;
 }
