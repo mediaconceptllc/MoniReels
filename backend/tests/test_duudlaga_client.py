@@ -706,3 +706,32 @@ async def test_a_genuinely_silent_chunk_costs_one_extra_request_and_no_more(
 
     assert await _client(handler, upload_bitrate="32k").transcribe_chunk_text(chunk) == ""
     assert calls == 2
+
+
+def test_compression_is_off_unless_a_bitrate_is_set():
+    """Measured against production, compression cost accuracy and bought
+    nothing that was still needed: two chunks came back `no_speech` that the
+    same audio as WAV transcribed, and a 30s one hung for 180s twice. The
+    machinery stays for a future re-test; the default does not."""
+    from app.config import Settings
+
+    assert Settings(_env_file=None).duudlaga_upload_bitrate == ""
+
+
+@pytest.mark.asyncio
+async def test_with_compression_off_the_wav_goes_straight_out(tmp_path, monkeypatch, chunk):
+    """No encode, no wasted round trip — the WAV is the request."""
+    import app.stt.duudlaga_client as mod
+
+    def _never(*args, **kwargs):
+        raise AssertionError("the encoder must not run with compression off")
+
+    monkeypatch.setattr(mod, "encode_for_upload", _never)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append("opus" if b"audio/ogg" in request.content else "wav")
+        return httpx.Response(200, json={"text": "болсон"})
+
+    assert await _client(handler).transcribe_chunk_text(chunk) == "болсон"
+    assert seen == ["wav"]
