@@ -66,7 +66,12 @@ export function JobProgress({
     );
   }
 
-  const stage = STAGE_LABELS[job.stage] ?? job.stage;
+  // The map first, the worker's own message second. It is the other way
+  // round that shipped: `job.message` is written in English for the logs
+  // ("Transcribing speech"), and preferring it put English in front of the
+  // one user this product has while a complete Mongolian translation of
+  // every stage sat unused two files away.
+  const stage = STAGE_LABELS[job.stage] ?? job.message ?? job.stage;
   const queued = job.state === "queued";
 
   return (
@@ -80,7 +85,7 @@ export function JobProgress({
       <ProgressBar value={queued ? 0 : job.progress} />
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs text-ink-3">
-          {queued ? "Ажлын дараалалд хүлээж байна" : (job.message || stage)}
+          {queued ? "Ажлын дараалалд хүлээж байна" : stage}
         </span>
         <Button
           tone="quiet"

@@ -148,6 +148,7 @@ export const STAGE_LABELS: Record<string, string> = {
   probe: "Мэдээлэл уншиж байна",
   thumbnail: "Хальс бэлдэж байна",
   extract_audio: "Дуу салгаж байна",
+  audio: "Дууг салгаж хадгалж байна",
   transcribing: "Яриаг таньж байна",
   requesting: "Загвараас хариу хүлээж байна",
   normalize: "Хэсгүүдийг бэлдэж байна",
