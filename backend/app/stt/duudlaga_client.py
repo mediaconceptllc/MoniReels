@@ -89,6 +89,7 @@ CODE_MESSAGES = {
     "daily_spend_cap_exceeded": "Энэ түлхүүрийн өдрийн зарлагын хязгаарт хүрлээ.",
     "concurrency_limit_exceeded": "duudlaga.dev рүү зэрэг явуулах хүсэлтийн хязгаарт хүрлээ.",
     "internal_error": "duudlaga.dev дээр серверийн алдаа гарлаа.",
+    "no_speech": "Энэ хэсэгт яриа илрээгүй.",
 }
 
 
@@ -138,6 +139,18 @@ class DuudlagaError(Exception):
         ask for.
         """
         return self.status == 413 or (self.status is not None and self.status >= 500)
+
+    @property
+    def means_no_speech(self) -> bool:
+        """The documented answer for a window with nothing to transcribe.
+
+        Keyed on the status as well as the code, because production returned
+        a 422 carrying the message and no `code`, and a code-only check turned
+        a silent chunk — an outcome the pipeline already knew how to skip —
+        into a dead job at chunk 2 of 68. Same lesson as the 520: the field
+        the API is documented to send is not the field it always sends.
+        """
+        return self.code == "no_speech" or self.status == 422
 
     @property
     def rejects_the_format(self) -> bool:
@@ -328,14 +341,28 @@ class DuudlagaClient(SttProvider):
                 await encode_for_upload(
                     _require_ffmpeg(), wav_path, compressed, self._config.upload_bitrate
                 )
-                return await self._post_file(compressed, "audio/ogg")
+                # `skip_no_speech=False` so an empty verdict on the compressed
+                # bytes comes back as an error to check rather than as "".
+                return await self._post_file(compressed, "audio/ogg", skip_no_speech=False)
             except DuudlagaError as e:
-                if not e.rejects_the_format:
+                if e.means_no_speech:
+                    # Do not take this one on trust. The first span the API
+                    # called silent had transcribed fine the run before, as
+                    # uncompressed audio — so "no speech" here could equally
+                    # be this encode having destroyed it. The original bytes
+                    # settle which, and say so in the log.
+                    logger.info(
+                        "Compressed %s came back as no speech; re-checking the original WAV",
+                        wav_path.name,
+                    )
+                elif e.rejects_the_format:
+                    logger.warning(
+                        "duudlaga.dev rejected a compressed upload (%s); sending WAV from here on",
+                        e,
+                    )
+                    self._send_compressed = False
+                else:
                     raise
-                logger.warning(
-                    "duudlaga.dev rejected a compressed upload (%s); sending WAV from here on", e
-                )
-                self._send_compressed = False
             except ChunkingError:
                 logger.exception("Opus encode failed; sending WAV from here on")
                 self._send_compressed = False
@@ -344,7 +371,7 @@ class DuudlagaClient(SttProvider):
 
         return await self._post_file(wav_path, "audio/wav")
 
-    async def _post_file(self, path: Path, content_type: str) -> str:
+    async def _post_file(self, path: Path, content_type: str, skip_no_speech: bool = True) -> str:
         url = f"{self._config.base_url.rstrip('/')}{TRANSCRIBE_PATH}"
         files = {"file": (path.name, path.read_bytes(), content_type)}
         # The documented request carries only the file. `model` is sent only
@@ -359,7 +386,7 @@ class DuudlagaClient(SttProvider):
             # Not a failure: VAD chose this window, and it does mis-fire on a
             # transient. One empty two-second window must not end an
             # hour-long transcription.
-            if error.code == "no_speech":
+            if error.means_no_speech and skip_no_speech:
                 logger.info("No speech in %s; skipping the chunk", path.name)
                 return ""
             raise error
