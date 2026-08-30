@@ -384,3 +384,119 @@ async def test_transcribe_cleans_up_its_chunk_files(tmp_path, monkeypatch):
 
     await _client(lambda r: httpx.Response(200, json={"text": "x"})).transcribe(audio)
     assert not (tmp_path / "audio_chunks").exists()
+
+
+# ---------------------------------------------------------------------------
+# A refused chunk is halved, not repeated
+# ---------------------------------------------------------------------------
+
+
+def _split_fixture(tmp_path, monkeypatch, seconds: float):
+    """A whole-file transcribe with ffmpeg stubbed out and no pauses, so the
+    file arrives as one chunk of the given length."""
+    import app.stt.duudlaga_client as mod
+
+    audio = tmp_path / "audio.wav"
+    _wav(audio, seconds=seconds)
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: tmp_path / "ffmpeg")
+
+    async def _silences(ffmpeg, path):
+        return []
+
+    async def _extract(ffmpeg, src, out, start, end):
+        out.write_bytes(b"chunk")
+
+    monkeypatch.setattr(mod, "detect_silences", _silences)
+    monkeypatch.setattr(mod, "extract_chunk", _extract)
+    return audio
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_the_server_refuses_is_halved_rather_than_repeated(
+    tmp_path, monkeypatch, _fast_backoff
+):
+    """Production sent a 59s chunk, got a bare 500, sent the identical bytes
+    twice more, and lost a job that had already transcribed and paid for six
+    chunks. The API documents no size limit, so the limit has to be found by
+    halving rather than read."""
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=40.0)
+    sizes: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The first three requests are the full chunk and its two retries;
+        # everything after is a half.
+        sizes.append(len(sizes))
+        if len(sizes) <= 3:
+            return _error(500, "internal_error")
+        return httpx.Response(200, json={"text": "тал."})
+
+    result = await _client(handler, max_audio_sec=60).transcribe(audio)
+
+    assert result.full_text == "тал. тал."
+    # Two halves, at the start of the file and at its midpoint.
+    assert [round(s.start, 1) for s in result.segments] == [0.0, 20.0]
+
+
+@pytest.mark.asyncio
+async def test_halving_gives_up_instead_of_recursing_without_end(
+    tmp_path, monkeypatch, _fast_backoff
+):
+    """Each level doubles the request count, so a span the server will never
+    accept has to stop costing money at some point."""
+    from app.stt.duudlaga_client import DuudlagaError
+
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=40.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _error(500, "internal_error")
+
+    with pytest.raises(DuudlagaError):
+        await _client(handler, max_audio_sec=60).transcribe(audio)
+
+    # Bounded, not unbounded: without a floor this never returns at all.
+    assert calls < 200
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_is_never_answered_by_sending_more_requests(
+    tmp_path, monkeypatch, _fast_backoff
+):
+    """Splitting doubles the request count — exactly what a rate, concurrency
+    or spend limit is asking you to stop doing."""
+    from app.stt.duudlaga_client import DuudlagaError
+
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=40.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _error(429, "rate_limit_exceeded")
+
+    with pytest.raises(DuudlagaError):
+        await _client(handler, max_audio_sec=60).transcribe(audio)
+
+    # The three ordinary retries and not one request more.
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_a_spent_balance_is_not_split_either(tmp_path, monkeypatch, _fast_backoff):
+    from app.stt.duudlaga_client import DuudlagaError
+
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=40.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _error(402, "insufficient_credits")
+
+    with pytest.raises(DuudlagaError):
+        await _client(handler, max_audio_sec=60).transcribe(audio)
+
+    # Fatal: not retried, not split.
+    assert calls == 1

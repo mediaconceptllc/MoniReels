@@ -68,6 +68,16 @@ RETRYABLE_CODES = frozenset({"rate_limit_exceeded", "concurrency_limit_exceeded"
 # A spent balance or a daily cap does not resolve on its own within a job.
 FATAL_CODES = frozenset({"insufficient_credits", "payment_required", "daily_spend_cap_exceeded"})
 
+# How far a chunk the server refused may be halved before the span is given
+# up on. Each level doubles the spans and every span costs MAX_ATTEMPTS
+# requests, so depth is expensive: 2 is 21 requests worst case, 4 would be
+# 93. Two halvings take the 30s ceiling to 7.5s, well under the 21s that
+# production transcribed without complaint.
+MAX_SPLIT_DEPTH = 2
+# Never split below this: sub-second chunks cut words in half, and a span
+# this short contributes almost nothing to the transcript anyway.
+MIN_SPLIT_SEC = 3.0
+
 # Mongolian, because this reaches the producer through the job's error field.
 CODE_MESSAGES = {
     "invalid_request": "Хүсэлт буруу бүрдсэн байна.",
@@ -104,6 +114,19 @@ class DuudlagaError(Exception):
         # "transient". A new code the API adds later must not be assumed
         # billable-and-safe to repeat.
         return self.status in (408, 425, 500, 502, 503, 504)
+
+    @property
+    def blames_the_payload(self) -> bool:
+        """Whether a smaller chunk is worth trying.
+
+        413 says so outright. A 500 does not, but the API documents no size
+        limit at all and in production returned one, three times over, for
+        the same 59s chunk while every chunk under 22s in the same job
+        succeeded — so an oversized payload is the reading that fits. Rate,
+        concurrency and spend limits are deliberately excluded: splitting
+        makes *more* requests, which is the opposite of what they ask for.
+        """
+        return self.status == 413 or self.code == "internal_error" or self.status == 500
 
 
 @dataclass
@@ -170,14 +193,14 @@ class DuudlagaClient(SttProvider):
             results: list[tuple[float, Transcript]] = []
             silent = 0
             for i, (start, end) in enumerate(boundaries):
-                chunk_path = workdir / f"chunk_{i:03d}.wav"
-                await extract_chunk(ffmpeg, wav_path, chunk_path, start, end)
                 logger.info("Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end)
-                text = await self.transcribe_chunk_text(chunk_path)
-                if not text:
+                spans = await self._transcribe_span(
+                    ffmpeg, wav_path, workdir, start, end, f"{i:03d}"
+                )
+                if not spans:
                     silent += 1
                     continue
-                results.append((start, text_to_transcript(text, end - start, self._config.language)))
+                results.extend(spans)
             if silent:
                 logger.info("%d/%d chunk(s) contained no speech", silent, len(boundaries))
             return merge_transcripts(results)
@@ -185,6 +208,57 @@ class DuudlagaClient(SttProvider):
             for f in workdir.glob("*.wav"):
                 f.unlink(missing_ok=True)
             workdir.rmdir()
+
+    async def _transcribe_span(
+        self,
+        ffmpeg: str,
+        wav_path: Path,
+        workdir: Path,
+        start: float,
+        end: float,
+        tag: str,
+        depth: int = 0,
+    ) -> list[tuple[float, Transcript]]:
+        """One span in, positioned transcripts out — halved if it is refused.
+
+        The API documents no maximum chunk length and answers an oversized
+        one with a bare 500, which `_with_retry` then repeats identically
+        twice more before the whole job dies. In production that threw away
+        six chunks already transcribed and paid for, six minutes in, because
+        chunk seven happened to be 59s long while every chunk under 22s in
+        the same job had succeeded.
+
+        Halving turns that into a transcript without having to know the
+        limit the API declines to state, and terminates on its own: each
+        level doubles the request count, so MAX_SPLIT_DEPTH and
+        MIN_SPLIT_SEC bound what one bad span can cost.
+        """
+        chunk_path = workdir / f"chunk_{tag}.wav"
+        await extract_chunk(ffmpeg, wav_path, chunk_path, start, end)
+        try:
+            text = await self.transcribe_chunk_text(chunk_path)
+        except DuudlagaError as e:
+            if not e.blames_the_payload or depth >= MAX_SPLIT_DEPTH or end - start <= MIN_SPLIT_SEC:
+                raise
+            mid = (start + end) / 2
+            logger.warning(
+                "Chunk %s (%.1f-%.1fs) was refused; halving it and sending both parts: %s",
+                tag, start, end, e,
+            )
+            return [
+                *await self._transcribe_span(
+                    ffmpeg, wav_path, workdir, start, mid, f"{tag}a", depth + 1
+                ),
+                *await self._transcribe_span(
+                    ffmpeg, wav_path, workdir, mid, end, f"{tag}b", depth + 1
+                ),
+            ]
+        finally:
+            chunk_path.unlink(missing_ok=True)
+
+        if not text:
+            return []
+        return [(start, text_to_transcript(text, end - start, self._config.language))]
 
     async def account_info(self) -> dict:
         """Key info, balance and limits from GET /me.
@@ -288,7 +362,16 @@ class DuudlagaClient(SttProvider):
                 )
                 await asyncio.sleep(delay)
 
-        raise DuudlagaError(f"duudlaga.dev request failed after {MAX_ATTEMPTS} attempts: {last}")
+        message = f"duudlaga.dev request failed after {MAX_ATTEMPTS} attempts: {last}"
+        if isinstance(last, DuudlagaError):
+            # Carry the classification forward. Rebuilding a bare error here
+            # erased the status and code, so every caller that decides on
+            # them — retry policy, the chunk-halving above — saw an
+            # unclassified failure and could only give up.
+            raise DuudlagaError(
+                message, status=last.status, code=last.code, retry_after=last.retry_after
+            ) from last
+        raise DuudlagaError(message) from last
 
 
 def build_client(settings) -> DuudlagaClient:

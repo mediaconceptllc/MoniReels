@@ -83,7 +83,11 @@ class Settings(BaseSettings):
     duudlaga_model: str = ""
     # Ceiling for pause-based chunking. A chunk is only force-cut once a
     # pause-free stretch reaches this; real pauses split well below it.
-    duudlaga_max_audio_sec: int = 60
+    # 60 was the first guess and production refused it: a 59s chunk drew a
+    # 500 three times over while every chunk under 22s in the same job
+    # succeeded. The client now halves a refused chunk, so this is a
+    # round-trip optimisation rather than the thing keeping jobs alive.
+    duudlaga_max_audio_sec: int = 30
 
     # ---- TTS: ElevenLabs ---------------------------------------------
     # Stored, not yet used. Nothing in the pipeline synthesises speech; the
