@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # handling of compressed audio improves, and the WAV re-check below makes
     # a bad encode visible instead of silent.
     duudlaga_upload_bitrate: str = ""
+    # Chunks in flight at once. Nearly all of a transcription is spent waiting
+    # on the provider — 8 seconds of ffmpeg against 8 minutes of requests on a
+    # 17:44 source — so this, not the local work, is the wall clock. A 429 is
+    # already retried with the server's own Retry-After; set 1 to serialise if
+    # the key's concurrency limit turns out lower than this.
+    duudlaga_concurrency: int = 4
 
     # ---- TTS: ElevenLabs ---------------------------------------------
     # Stored, not yet used. Nothing in the pipeline synthesises speech; the

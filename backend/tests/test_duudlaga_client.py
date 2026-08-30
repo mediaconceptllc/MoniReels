@@ -8,6 +8,7 @@ a worker slot spent retrying a cap that only the clock will clear.
 """
 from __future__ import annotations
 
+import asyncio
 import wave
 from pathlib import Path
 
@@ -15,6 +16,11 @@ import httpx
 import pytest
 
 from app.stt.duudlaga_client import TRANSCRIBE_PATH, DuudlagaClient, DuudlagaConfig, DuudlagaError
+
+# Captured before the autouse fixture below replaces asyncio.sleep with a
+# no-op. Retry backoff must not cost the suite real seconds, but the
+# concurrency tests need time to actually pass for requests to overlap.
+_REAL_SLEEP = asyncio.sleep
 
 
 def _client(handler, **cfg) -> DuudlagaClient:
@@ -735,3 +741,110 @@ async def test_with_compression_off_the_wav_goes_straight_out(tmp_path, monkeypa
 
     assert await _client(handler).transcribe_chunk_text(chunk) == "болсон"
     assert seen == ["wav"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+
+def _three_chunk_fixture(tmp_path, monkeypatch):
+    """A file with two pauses, so it splits into exactly three chunks."""
+    import app.stt.duudlaga_client as mod
+
+    audio = tmp_path / "audio.wav"
+    _wav(audio, seconds=30.0)
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: tmp_path / "ffmpeg")
+
+    async def _silences(ffmpeg, path):
+        return [(10.0, 10.5), (20.0, 20.5)]
+
+    async def _extract(ffmpeg, src, out, start, end):
+        out.write_bytes(b"chunk")
+
+    monkeypatch.setattr(mod, "detect_silences", _silences)
+    monkeypatch.setattr(mod, "extract_chunk", _extract)
+    return audio
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_keeps_chunk_order_when_a_later_chunk_finishes_first(
+    tmp_path, monkeypatch
+):
+    """merge_transcripts joins the text in list order and does not sort, so
+    taking results as they complete would shuffle the interview. The first
+    chunk here is made the slowest precisely so completion order and chunk
+    order disagree."""
+    audio = _three_chunk_fixture(tmp_path, monkeypatch)
+    # Keyed on the chunk's own filename, not on arrival order: the word has to
+    # follow the audio it belongs to, or the test scrambles the transcript by
+    # itself and proves nothing about the code.
+    words = {b"chunk_000": "нэг", b"chunk_001": "хоёр", b"chunk_002": "гурав"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        name = next(k for k in words if k in request.content)
+        # The first chunk answers last.
+        await _REAL_SLEEP(0.05 if name == b"chunk_000" else 0.0)
+        return httpx.Response(200, json={"text": words[name]})
+
+    result = await _client(handler, concurrency=3).transcribe(audio)
+
+    assert result.full_text == "нэг хоёр гурав"
+    assert [round(s.start, 2) for s in result.segments] == [0.0, 10.25, 20.25]
+
+
+@pytest.mark.asyncio
+async def test_chunks_really_do_overlap(tmp_path, monkeypatch):
+    """The whole point: three chunks in flight together, not one after
+    another. The provider is ~0.45x realtime and that wait is the wall clock."""
+    audio = _three_chunk_fixture(tmp_path, monkeypatch)
+    in_flight = 0
+    peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await _REAL_SLEEP(0.02)
+        in_flight -= 1
+        return httpx.Response(200, json={"text": "үг"})
+
+    await _client(handler, concurrency=3).transcribe(audio)
+
+    assert peak == 3, f"chunks were not concurrent (peak in flight: {peak})"
+
+
+@pytest.mark.asyncio
+async def test_concurrency_is_a_ceiling_not_a_target(tmp_path, monkeypatch):
+    """A key whose limit is lower than this setting is served by lowering it
+    to 1, which has to actually serialise."""
+    audio = _three_chunk_fixture(tmp_path, monkeypatch)
+    in_flight = 0
+    peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await _REAL_SLEEP(0.02)
+        in_flight -= 1
+        return httpx.Response(200, json={"text": "үг"})
+
+    await _client(handler, concurrency=1).transcribe(audio)
+
+    assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_a_fatal_chunk_still_fails_the_job(tmp_path, monkeypatch, _fast_backoff):
+    """Concurrency must not turn a spent balance into a partial transcript
+    that looks complete."""
+    from app.stt.duudlaga_client import DuudlagaError
+
+    audio = _three_chunk_fixture(tmp_path, monkeypatch)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return _error(402, "insufficient_credits")
+
+    with pytest.raises(DuudlagaError):
+        await _client(handler, concurrency=3).transcribe(audio)
