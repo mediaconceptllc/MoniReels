@@ -303,6 +303,72 @@ def test_admin_routes_are_closed_to_editors(client, db):
     assert client.get("/admin/users", headers=_auth(client, "root")).status_code == 200
 
 
+def test_provider_status_reports_an_unconfigured_provider(client, db):
+    _user(db, "root", role="admin")
+    response = client.get("/admin/providers", headers=_auth(client, "root"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["duudlaga"]["configured"] is False
+    assert body["storage"]["configured"] is True
+
+
+def test_provider_status_reports_low_credits_instead_of_failing(client, db, monkeypatch):
+    """This route exists because `insufficient_credits` otherwise surfaces
+    only after a job has claimed a worker and downloaded the video. A
+    diagnostics page that 500s on the very condition it was built to report
+    would be worse than not having one."""
+    import app.stt.duudlaga_client as duudlaga
+    from app.config import get_settings
+
+    monkeypatch.setenv("DUUDLAGA_API_KEY", "dk_live_test")
+    get_settings.cache_clear()
+
+    async def _no_credits(self):
+        raise duudlaga.DuudlagaError("duudlaga.dev дээрх кредит дууссан байна.", status=402,
+                                     code="insufficient_credits")
+
+    monkeypatch.setattr(duudlaga.DuudlagaClient, "account_info", _no_credits)
+
+    _user(db, "root", role="admin")
+    response = client.get("/admin/providers", headers=_auth(client, "root"))
+
+    assert response.status_code == 200
+    assert response.json()["duudlaga"] == {
+        "configured": True,
+        "ok": False,
+        "error": "duudlaga.dev дээрх кредит дууссан байна.",
+    }
+    get_settings.cache_clear()
+
+
+def test_provider_status_never_echoes_a_key(client, db, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("DUUDLAGA_API_KEY", "dk_live_secret_value")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret-value")
+    get_settings.cache_clear()
+
+    import app.stt.duudlaga_client as duudlaga
+
+    async def _ok(self):
+        return {"balance": 10.0}
+
+    monkeypatch.setattr(duudlaga.DuudlagaClient, "account_info", _ok)
+
+    _user(db, "root", role="admin")
+    body = client.get("/admin/providers", headers=_auth(client, "root")).text
+    assert "dk_live_secret_value" not in body
+    assert "sk-or-secret-value" not in body
+    assert "testsecret" not in body
+    get_settings.cache_clear()
+
+
+def test_provider_status_is_admin_only(client, db):
+    _user(db, "alice", role="editor")
+    assert client.get("/admin/providers", headers=_auth(client, "alice")).status_code == 403
+
+
 def test_an_admin_cannot_disable_their_own_account(client, db):
     """Otherwise nobody is left who can re-enable anyone."""
     root = _user(db, "root", role="admin")

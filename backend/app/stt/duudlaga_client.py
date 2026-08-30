@@ -3,25 +3,24 @@
 Replaces Chimege. Everything that was NOT Chimege-specific already moved to
 app.stt.chunking; what remains here is transport only.
 
-┌───────────────────────────────────────────────────────────────────────────┐
-│ VERIFY THE WIRE FORMAT BEFORE PRODUCTION                                   │
-│                                                                           │
-│ duudlaga.dev is unreachable from the environment this client was written   │
-│ in (the egress policy blocks the domain), so the request/response shape    │
-│ below follows the near-universal OpenAI-compatible audio-transcription     │
-│ convention rather than a spec that was actually read:                      │
-│                                                                           │
-│     POST {base}/audio/transcriptions                                       │
-│     Authorization: Bearer <key>                                            │
-│     multipart/form-data: file=<wav>, model=…, language=mn                  │
-│     -> {"text": "..."}                                                     │
-│                                                                           │
-│ If the real API differs, ONLY `_build_request` and `_parse_response` need  │
-│ to change — they are the entire surface that touches the wire. Nothing     │
-│ else in this file, and nothing outside it, encodes the format.             │
-│ `DUUDLAGA_TRANSCRIBE_PATH` also lets the path be corrected from the        │
-│ environment without a deploy.                                              │
-└───────────────────────────────────────────────────────────────────────────┘
+Written against the published API:
+
+    POST {base}/stt/transcriptions   multipart file= -> {"id","text",...}
+    GET  {base}/me                   key info, balance, limits
+
+The error contract is the part that shapes this file. Every failure comes
+back as JSON with a `code`, and the codes are NOT interchangeable — three of
+them need behaviour that a plain status-code check gets wrong:
+
+  * 422 `no_speech` is not a failure at all. VAD picks the windows we send,
+    and it does mis-fire on a music transient or a cough. Treating that as an
+    error would let one bad two-second window kill an hour-long
+    transcription; the chunk simply contributes nothing.
+  * 402 must never be retried. Retrying a spent balance produces three
+    identical failures and hides the one thing the operator needs to read.
+  * 429 `daily_spend_cap_exceeded` must never be retried either, even though
+    the other two 429s should be. A daily cap does not clear within the
+    lifetime of a job — only the clock resolves it.
 """
 from __future__ import annotations
 
@@ -51,18 +50,60 @@ logger = get_logger(__name__)
 
 T = TypeVar("T")
 
-RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+# Overridable without a redeploy, in case the route moves.
+TRANSCRIBE_PATH = os.environ.get("DUUDLAGA_TRANSCRIBE_PATH", "/stt/transcriptions")
+ACCOUNT_PATH = os.environ.get("DUUDLAGA_ACCOUNT_PATH", "/me")
+
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_FACTOR = 2.0
+# A server-sent Retry-After is honoured, but not without a ceiling: a job
+# holding its worker slot for ten minutes on one chunk is worse than failing
+# and being requeued.
+MAX_RETRY_AFTER_SEC = 60.0
 REQUEST_TIMEOUT_SEC = 180.0
 
-# Overridable without a redeploy — see the box above.
-TRANSCRIBE_PATH = os.environ.get("DUUDLAGA_TRANSCRIBE_PATH", "/audio/transcriptions")
+# Retry only helps when the condition is transient.
+RETRYABLE_CODES = frozenset({"rate_limit_exceeded", "concurrency_limit_exceeded", "internal_error"})
+# A spent balance or a daily cap does not resolve on its own within a job.
+FATAL_CODES = frozenset({"insufficient_credits", "payment_required", "daily_spend_cap_exceeded"})
+
+# Mongolian, because this reaches the producer through the job's error field.
+CODE_MESSAGES = {
+    "invalid_request": "Хүсэлт буруу бүрдсэн байна.",
+    "insufficient_credits": "duudlaga.dev дээрх кредит дууссан байна. Цэнэглээд дахин оролдоно уу.",
+    "payment_required": "duudlaga.dev-ийн автомат төлбөр амжилтгүй болж хандалт түр зогссон байна.",
+    "rate_limit_exceeded": "duudlaga.dev-ийн хүсэлтийн хязгаарт хүрлээ.",
+    "daily_spend_cap_exceeded": "Энэ түлхүүрийн өдрийн зарлагын хязгаарт хүрлээ.",
+    "concurrency_limit_exceeded": "duudlaga.dev рүү зэрэг явуулах хүсэлтийн хязгаарт хүрлээ.",
+    "internal_error": "duudlaga.dev дээр серверийн алдаа гарлаа.",
+}
 
 
 class DuudlagaError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        code: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.retry_after = retry_after
+
+    @property
+    def retryable(self) -> bool:
+        if self.code in FATAL_CODES:
+            return False
+        if self.code in RETRYABLE_CODES:
+            return True
+        # An unrecognised code is retried only when the status itself says
+        # "transient". A new code the API adds later must not be assumed
+        # billable-and-safe to repeat.
+        return self.status in (408, 425, 500, 502, 503, 504)
 
 
 @dataclass
@@ -93,9 +134,10 @@ class DuudlagaClient(SttProvider):
     async def transcribe_chunk_text(self, chunk_wav_path: Path) -> str:
         """One already-cut chunk in, raw text out — no timing attached.
 
-        This is the single network primitive. Both this class's own
-        pause-based chunking and the VAD pipeline in app.stt.pipeline build
-        on it, so neither has to know the wire format.
+        Returns "" when the API reports `no_speech`. This is the single
+        network primitive both this class's own pause chunking and the VAD
+        pipeline in app.stt.pipeline build on, so neither has to know the
+        wire format or the error contract.
         """
         return await self._with_retry(self._post_chunk, chunk_wav_path)
 
@@ -107,8 +149,7 @@ class DuudlagaClient(SttProvider):
         file is never sent as one request, and compute_pause_boundaries
         degrades to a single [0, duration] chunk on its own for short clips.
         """
-        if not self._config.base_url or not self._config.api_key:
-            raise DuudlagaError("DUUDLAGA_BASE_URL / DUUDLAGA_API_KEY are not configured")
+        self._require_config()
 
         ffmpeg = _require_ffmpeg()
         total_duration = wav_duration_sec(wav_path)
@@ -127,39 +168,74 @@ class DuudlagaClient(SttProvider):
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             results: list[tuple[float, Transcript]] = []
+            silent = 0
             for i, (start, end) in enumerate(boundaries):
                 chunk_path = workdir / f"chunk_{i:03d}.wav"
                 await extract_chunk(ffmpeg, wav_path, chunk_path, start, end)
                 logger.info("Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end)
                 text = await self.transcribe_chunk_text(chunk_path)
+                if not text:
+                    silent += 1
+                    continue
                 results.append((start, text_to_transcript(text, end - start, self._config.language)))
+            if silent:
+                logger.info("%d/%d chunk(s) contained no speech", silent, len(boundaries))
             return merge_transcripts(results)
         finally:
             for f in workdir.glob("*.wav"):
                 f.unlink(missing_ok=True)
             workdir.rmdir()
 
-    # -- wire format: the only two methods that know the protocol ----------
+    async def account_info(self) -> dict:
+        """Key info, balance and limits from GET /me.
 
-    def _build_request(self, wav_path: Path) -> tuple[str, dict, dict, dict]:
-        """Returns (url, headers, files, data) for one transcription request."""
+        Exists so "the transcription failed" can be answered BEFORE the job
+        runs. `insufficient_credits` mid-render costs a worker slot and a
+        download for a job that could never have finished.
+        """
+        self._require_config()
+        response = await self._client.get(
+            f"{self._config.base_url.rstrip('/')}{ACCOUNT_PATH}", headers=self._headers()
+        )
+        if response.status_code >= 400:
+            raise _error_from_response(response)
+        return response.json()
+
+    # -- wire format -------------------------------------------------------
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._config.api_key}"}
+
+    async def _post_chunk(self, wav_path: Path) -> str:
         url = f"{self._config.base_url.rstrip('/')}{TRANSCRIBE_PATH}"
-        headers = {"Authorization": f"Bearer {self._config.api_key}"}
         files = {"file": (wav_path.name, wav_path.read_bytes(), "audio/wav")}
-        data: dict[str, str] = {"language": self._config.language, "response_format": "json"}
-        if self._config.model:
-            data["model"] = self._config.model
-        return url, headers, files, data
+        # The documented request carries only the file. `model` is sent only
+        # when explicitly configured — an unexpected field risks a 400
+        # invalid_request for no gain.
+        data = {"model": self._config.model} if self._config.model else None
+
+        response = await self._client.post(url, headers=self._headers(), files=files, data=data)
+
+        if response.status_code >= 400:
+            error = _error_from_response(response)
+            # Not a failure: VAD chose this window, and it does mis-fire on a
+            # transient. One empty two-second window must not end an
+            # hour-long transcription.
+            if error.code == "no_speech":
+                logger.info("No speech in %s; skipping the chunk", wav_path.name)
+                return ""
+            raise error
+
+        return self._parse_response(response.json())
 
     @staticmethod
     def _parse_response(payload: object) -> str:
-        """Pull the transcript text out of whatever shape came back.
+        """Pull the transcript text out of the response.
 
-        Deliberately tolerant across the handful of conventions in use, so a
-        small difference from the assumed spec surfaces as slightly-off
-        parsing rather than a hard failure on the first real call. An
-        unrecognised shape still raises — silently returning "" would look
-        exactly like "this audio had no speech".
+        `text` is what the API documents. The other keys are accepted because
+        an unrecognised shape must not silently become "" — which would be
+        indistinguishable from "this audio had no speech", the one outcome
+        that already has its own explicit signal.
         """
         if isinstance(payload, str):
             return payload.strip()
@@ -174,45 +250,45 @@ class DuudlagaClient(SttProvider):
                     return DuudlagaClient._parse_response(value)
             segments = payload.get("segments")
             if isinstance(segments, list):
-                return " ".join(
-                    s.get("text", "") for s in segments if isinstance(s, dict)
-                ).strip()
+                return " ".join(s.get("text", "") for s in segments if isinstance(s, dict)).strip()
         raise DuudlagaError(f"Unrecognised duudlaga.dev response shape: {str(payload)[:300]}")
-
-    async def _post_chunk(self, wav_path: Path) -> str:
-        url, headers, files, data = self._build_request(wav_path)
-        response = await self._client.post(url, headers=headers, files=files, data=data)
-        response.raise_for_status()
-        try:
-            payload = response.json()
-        except ValueError:
-            # Some endpoints answer text/plain for a plain transcript.
-            return response.text.strip()
-        return self._parse_response(payload)
 
     # -- retry -------------------------------------------------------------
 
+    def _require_config(self) -> None:
+        if not self._config.base_url or not self._config.api_key:
+            raise DuudlagaError("DUUDLAGA_BASE_URL / DUUDLAGA_API_KEY are not configured")
+
     async def _with_retry(self, call: Callable[..., Awaitable[T]], *args: object) -> T:
-        last_error: Exception | None = None
+        self._require_config()
+        last: Exception | None = None
+
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 return await call(*args)
             except httpx.TimeoutException as e:
-                last_error = e
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code not in RETRYABLE_STATUS_CODES:
-                    raise DuudlagaError(_describe_http_error(e)) from e
-                last_error = e
+                last = e
+                delay = _backoff(attempt)
+            except httpx.HTTPError as e:
+                # A transport failure (DNS, reset) is transient by nature.
+                last = e
+                delay = _backoff(attempt)
+            except DuudlagaError as e:
+                if not e.retryable:
+                    raise
+                last = e
+                # Honour the server's own Retry-After when it sends one; it
+                # knows when the window reopens and we do not.
+                delay = min(e.retry_after, MAX_RETRY_AFTER_SEC) if e.retry_after else _backoff(attempt)
 
             if attempt < MAX_ATTEMPTS:
-                delay = BACKOFF_BASE_SEC * (BACKOFF_FACTOR ** (attempt - 1))
                 logger.warning(
                     "duudlaga.dev attempt %d/%d failed (%s); retrying in %.1fs",
-                    attempt, MAX_ATTEMPTS, type(last_error).__name__, delay,
+                    attempt, MAX_ATTEMPTS, type(last).__name__, delay,
                 )
                 await asyncio.sleep(delay)
 
-        raise DuudlagaError(f"duudlaga.dev request failed after {MAX_ATTEMPTS} attempts: {last_error}")
+        raise DuudlagaError(f"duudlaga.dev request failed after {MAX_ATTEMPTS} attempts: {last}")
 
 
 def build_client(settings) -> DuudlagaClient:
@@ -226,6 +302,10 @@ def build_client(settings) -> DuudlagaClient:
     )
 
 
+def _backoff(attempt: int) -> float:
+    return BACKOFF_BASE_SEC * (BACKOFF_FACTOR ** (attempt - 1))
+
+
 def _require_ffmpeg() -> Path:
     from app.video.ffmpeg import discover_ffmpeg
 
@@ -235,15 +315,57 @@ def _require_ffmpeg() -> Path:
     return binaries.ffmpeg
 
 
-def _describe_http_error(e: httpx.HTTPStatusError) -> str:
-    status = e.response.status_code
-    if status in (401, 403):
-        return f"duudlaga.dev rejected the API key ({status}). Check DUUDLAGA_API_KEY."
-    if status == 404:
-        return (
-            f"duudlaga.dev returned 404 for {e.request.url}. "
-            "The transcription path may differ — set DUUDLAGA_TRANSCRIBE_PATH."
-        )
-    if status == 413:
-        return "Audio chunk was rejected as too large. Lower DUUDLAGA_MAX_AUDIO_SEC."
-    return f"duudlaga.dev request failed ({status}): {e.response.text[:300]}"
+def _error_from_response(response: httpx.Response) -> DuudlagaError:
+    """Build a typed error from the documented `{code, message}` body.
+
+    The code, not the status, decides what happens next: two 429s are
+    retryable and a third (a daily cap) is not, and a 422 is not an error at
+    all. Branching on the status alone gets all three wrong.
+    """
+    code: str | None = None
+    detail: str | None = None
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            error = body.get("error") if isinstance(body.get("error"), dict) else body
+            code = error.get("code") if isinstance(error, dict) else None
+            detail = error.get("message") if isinstance(error, dict) else None
+    except ValueError:
+        pass
+
+    retry_after = _retry_after_seconds(response)
+    message = CODE_MESSAGES.get(code or "", "")
+
+    if not message:
+        if response.status_code in (401, 403):
+            message = "duudlaga.dev API түлхүүрийг татгалзлаа. DUUDLAGA_API_KEY-г шалгана уу."
+        elif response.status_code == 404:
+            message = (
+                f"duudlaga.dev {response.request.url} хаягт 404 өглөө. "
+                "DUUDLAGA_TRANSCRIBE_PATH-ыг шалгана уу."
+            )
+        elif response.status_code == 413:
+            message = "Аудионы хэсэг хэт том байна. DUUDLAGA_MAX_AUDIO_SEC-ийг багасгана уу."
+        else:
+            message = f"duudlaga.dev хүсэлт амжилтгүй ({response.status_code})"
+
+    # The server's own message is appended, not substituted: it carries
+    # detail no local table can (which field was invalid, how low the
+    # balance is).
+    if detail and detail not in message:
+        message = f"{message} ({detail})"
+
+    return DuudlagaError(message, status=response.status_code, code=code, retry_after=retry_after)
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        # The header also permits an HTTP-date. Falling back to normal
+        # backoff is better than parsing a date format wrong and sleeping
+        # for hours.
+        return None

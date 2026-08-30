@@ -79,6 +79,50 @@ def set_active(
     return {"active": user.active}
 
 
+@router.get("/providers")
+async def provider_status() -> dict:
+    """Whether the paid providers are usable RIGHT NOW.
+
+    `insufficient_credits` is a documented duudlaga.dev failure, and it
+    surfaces at the worst possible moment: after a transcribe job has already
+    claimed a worker slot and downloaded the source video. This answers the
+    question before any of that is spent.
+
+    Never raises. A provider being unreachable is itself the answer, and a
+    diagnostics page that 500s tells the operator nothing.
+    """
+    from app.config import get_settings
+    from app.stt.duudlaga_client import DuudlagaError
+    from app.stt.duudlaga_client import build_client as build_stt
+
+    settings = get_settings()
+    duudlaga: dict = {"configured": bool(settings.duudlaga_api_key)}
+    if duudlaga["configured"]:
+        client = build_stt(settings)
+        try:
+            duudlaga["account"] = await client.account_info()
+            duudlaga["ok"] = True
+        except DuudlagaError as e:
+            duudlaga["ok"] = False
+            duudlaga["error"] = str(e)
+        except Exception as e:  # noqa: BLE001 - reachability is part of the answer
+            duudlaga["ok"] = False
+            duudlaga["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            await client.aclose()
+
+    return {
+        "duudlaga": duudlaga,
+        # The key itself is never echoed — only whether one is present. The
+        # model is not a secret and is the thing most likely to be wrong.
+        "openrouter": {
+            "configured": bool(settings.openrouter_api_key),
+            "model": settings.openrouter_model,
+        },
+        "storage": {"configured": settings.r2_enabled, "bucket": settings.r2_bucket},
+    }
+
+
 @router.get("/jobs")
 def recent_jobs(limit: int = 100, db: Session = Depends(get_db)) -> list[dict]:  # noqa: B008
     from app.jobs import queue
