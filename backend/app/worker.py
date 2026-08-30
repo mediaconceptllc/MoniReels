@@ -42,6 +42,7 @@ from app.utils.paths import (
     clear_job_workdir,
     ensure_free,
     job_workdir,
+    purge_trash,
 )
 from app.video.audio import extract_audio_16k_mono_wav, extract_audio_native_wav
 from app.video.capabilities import build_capabilities
@@ -52,6 +53,9 @@ logger = get_logger(__name__)
 
 POLL_IDLE_SEC = 2.0
 REAP_INTERVAL_SEC = 60.0
+# A housekeeping step slower than this is worth a line: the calls it makes
+# reach a database and a third-party API, and both can stall for minutes.
+SLOW_CHORE_SEC = 10.0
 HEARTBEAT_SEC = 5.0
 
 # Rough scratch budget per job kind, checked before the job starts rather
@@ -429,6 +433,40 @@ async def _run_job(job) -> None:
         clear_job_workdir(job.id)
 
 
+async def _housekeeping(settings) -> None:
+    """Requeue corpses, drop old rows, abort billed multipart leftovers.
+
+    Never awaited from the loop — see the call site. Each step is timed
+    because a stall here used to be invisible: the pass logs nothing unless
+    it finds something, so a call blocked for six minutes and a pass with
+    nothing to do looked identical from outside.
+    """
+    try:
+        for label, work in (
+            ("reaping stale jobs", lambda: queue.reap_stale()),
+            ("purging old jobs", lambda: queue.purge_old(settings.job_keep_days)),
+            ("deleting retired scratch", purge_trash),
+            ("aborting stale uploads", _abort_stale_uploads if settings.r2_enabled else None),
+        ):
+            if work is None:
+                continue
+            started = time.time()
+            count = await asyncio.to_thread(work)
+            elapsed = time.time() - started
+            if elapsed > SLOW_CHORE_SEC:
+                logger.warning("Housekeeping: %s took %.0fs", label, elapsed)
+            if label == "reaping stale jobs" and count:
+                logger.warning("Requeued %d job(s) from workers that stopped responding", count)
+    except Exception:  # noqa: BLE001 - housekeeping must never kill the loop
+        logger.exception("Housekeeping pass failed")
+
+
+def _abort_stale_uploads() -> int:
+    from app import r2
+
+    return r2.abort_stale_uploads()
+
+
 async def main() -> None:
     setup_logging()
     settings = get_settings()
@@ -453,22 +491,19 @@ async def main() -> None:
         loop.add_signal_handler(sig, _shutdown.set)
 
     running: set[asyncio.Task] = set()
+    chores: asyncio.Task | None = None
     last_reap = 0.0
 
     while not _shutdown.is_set():
-        if time.time() - last_reap > REAP_INTERVAL_SEC:
+        # Housekeeping runs BESIDE the loop, never inside it. Every call it
+        # makes can block for minutes — a lock held by a killed worker's
+        # connection until TCP gives up, an R2 request that never answers —
+        # and inline it sits in front of the first claim, so the queue stops
+        # dead with nothing in the log but the startup line. Off to the side,
+        # a stuck pass costs housekeeping and nothing else.
+        if (chores is None or chores.done()) and time.time() - last_reap > REAP_INTERVAL_SEC:
             last_reap = time.time()
-            try:
-                requeued = await asyncio.to_thread(queue.reap_stale)
-                if requeued:
-                    logger.warning("Requeued %d job(s) from workers that stopped responding", requeued)
-                await asyncio.to_thread(queue.purge_old, settings.job_keep_days)
-                if settings.r2_enabled:
-                    from app import r2
-
-                    await asyncio.to_thread(r2.abort_stale_uploads)
-            except Exception:  # noqa: BLE001 - housekeeping must never kill the loop
-                logger.exception("Housekeeping pass failed")
+            chores = asyncio.create_task(_housekeeping(settings))
 
         running = {t for t in running if not t.done()}
         if len(running) >= settings.worker_concurrency:
@@ -489,6 +524,8 @@ async def main() -> None:
         logger.info("Claimed job %s (%s, lane=%s)", job.id, job.kind, job.lane)
         running.add(asyncio.create_task(_run_job(job)))
 
+    if chores and not chores.done():
+        chores.cancel()
     if running:
         logger.info("Shutting down; waiting for %d job(s) to finish", len(running))
         await asyncio.gather(*running, return_exceptions=True)

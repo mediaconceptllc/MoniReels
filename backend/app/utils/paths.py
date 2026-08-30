@@ -48,14 +48,47 @@ def clear_job_workdir(job_id: str) -> None:
     shutil.rmtree(work_dir() / "jobs" / _ASCII_SAFE.sub("_", job_id)[:40], ignore_errors=True)
 
 
+# Directories clear_all_workdirs has retired but not yet deleted.
+TRASH_PREFIX = ".trash-"
+
+
 def clear_all_workdirs() -> None:
     """Called at worker startup. A process killed mid-job (OOM, redeploy)
     leaves its scratch behind, and on a small container a few of those fill
-    the disk before any new job can run."""
+    the disk before any new job can run.
+
+    Renames rather than deletes. This runs before the worker's first claim,
+    and rmtree over a volume holding a killed job's scratch - a source video
+    and a few hundred audio chunks - is slow enough to matter: every queued
+    job waits behind it with nothing in the log to say why. A rename is
+    atomic and instant, so the fresh directory is there immediately and
+    `purge_trash` clears the old tree off the claim path.
+    """
     root = work_dir() / "jobs"
     if root.is_dir():
-        shutil.rmtree(root, ignore_errors=True)
+        try:
+            root.rename(root.parent / f"{TRASH_PREFIX}{uuid.uuid4().hex}")
+        except OSError:
+            # Same filesystem is a given here, but a rename can still fail
+            # (permissions, a name already taken). Deleting inline is slower
+            # than the rename, never wrong.
+            logger.warning("Could not retire %s; deleting it inline instead", root)
+            shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True, exist_ok=True)
+
+
+def purge_trash() -> int:
+    """Deletes what clear_all_workdirs retired. Belongs to background
+    housekeeping, never to the path a job is waiting on."""
+    root = get_settings().resolved_work_dir
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for path in root.glob(f"{TRASH_PREFIX}*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 def free_bytes(path: Path | None = None) -> int:

@@ -167,3 +167,78 @@ def test_an_explicit_endpoint_overrides_the_account_id_entirely():
 def test_each_missing_credential_is_named():
     assert "R2_BUCKET is not set" == _settings(r2_bucket="").r2_config_error
     assert "R2_ACCOUNT_ID is not set" == _settings(r2_account_id="").r2_config_error
+
+
+# --------------------------------------------------------------------------
+# abort_stale_uploads walks a paginated listing. It runs at worker startup,
+# so a walk that does not end is a queue that never starts.
+# --------------------------------------------------------------------------
+
+
+class _StuckListing:
+    """A server that says "more to come" and hands back the same page."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def list_multipart_uploads(self, **_kw):
+        self.calls += 1
+        return {"Uploads": [], "IsTruncated": True, "NextKeyMarker": "same", "NextUploadIdMarker": "same"}
+
+
+class _EndlessListing:
+    """A server whose marker advances forever."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def list_multipart_uploads(self, **_kw):
+        self.calls += 1
+        return {
+            "Uploads": [],
+            "IsTruncated": True,
+            "NextKeyMarker": f"k{self.calls}",
+            "NextUploadIdMarker": f"u{self.calls}",
+        }
+
+
+def test_abort_stale_uploads_stops_when_the_marker_stops_moving(monkeypatch):
+    client = _StuckListing()
+    monkeypatch.setattr(r2, "_client_or_raise", lambda: client)
+
+    assert r2.abort_stale_uploads() == 0
+    assert client.calls == 2  # the repeat is recognised, not requested forever
+
+
+def test_abort_stale_uploads_has_a_page_ceiling(monkeypatch):
+    client = _EndlessListing()
+    monkeypatch.setattr(r2, "_client_or_raise", lambda: client)
+
+    assert r2.abort_stale_uploads() == 0
+    assert client.calls == r2.MAX_MPU_PAGES
+
+
+def test_abort_stale_uploads_aborts_only_what_is_older_than_the_cutoff(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    fresh = datetime.now(UTC) - timedelta(hours=1)
+    stale = datetime.now(UTC) - timedelta(days=7)
+    aborted: list[str] = []
+
+    class _Client:
+        def list_multipart_uploads(self, **_kw):
+            return {
+                "Uploads": [
+                    {"Key": "sources/new", "UploadId": "1", "Initiated": fresh},
+                    {"Key": "sources/old", "UploadId": "2", "Initiated": stale},
+                ],
+                "IsTruncated": False,
+            }
+
+        def abort_multipart_upload(self, *, Bucket, Key, UploadId):  # noqa: N803 - boto3's own names
+            aborted.append(Key)
+
+    monkeypatch.setattr(r2, "_client_or_raise", lambda: _Client())
+
+    assert r2.abort_stale_uploads() == 1
+    assert aborted == ["sources/old"]

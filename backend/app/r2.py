@@ -37,6 +37,12 @@ _client_lock = threading.Lock()
 # an upload in flight or something a human put there deliberately.
 MANAGED_PREFIXES = ("sources/", "outputs/", "audio/", "thumbnails/")
 
+# Ceiling on the multipart listing walk. 1000 uploads a page is the S3
+# maximum, so this covers far more leftovers than a bucket should ever
+# hold, and bounds a walk that otherwise depends entirely on the server
+# eventually saying IsTruncated: false.
+MAX_MPU_PAGES = 100
+
 _ASCII_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -71,6 +77,14 @@ def _client_or_raise():
                     config=Config(
                         signature_version="s3v4",
                         retries={"max_attempts": 3, "mode": "standard"},
+                        # Connect only. A TCP handshake to a reachable R2
+                        # never takes ten seconds, so this turns "endpoint
+                        # unreachable" from three minutes of silence into a
+                        # prompt error. read_timeout keeps botocore's 60s:
+                        # this same client streams source videos and renders,
+                        # and a tighter read would abandon a large transfer
+                        # over a slow link that is working fine.
+                        connect_timeout=10,
                     ),
                 )
     return _client
@@ -247,7 +261,8 @@ def abort_stale_uploads() -> int:
     cutoff = datetime.now(UTC) - timedelta(hours=settings.r2_mpu_abort_h)
     aborted = 0
     marker: dict = {}
-    while True:
+    seen: set[tuple[str, str]] = set()
+    for _ in range(MAX_MPU_PAGES):
         page = client.list_multipart_uploads(Bucket=settings.r2_bucket, **marker)
         for upload in page.get("Uploads", []):
             if upload["Initiated"] < cutoff:
@@ -261,6 +276,18 @@ def abort_stale_uploads() -> int:
             "KeyMarker": page.get("NextKeyMarker", ""),
             "UploadIdMarker": page.get("NextUploadIdMarker", ""),
         }
+        # A truncated page whose marker does not move means asking again
+        # returns the same page: trusting IsTruncated alone requests it
+        # forever. This runs at worker startup, so that loop is a queue that
+        # never starts. Neither guard should ever fire; both cost one line
+        # and are silent disasters without it.
+        cursor = (marker["KeyMarker"], marker["UploadIdMarker"])
+        if cursor in seen:
+            logger.warning("R2 multipart listing stopped advancing at %r; giving up", cursor)
+            break
+        seen.add(cursor)
+    else:
+        logger.warning("R2 multipart listing exceeded %d pages; giving up", MAX_MPU_PAGES)
     if aborted:
         logger.info("Aborted %d stale multipart upload(s) older than %dh", aborted, settings.r2_mpu_abort_h)
     return aborted
