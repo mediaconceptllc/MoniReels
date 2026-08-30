@@ -648,3 +648,61 @@ async def test_an_encoder_that_is_not_there_is_not_fatal(tmp_path, monkeypatch, 
 
     assert await _client(handler, upload_bitrate="32k").transcribe_chunk_text(chunk) == "болсон"
     assert seen == ["wav"]
+
+
+@pytest.mark.asyncio
+async def test_a_422_without_a_code_is_still_no_speech(tmp_path, monkeypatch):
+    """Production returned `422 (No speech was detected in the audio.)` with
+    no `code` field, so the code-only check raised instead of skipping and
+    killed the job at chunk 2 of 68 — over an outcome the pipeline already
+    knew how to handle."""
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=10.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"message": "No speech was detected in the audio."})
+
+    result = await _client(handler).transcribe(audio)
+
+    assert result.full_text == ""
+    assert result.segments == []
+
+
+@pytest.mark.asyncio
+async def test_a_silent_verdict_on_compressed_audio_is_checked_against_the_original(
+    tmp_path, monkeypatch, chunk
+):
+    """The first span the API called silent had transcribed fine the run
+    before, uncompressed — so "no speech" on a compressed chunk could equally
+    be this encode having destroyed it. The original bytes settle which."""
+    _fake_encoder(monkeypatch)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        compressed = b"audio/ogg" in request.content
+        seen.append("opus" if compressed else "wav")
+        if compressed:
+            return _error(422, "no_speech")
+        return httpx.Response(200, json={"text": "энд яриа бий"})
+
+    client = _client(handler, upload_bitrate="32k")
+    assert await client.transcribe_chunk_text(chunk) == "энд яриа бий"
+
+    assert seen == ["opus", "wav"]
+    # Not a format rejection, so compression stays on for the next chunk.
+    assert client._send_compressed is True
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_silent_chunk_costs_one_extra_request_and_no_more(
+    tmp_path, monkeypatch, chunk
+):
+    _fake_encoder(monkeypatch)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _error(422, "no_speech")
+
+    assert await _client(handler, upload_bitrate="32k").transcribe_chunk_text(chunk) == ""
+    assert calls == 2
