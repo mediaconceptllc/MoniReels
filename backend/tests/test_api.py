@@ -241,7 +241,9 @@ def test_transcribe_requires_a_video(client, db):
 
     response = client.post(f"/projects/{row.id}/transcribe", headers=headers)
     assert response.status_code == 400
-    assert "video" in response.json()["detail"].lower()
+    # Mongolian, because lib/api.ts shows an API detail to the operator as
+    # written — an English one reaches a Mongolian-only user unchanged.
+    assert "видео" in response.json()["detail"].lower()
 
 
 def test_suggest_requires_a_transcript(client, db):
@@ -261,7 +263,7 @@ def test_suggest_requires_a_transcript(client, db):
 
     response = client.post(f"/projects/{row.id}/suggest", headers=headers)
     assert response.status_code == 400
-    assert "transcribe" in response.json()["detail"].lower()
+    assert "яриаг" in response.json()["detail"].lower()
 
 
 def test_select_rejects_a_range_past_the_end_of_the_video(client, db):
@@ -677,3 +679,93 @@ def test_intro_and_outro_are_off_until_a_project_asks(client, db):
 
     assert body["export"]["use_intro"] is False
     assert body["export"]["use_outro"] is False
+
+
+# ---------------------------------------------------------------------------
+# Providers. A paid job that cannot succeed must be refused before it queues,
+# and a key stored for a feature nothing reads must not look ready.
+# ---------------------------------------------------------------------------
+
+
+def _project_with_video(db, owner) -> Project:
+    row = Project(
+        owner_id=owner.id, name="p",
+        doc={"video": {
+            "source_key": "sources/x/source.mp4", "duration_sec": 60.0, "width": 1920,
+            "height": 1080, "fps": 30.0, "has_audio": True, "codec": "h264", "thumbnail_key": "",
+        }},
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_transcribe_is_refused_when_no_stt_key_is_set(client, db, monkeypatch):
+    # Queued, this claims a worker slot and downloads the video before dying.
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={"duudlaga_api_key": ""})
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+
+    alice = _user(db, "alice")
+    row = _project_with_video(db, alice)
+    response = client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "alice"))
+
+    assert response.status_code == 503
+    assert "duudlaga" in response.json()["detail"].lower()
+
+
+def test_suggest_is_refused_when_no_llm_key_is_set(client, db, monkeypatch):
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={"openrouter_api_key": ""})
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+
+    alice = _user(db, "alice")
+    row = _project_with_video(db, alice)
+    row.doc = {**row.doc, "transcript": {
+        "language": "mn", "full_text": "яриа",
+        "segments": [{"id": "s", "start": 0.0, "end": 2.0, "text": "яриа", "words": []}],
+    }}
+    db.commit()
+
+    response = client.post(f"/projects/{row.id}/suggest", headers=_auth(client, "alice"))
+
+    assert response.status_code == 503
+    assert "openrouter" in response.json()["detail"].lower()
+
+
+def test_readiness_is_visible_to_someone_who_cannot_change_it(client, db):
+    # The warning has to appear on the page with the paid button, and that
+    # page is not admin-only.
+    _user(db, "alice")
+    response = client.get("/projects/providers/status", headers=_auth(client, "alice"))
+
+    assert response.status_code == 200
+    names = {c["name"] for c in response.json()["capabilities"]}
+    assert names == {"stt", "llm", "tts"}
+
+
+def test_readiness_leaks_no_keys_or_balances(client, db):
+    _user(db, "alice")
+    body = client.get("/projects/providers/status", headers=_auth(client, "alice")).json()
+
+    for capability in body["capabilities"]:
+        assert set(capability) == {"name", "label", "ready", "blocked"}
+
+
+def test_a_stored_key_for_an_unbuilt_feature_never_reads_as_ready():
+    # ElevenLabs has a key field and no code behind it. Reporting that as
+    # working is how the first attempt to use it becomes a bug report.
+    from app import providers
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={"elevenlabs_api_key": "sk_live_whatever"})
+    tts = next(c for c in providers.describe(settings) if c.name == providers.TTS)
+
+    assert tts.configured is True
+    assert tts.implemented is False
+    assert tts.ready is False
+    assert tts.blocked

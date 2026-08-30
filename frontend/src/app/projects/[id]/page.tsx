@@ -17,6 +17,7 @@ import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration } from "@/lib/format";
 import type { Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Spinner } from "@/components/ui";
+import { ProviderWarnings } from "@/components/ProviderWarnings";
 import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { JobProgress } from "@/components/JobProgress";
 import { OutputList } from "@/components/OutputList";
@@ -142,6 +143,9 @@ export default function ProjectPage() {
             Төсөл устгах
           </Button>
         </header>
+
+        {/* Before the button, not after the failed job. */}
+        <ProviderWarnings />
 
         {error && <Alert>{error}</Alert>}
 
