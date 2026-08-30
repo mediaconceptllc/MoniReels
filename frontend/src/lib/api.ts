@@ -25,6 +25,23 @@ import type {
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const TOKEN_KEY = "monireels.token";
 
+/**
+ * True when the bundle fell back to the localhost default but is running
+ * somewhere that is not localhost.
+ *
+ * NEXT_PUBLIC_* is inlined at BUILD time. A deployment built without
+ * NEXT_PUBLIC_API_URL therefore ships a client that calls localhost, and
+ * every request fails instantly — indistinguishable, from the error alone,
+ * from the server being down. Saying "check your network" there sends the
+ * reader somewhere there is nothing to find. (Observed on the first
+ * production deploy.)
+ */
+function isMisconfigured(): boolean {
+  if (typeof window === "undefined") return false;
+  const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/;
+  return local.test(BASE) && !local.test(window.location.origin);
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -66,6 +83,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     response = await fetch(`${BASE}${path}`, { ...init, headers });
   } catch {
+    // Name the actual cause. A configuration mistake and a network outage
+    // look identical from a failed fetch, and only one of them is something
+    // the person reading this can act on.
+    if (isMisconfigured()) {
+      throw new ApiError(
+        0,
+        "Энэ хувилбар серверийн хаяггүй угсрагдсан байна (NEXT_PUBLIC_API_URL). " +
+          "Тохиргоог засаад дахин deploy хийх шаардлагатай.",
+      );
+    }
     throw new ApiError(0, "Серверт холбогдож чадсангүй. Сүлжээгээ шалгана уу.");
   }
 
