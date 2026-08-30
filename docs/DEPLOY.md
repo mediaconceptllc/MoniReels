@@ -15,6 +15,21 @@ Cloudflare дээр R2 сан.
 2. **Manage R2 API Tokens** → *Object Read & Write*, зөвхөн тэр сан руу.
 3. Account ID, Access Key ID, Secret Access Key гурвыг тэмдэглэ.
 
+**`R2_ACCOUNT_ID` нь токены утга БИШ.** Токен үүсгэсний дараа гарах
+хуудсанд дөрвөн зүйл зэрэг харагдана — Token value (`cfat_…`), Access Key
+ID, Secret Access Key, ба S3 endpoint. Account ID нь **зөвхөн endpoint-ийн
+дотор** байдаг:
+
+```
+https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
+        └──────── R2_ACCOUNT_ID (16 хос hex) ───────┘
+```
+
+Endpoint-ыг бүтнээр нь тавьсан ч ажиллана (`config.r2_account` таслаж
+авна). Токены утгыг тавьбал `r2_config_error` эхний хүсэлт дээр
+татгалзана — тэр утга ХЭЗЭЭ Ч алдааны мессеж, лог руу орохгүй (токеноос
+Secret Access Key гардаг тул лог руу орсон токен нь алдагдсан нууц).
+
 **CORS ЗААВАЛ.** Хөтөч шууд PUT хийдэг тул CORS-гүй бол хуулалт preflight
 дээр л унана — алдаа нь сүлжээний алдаа мэт харагдана.
 
@@ -142,7 +157,8 @@ curl https://<api>/health
 ```
 
 - `ffmpeg: false` → image буруу баригдсан
-- `storage: false` → `R2_*` дутуу
+- `storage: false` → `R2_*` дутуу. `GET /admin/providers` аль хувьсагч
+  буруу болохыг нэрлэнэ; хуулалт 503 буцаавал шалтгаан нь хариунд гарна
 - Нэвтэрч чадахгүй → `JWT_SECRET` тавигдаагүй, эсвэл bootstrap ажиллаагүй
   (users хүснэгт аль хэдийн хоосон биш)
 - Хуулалт 403 → R2-гийн CORS

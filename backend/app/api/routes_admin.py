@@ -119,7 +119,14 @@ async def provider_status() -> dict:
             "configured": bool(settings.openrouter_api_key),
             "model": settings.openrouter_model,
         },
-        "storage": {"configured": settings.r2_enabled, "bucket": settings.r2_bucket},
+        # `error` names the variable that is wrong, never its value — this
+        # page is the first place an operator looks, and a diagnostics page
+        # that prints a credential is a diagnostics page that leaks one.
+        "storage": {
+            "configured": settings.r2_enabled,
+            "bucket": settings.r2_bucket,
+            "error": settings.r2_config_error,
+        },
     }
 
 

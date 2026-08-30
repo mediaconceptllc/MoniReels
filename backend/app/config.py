@@ -14,10 +14,14 @@ to survive a restart goes to R2 (see app.r2), and everything under
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com"
+_R2_ACCOUNT_RE = re.compile(r"[0-9a-f]{32}")
 
 
 class Settings(BaseSettings):
@@ -119,14 +123,65 @@ class Settings(BaseSettings):
         return Path(self.work_dir)
 
     @property
+    def r2_account(self) -> str:
+        """The account id, however the dashboard happened to show it.
+
+        Cloudflare presents the id only as the first label of the S3
+        endpoint, so pasting the whole URL — or the bare hostname — is the
+        obvious mistake, and both build a syntactically plausible endpoint
+        that only fails deep inside botocore.
+        """
+        raw = self.r2_account_id.strip()
+        if "//" in raw:
+            raw = raw.split("//", 1)[1]
+        raw = raw.split("/", 1)[0]
+        if raw.lower().endswith(_R2_ENDPOINT_SUFFIX):
+            raw = raw[: -len(_R2_ENDPOINT_SUFFIX)]
+        return raw.lower()
+
+    @property
     def resolved_r2_endpoint(self) -> str:
         if self.r2_endpoint:
             return self.r2_endpoint.rstrip("/")
-        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+        return f"https://{self.r2_account}{_R2_ENDPOINT_SUFFIX}"
+
+    @property
+    def r2_config_error(self) -> str | None:
+        """Why R2 is unusable, in words an operator can act on.
+
+        Checked here rather than at the first presign because an
+        unrecognisable account id builds a client that raises `ValueError:
+        Invalid endpoint: https://<value>...` — a 500 with no hint of the
+        cause, and, when the value pasted was a token, the credential
+        itself printed into the logs. Nothing below ever echoes a value.
+        """
+        missing = [
+            name
+            for name, value in (
+                ("R2_ACCESS_KEY_ID", self.r2_access_key_id),
+                ("R2_SECRET_ACCESS_KEY", self.r2_secret_access_key),
+                ("R2_BUCKET", self.r2_bucket),
+            )
+            if not value
+        ]
+        if missing:
+            return f"{' / '.join(missing)} is not set"
+        if self.r2_endpoint:
+            return None
+        if not self.r2_account:
+            return "R2_ACCOUNT_ID is not set"
+        if not _R2_ACCOUNT_RE.fullmatch(self.r2_account):
+            return (
+                "R2_ACCOUNT_ID is not a Cloudflare account id (32 hexadecimal "
+                "characters). It is the first label of the S3 endpoint — the part "
+                "between https:// and .r2.cloudflarestorage.com — not the API "
+                "token value and not the access key id."
+            )
+        return None
 
     @property
     def r2_enabled(self) -> bool:
-        return bool(self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket)
+        return self.r2_config_error is None
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-os.environ.setdefault("R2_ACCOUNT_ID", "testaccount")
+os.environ.setdefault("R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef")
 os.environ.setdefault("R2_ACCESS_KEY_ID", "testkey")
 os.environ.setdefault("R2_SECRET_ACCESS_KEY", "testsecret")
 os.environ.setdefault("R2_BUCKET", "testbucket")
@@ -69,7 +69,7 @@ def test_safe_filename_strips_header_breaking_characters():
 
 def test_presigned_put_is_signed_and_scoped_to_one_key():
     url = r2.presign_put("sources/p/source.mp4", "video/mp4")
-    assert url.startswith("https://testaccount.r2.cloudflarestorage.com/")
+    assert url.startswith("https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/")
     assert "sources/p/source.mp4" in url
     assert "X-Amz-Signature" in url
 
@@ -105,3 +105,65 @@ def test_unconfigured_storage_raises_a_named_error(monkeypatch):
     assert r2.enabled() is False
     with pytest.raises(r2.R2Disabled):
         r2.presign_put("sources/p/source.mp4")
+
+
+def _settings(**overrides):
+    from app.config import Settings
+
+    base = {
+        "r2_account_id": "0123456789abcdef0123456789abcdef",
+        "r2_access_key_id": "k",
+        "r2_secret_access_key": "s",
+        "r2_bucket": "b",
+    }
+    return Settings(_env_file=None, **{**base, **overrides})
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "0123456789abcdef0123456789abcdef",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "  0123456789abcdef0123456789abcdef  ",
+        "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+        "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/",
+        "0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+    ],
+)
+def test_account_id_is_accepted_however_the_dashboard_showed_it(pasted):
+    """Cloudflare only ever shows the id inside the S3 endpoint, so the whole
+    URL is the natural thing to copy. Every form has to build one endpoint."""
+    settings = _settings(r2_account_id=pasted)
+    assert settings.r2_config_error is None
+    assert (
+        settings.resolved_r2_endpoint
+        == "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com"
+    )
+
+
+def test_a_token_pasted_as_the_account_id_is_refused_without_echoing_it():
+    """The failure this replaces was `ValueError: Invalid endpoint:
+    https://<value>...` raised from inside botocore — a 500 with no hint of
+    the cause that printed the credential into the logs when the value pasted
+    was a token, as it was in production."""
+    token = "cfat_" + "x" * 43
+    settings = _settings(r2_account_id=token)
+
+    problem = settings.r2_config_error
+    assert problem is not None
+    assert "R2_ACCOUNT_ID" in problem
+    assert token not in problem
+    assert settings.r2_enabled is False
+
+
+def test_an_explicit_endpoint_overrides_the_account_id_entirely():
+    """A private or S3-compatible endpoint is a deliberate override; the
+    account id is then irrelevant and must not veto the configuration."""
+    settings = _settings(r2_account_id="", r2_endpoint="https://minio.internal:9000/")
+    assert settings.r2_config_error is None
+    assert settings.resolved_r2_endpoint == "https://minio.internal:9000"
+
+
+def test_each_missing_credential_is_named():
+    assert "R2_BUCKET is not set" == _settings(r2_bucket="").r2_config_error
+    assert "R2_ACCOUNT_ID is not set" == _settings(r2_account_id="").r2_config_error

@@ -51,8 +51,9 @@ class R2Disabled(R2Error):
 def _client_or_raise():
     global _client
     settings = get_settings()
-    if not settings.r2_enabled:
-        raise R2Disabled("R2 is not configured (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET)")
+    problem = settings.r2_config_error
+    if problem:
+        raise R2Disabled(problem)
     if _client is None:
         with _client_lock:
             if _client is None:
