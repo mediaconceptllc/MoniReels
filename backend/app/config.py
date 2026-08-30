@@ -88,10 +88,19 @@ class Settings(BaseSettings):
     # succeeded. The client now halves a refused chunk, so this is a
     # round-trip optimisation rather than the thing keeping jobs alive.
     duudlaga_max_audio_sec: int = 30
-    # Opus bitrate each chunk is re-encoded to before upload; empty sends the
-    # 16 kHz mono PCM as-is. The provider bills by duration, so this buys no
-    # money back — it buys the bytes, and size is what the API kept refusing.
-    duudlaga_upload_bitrate: str = "32k"
+    # Opus bitrate each chunk is re-encoded to before upload. OFF by default:
+    # measured against production, compression cost accuracy and bought
+    # nothing that was still needed. duudlaga.dev answered two Opus chunks
+    # with `no_speech` that the same bytes as WAV transcribed fine, and hung
+    # for 180s twice on a 30s one. Sending 16 kHz mono PCM instead is already
+    # 6x smaller than the 48 kHz stereo that was failing — a 30s chunk is
+    # 0.96 MB, a quarter of the largest chunk that ever succeeded — so the
+    # bytes were never the part still needing a fix.
+    #
+    # Kept, not deleted: it is one variable to re-test with if the provider's
+    # handling of compressed audio improves, and the WAV re-check below makes
+    # a bad encode visible instead of silent.
+    duudlaga_upload_bitrate: str = ""
 
     # ---- TTS: ElevenLabs ---------------------------------------------
     # Stored, not yet used. Nothing in the pipeline synthesises speech; the

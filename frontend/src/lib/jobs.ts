@@ -16,6 +16,11 @@ import { API_BASE, api, getToken } from "./api";
 import type { Job } from "./types";
 
 const POLL_MS = 1500;
+// How long to give the stream to produce anything at all. A proxy that
+// buffers server-sent events holds the connection open and delivers nothing,
+// which is indistinguishable from a slow job until it finally gives up
+// minutes later — and the panel reads "reading job state" for all of it.
+const FIRST_EVENT_MS = 8000;
 const TERMINAL = new Set(["done", "failed", "canceled"]);
 
 export function isTerminal(job: Job | null): boolean {
@@ -40,16 +45,31 @@ export function watchJob(
   };
 
   void (async () => {
+    let last: Job | null = null;
+    const record = (job: Job) => {
+      last = job;
+      onUpdate(job);
+    };
+
+    // Streaming is an optimisation, not a requirement — a proxy that buffers
+    // SSE, or a network that drops the connection, must not stop the user
+    // from seeing their job finish. Ending normally is the case that used to
+    // be handled backwards: the stream closing without the job having
+    // finished meant the watch returned and nothing ever polled, so the panel
+    // sat on "reading job state" while the job ran to completion behind it.
+    const silent = setTimeout(() => {
+      if (!last) controller.abort();
+    }, FIRST_EVENT_MS);
     try {
-      await streamJob(jobId, controller.signal, onUpdate);
-      if (!stopped) return;
+      await streamJob(jobId, controller.signal, record);
     } catch {
-      // Streaming is an optimisation, not a requirement — a proxy that
-      // buffers SSE, or a network that drops the connection, must not stop
-      // the user from seeing their job finish.
-      if (stopped) return;
+      /* fall through to polling */
+    } finally {
+      clearTimeout(silent);
     }
-    if (!stopped) await pollJob(jobId, () => stopped, onUpdate, onError);
+
+    if (stopped || isTerminal(last)) return;
+    await pollJob(jobId, () => stopped, onUpdate, onError);
   })();
 
   return { stop };
