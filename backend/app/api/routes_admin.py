@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dbmodels import Job, Project, User
-from app.schemas import CreateUserIn, Password
+from app.schemas import CreateUserIn, Password, ProviderSettingsIn
 from app.security import Principal, hash_password, require_admin, stamp_password_change
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -80,7 +80,7 @@ def set_active(
 
 
 @router.get("/providers")
-async def provider_status() -> dict:
+async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     """Whether the paid providers are usable RIGHT NOW.
 
     `insufficient_credits` is a documented duudlaga.dev failure, and it
@@ -91,11 +91,13 @@ async def provider_status() -> dict:
     Never raises. A provider being unreachable is itself the answer, and a
     diagnostics page that 500s tells the operator nothing.
     """
-    from app.config import get_settings
+    from app import provider_settings
     from app.stt.duudlaga_client import DuudlagaError
     from app.stt.duudlaga_client import build_client as build_stt
 
-    settings = get_settings()
+    # Stored overrides included: a page that reports the environment while
+    # the jobs use something else answers the wrong question.
+    settings = provider_settings.effective(db)
     duudlaga: dict = {"configured": bool(settings.duudlaga_api_key)}
     if duudlaga["configured"]:
         client = build_stt(settings)
@@ -128,6 +130,40 @@ async def provider_status() -> dict:
             "error": settings.r2_config_error,
         },
     }
+
+
+@router.get("/settings")
+def provider_settings_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """Where each provider value comes from, and a hint at its contents.
+
+    Never the value itself — the response is the same whether or not the
+    caller already knows the key.
+    """
+    from app import provider_settings
+
+    return provider_settings.describe(db)
+
+
+@router.put("/settings")
+def provider_settings_write(
+    body: ProviderSettingsIn,
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Store the fields that were sent. Takes effect on the next job.
+
+    The worker reads these per job from the same table, so no restart and no
+    redeploy is needed — and nothing has to be pushed to the worker, which
+    could not be reached from here anyway.
+    """
+    from app import provider_settings
+
+    try:
+        changed = provider_settings.apply(db, body.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # Names only. The audit middleware records the request without its body,
+    # and this response is the one other place a value could escape.
+    return {"changed": changed, "settings": provider_settings.describe(db)}
 
 
 @router.get("/jobs")

@@ -128,11 +128,14 @@ async def handle_import_video(handle: JobHandle) -> dict:
 async def handle_transcribe(handle: JobHandle) -> dict:
     binaries = _require_ffmpeg()
     workdir = job_workdir(handle.job_id)
-    settings = get_settings()
 
-    from app import r2
+    from app import provider_settings, r2
 
     with session_scope() as db:
+        # Read per job rather than once at worker start: an admin who fixes
+        # a key expects the next job to use it, not the next deploy — and
+        # the API process has no way to push the new value to this one.
+        settings = provider_settings.effective(db)
         project = load(db, _project_id(handle))
     if project.video is None:
         raise RuntimeError("This project has no video to transcribe yet")
@@ -181,8 +184,10 @@ async def handle_transcribe(handle: JobHandle) -> dict:
 
 
 async def handle_suggest(handle: JobHandle) -> dict:
-    settings = get_settings()
+    from app import provider_settings
+
     with session_scope() as db:
+        settings = provider_settings.effective(db)
         project = load(db, _project_id(handle))
     if project.video is None:
         raise RuntimeError("This project has no video")
