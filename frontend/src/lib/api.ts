@@ -12,6 +12,7 @@
  */
 
 import type {
+  BrandSettings,
   CreateProjectResponse,
   Job,
   Me,
@@ -213,6 +214,23 @@ export const api = {
     request<{ changed: string[]; settings: ProviderSettings }>("/admin/settings", {
       method: "PUT",
       body: JSON.stringify(patch),
+    }),
+
+  brand: () => request<BrandSettings>("/admin/brand"),
+
+  /** Presigned PUT for the logo. The image goes straight to storage — see
+   *  lib/upload.ts — and only the key comes back here. */
+  logoUploadUrl: (contentType: string) =>
+    request<{ key: string; url: string }>("/admin/brand/logo/upload-url", {
+      method: "POST",
+      body: JSON.stringify({ content_type: contentType }),
+    }),
+
+  /** `key: null` clears the logo. */
+  saveLogo: (key: string | null) =>
+    request<BrandSettings>("/admin/brand/logo", {
+      method: "PUT",
+      body: JSON.stringify({ key }),
     }),
 };
 

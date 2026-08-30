@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import r2
 from app.db import get_db
 from app.dbmodels import Job, Project, User
-from app.schemas import CreateUserIn, Password, ProviderSettingsIn
+from app.schemas import CreateUserIn, LogoSaveIn, LogoUploadIn, Password, ProviderSettingsIn
 from app.security import Principal, hash_password, require_admin, stamp_password_change
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -164,6 +165,63 @@ def provider_settings_write(
     # Names only. The audit middleware records the request without its body,
     # and this response is the one other place a value could escape.
     return {"changed": changed, "settings": provider_settings.describe(db)}
+
+
+@router.get("/brand")
+def brand_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """The brand logo, if one is set.
+
+    `url` is a short-lived presigned GET so the admin page can show what is
+    actually stored rather than what was last uploaded from this browser.
+    """
+    from app import brand
+
+    key = brand.get(db)
+    url = None
+    if key and r2.enabled():
+        try:
+            url = r2.presign_get(key)
+        except Exception:  # noqa: BLE001 - a missing preview must not 500 the page
+            url = None
+    return {"logo": {"key": key, "url": url} if key else None, "storage": r2.enabled()}
+
+
+@router.post("/brand/logo/upload-url")
+def brand_logo_upload_url(body: LogoUploadIn) -> dict:
+    """A presigned PUT for the logo. The image never passes through here.
+
+    Same rule as every other media file in this system (app.r2): the browser
+    uploads straight to R2, and the API only ever learns the key.
+    """
+    from app import brand
+
+    if not r2.enabled():
+        raise HTTPException(status_code=503, detail="Object storage is not configured on this server")
+    try:
+        key = brand.new_logo_key(body.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"key": key, "url": r2.presign_put(key, body.content_type)}
+
+
+@router.put("/brand/logo")
+def brand_logo_save(body: LogoSaveIn, db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """Adopt an uploaded object as the logo, or clear it with a null key.
+
+    The object is checked to exist first: a client that presigned a URL and
+    then failed to PUT would otherwise leave every export looking for an
+    image that was never stored.
+    """
+    from app import brand
+
+    if body.key is not None:
+        if not body.key.startswith("brand/"):
+            raise HTTPException(status_code=400, detail="A logo key must live under brand/")
+        if r2.enabled() and not r2.exists(body.key):
+            raise HTTPException(status_code=400, detail="That upload did not complete")
+    brand.set_logo(db, body.key)
+    db.commit()
+    return brand_read(db)
 
 
 @router.get("/jobs")

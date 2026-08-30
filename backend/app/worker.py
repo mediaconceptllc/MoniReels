@@ -253,8 +253,9 @@ async def handle_export(handle: JobHandle) -> dict:
 
 
 async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
-    from app import r2
+    from app import brand, r2
     from app.dbmodels import Output
+    from app.export.overlay import LogoOverlay
     from app.export.pipeline import render_all_ideas, render_timeline
 
     binaries = _require_ffmpeg()
@@ -277,6 +278,26 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     segments = project.transcript.segments if project.transcript else None
 
+    # The mark is global and the choice is per project, so both have to be
+    # true before a byte is fetched. A logo the project turned off must not
+    # cost a download, and a project asking for one nobody uploaded renders
+    # without it rather than failing (render_timeline says so in the log).
+    logo = logo_path = None
+    if project.export.logo.enabled:
+        with session_scope() as db:
+            logo_key = brand.get(db)
+        if logo_key:
+            logo_path = workdir / f"logo{Path(logo_key).suffix or '.png'}"
+            await asyncio.to_thread(r2.download_file, logo_key, logo_path)
+            logo = LogoOverlay(
+                position=project.export.logo.position,
+                width_pct=project.export.logo.width_pct,
+                opacity=project.export.logo.opacity,
+                margin_pct=project.export.logo.margin_pct,
+            )
+        else:
+            logger.warning("Project asked for the brand logo but none is uploaded")
+
     if all_ideas:
         if project.suggestions is None or not (
             project.suggestions.shorts or project.suggestions.youtube
@@ -290,6 +311,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             output_dir=out_dir, job_id=handle.job_id,
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
+            logo=logo, logo_path=logo_path,
         )
     else:
         if not project.clips:
@@ -305,6 +327,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             supported_xfade=caps.xfade_transitions, workdir=workdir, output_path=output_path,
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
+            logo=logo, logo_path=logo_path,
         )
         rendered = [{"kind": "export", "title": project_name, "output_path": str(output_path)}]
 

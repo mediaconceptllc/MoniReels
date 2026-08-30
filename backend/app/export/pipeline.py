@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.export.normalize import build_audio_filter, build_video_filter, validate_portrait_fill
+from app.export.overlay import LogoOverlay, build_burn_args, build_overlay_filter
 from app.export.presets import (
     AUDIO_CHANNEL_LAYOUT,
     AUDIO_SAMPLE_RATE,
@@ -145,7 +146,7 @@ async def _join_xfade(
     )
 
 
-async def _burn_subtitles(
+async def _burn_overlays(
     binaries: FfmpegBinaries,
     handle: JobHandle,
     input_path: Path,
@@ -154,16 +155,36 @@ async def _burn_subtitles(
     crf: int,
     preset: str,
     expected_duration: float,
+    *,
+    subtitles: bool,
+    logo: LogoOverlay | None,
+    logo_path: Path | None,
+    frame_width: int,
+    frame_height: int,
 ) -> None:
-    """Burns workdir/subs.ass into input_path. `subs.ass` is referenced by bare
-    filename with cwd=workdir on purpose — passing an absolute Windows path
-    (with a drive letter) into the `subtitles=` filter option string breaks on
-    the colon, since ffmpeg's filter-option parser also uses ':' as a separator.
+    """Draws the brand logo and burns workdir/subs.ass, in ONE pass.
+
+    `subs.ass` is referenced by bare filename with cwd=workdir on purpose —
+    passing an absolute Windows path (with a drive letter) into the
+    `subtitles=` filter option string breaks on the colon, since ffmpeg's
+    filter-option parser also uses ':' as a separator.
+
+    The audio is mapped explicitly because a filter_complex replaces the
+    default stream selection: without `-map 0:a?` a logo would silently render
+    the short SILENT, and `?` rather than a bare `0:a` because a clip with no
+    audio track must not fail the whole export.
     """
-    args = ["-i", str(input_path), "-vf", "subtitles=subs.ass"]
-    args += build_video_encoder_args(crf, preset)
-    args += build_audio_encoder_args()
-    args += ["-movflags", "+faststart", str(out_path)]
+    graph = build_overlay_filter(
+        logo, subtitles=subtitles, frame_width=frame_width, frame_height=frame_height
+    )
+    args = build_burn_args(
+        str(input_path),
+        str(logo_path) if logo_path is not None else None,
+        graph,
+        encoder_args=build_video_encoder_args(crf, preset),
+        audio_args=build_audio_encoder_args(),
+        out_path=str(out_path),
+    )
 
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
@@ -201,9 +222,17 @@ async def render_timeline(
     burn_subtitles: bool = False,
     subtitle_style: SubtitleStyle | None = None,
     transcript_segments: list[Segment] | None = None,
+    logo: LogoOverlay | None = None,
+    logo_path: Path | None = None,
 ) -> Path:
     if not clips:
         raise ValueError("Cannot render an empty clip list")
+    # A logo asks for a pass that draws pixels; without the file there is
+    # nothing to draw, so the export runs without it rather than failing on
+    # an asset the render does not depend on.
+    if logo is not None and (logo_path is None or not logo_path.exists()):
+        logger.warning("Logo requested but no image is available; rendering without it")
+        logo = None
 
     validate_portrait_fill(portrait_fill)
     width, height = resolve_dimensions(orientation)
@@ -240,7 +269,10 @@ async def render_timeline(
         handle.raise_if_cancelled()
         await handle.set_progress(0.6, stage="join", message="Joining clips")
 
-        need_burn_pass = burn_subtitles and bool(transcript_segments)
+        # Decided before the join, because it chooses where the join writes.
+        # A logo alone is reason enough: it draws on pixels exactly as the
+        # subtitles do, and both ride the same single re-encode.
+        need_burn_pass = (burn_subtitles and bool(transcript_segments)) or logo is not None
         join_target = joined_path if need_burn_pass else part_path
 
         if transition.duration <= 0 or n == 1:
@@ -272,11 +304,15 @@ async def render_timeline(
         if write_srt and retimed_segments:
             atomic_write_text(output_path.with_suffix(".srt"), segments_to_srt(retimed_segments))
 
-        if need_burn_pass and retimed_segments:
-            ass_content = build_ass_document(retimed_segments, subtitle_style or SubtitleStyle())
-            (workdir / "subs.ass").write_text(ass_content, encoding="utf-8")
-            await _burn_subtitles(
-                binaries, handle, joined_path, part_path, workdir, crf, preset, final_duration
+        burn_subs = burn_subtitles and bool(retimed_segments)
+        if burn_subs or logo is not None:
+            if burn_subs:
+                ass_content = build_ass_document(retimed_segments, subtitle_style or SubtitleStyle())
+                (workdir / "subs.ass").write_text(ass_content, encoding="utf-8")
+            await _burn_overlays(
+                binaries, handle, joined_path, part_path, workdir, crf, preset, final_duration,
+                subtitles=burn_subs, logo=logo, logo_path=logo_path,
+                frame_width=width, frame_height=height,
             )
         elif need_burn_pass:
             # Subtitles were requested but there was nothing to burn (e.g. no
@@ -341,6 +377,8 @@ async def render_all_ideas(
     burn_subtitles: bool = False,
     subtitle_style: SubtitleStyle | None = None,
     transcript_segments: list[Segment] | None = None,
+    logo: LogoOverlay | None = None,
+    logo_path: Path | None = None,
 ) -> list[dict]:
     """Renders one standalone output file per suggested idea (up to 3 reels +
     up to 3 youtube compilations), reusing render_timeline unchanged for each.
@@ -388,7 +426,7 @@ async def render_all_ideas(
             crf=crf, preset=preset, orientation=orientation, portrait_fill=portrait_fill,
             supported_xfade=supported_xfade, workdir=idea_workdir, output_path=output_path,
             write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
-            transcript_segments=transcript_segments,
+            transcript_segments=transcript_segments, logo=logo, logo_path=logo_path,
         )
         results.append({"kind": kind, "title": title, "output_path": str(output_path)})
 

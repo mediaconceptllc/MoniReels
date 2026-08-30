@@ -120,6 +120,26 @@ class SubtitleStyle(BaseModel):
     margin_v: int = 40
 
 
+class LogoSettings(BaseModel):
+    """Where the brand logo goes on an export, and whether it goes at all.
+
+    The IMAGE is not here — it lives once in the admin settings, because a
+    studio has one mark and re-uploading it per project is how two versions of
+    a logo end up in circulation. This is the per-project decision about using
+    it, which is the part that actually differs between exports.
+
+    Sizes are percentages of the frame: the same project renders portrait and
+    landscape, and a logo pinned at 160px is a twelfth of one and a quarter of
+    the other.
+    """
+
+    enabled: bool = False
+    position: str = "top-right"  # "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    width_pct: float = Field(default=12.0, gt=0.0, le=100.0)
+    opacity: float = Field(default=0.85, ge=0.0, le=1.0)
+    margin_pct: float = Field(default=4.0, ge=0.0, lt=50.0)
+
+
 class ExportSettings(BaseModel):
     """Render options.
 
@@ -136,6 +156,7 @@ class ExportSettings(BaseModel):
     preset: str = "medium"
     burn_subtitles: bool = True
     write_srt: bool = True
+    logo: LogoSettings = Field(default_factory=LogoSettings)
 
 
 class Project(BaseModel):

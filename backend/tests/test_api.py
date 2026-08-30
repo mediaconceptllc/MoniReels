@@ -525,3 +525,87 @@ def test_a_rejected_value_is_never_read_back(client, db):
     )
     assert too_long_key.status_code == 422
     assert secret[:20] not in too_long_key.text
+
+
+# ---------------------------------------------------------------------------
+# Brand logo. Global, admin-only, and the image never passes through the API.
+# ---------------------------------------------------------------------------
+
+
+def test_the_brand_logo_is_admin_only(client, db):
+    _user(db, "alice")
+    _user(db, "root", role="admin")
+    editor, admin = _auth(client, "alice"), _auth(client, "root")
+
+    assert client.get("/admin/brand", headers=editor).status_code == 403
+    assert client.put("/admin/brand/logo", headers=editor, json={"key": None}).status_code == 403
+    assert client.get("/admin/brand", headers=admin).status_code == 200
+
+
+def test_no_logo_is_set_to_begin_with(client, db):
+    _user(db, "root", role="admin")
+    body = client.get("/admin/brand", headers=_auth(client, "root")).json()
+    assert body["logo"] is None
+
+
+def test_the_upload_url_is_presigned_and_the_image_never_posts_here(client, db):
+    _user(db, "root", role="admin")
+    response = client.post(
+        "/admin/brand/logo/upload-url",
+        headers=_auth(client, "root"),
+        json={"content_type": "image/png"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["key"].startswith("brand/logo-")
+    assert body["key"].endswith(".png")
+    assert "X-Amz-Signature" in body["url"]
+
+
+def test_a_format_ffmpeg_cannot_read_is_refused_at_upload_time(client, db):
+    # Refused here rather than at render time, where it would fail an export
+    # the logo is only decorating.
+    _user(db, "root", role="admin")
+    response = client.post(
+        "/admin/brand/logo/upload-url",
+        headers=_auth(client, "root"),
+        json={"content_type": "image/svg+xml"},
+    )
+    assert response.status_code == 400
+
+
+def test_a_logo_key_outside_the_brand_prefix_is_refused(client, db):
+    # Otherwise this route adopts any object in the bucket, including another
+    # project's source video, and every export would try to draw it.
+    _user(db, "root", role="admin")
+    response = client.put(
+        "/admin/brand/logo",
+        headers=_auth(client, "root"),
+        json={"key": "sources/someone-elses-video.mp4"},
+    )
+    assert response.status_code == 400
+
+
+def test_clearing_the_logo_needs_no_storage_round_trip(client, db):
+    _user(db, "root", role="admin")
+    response = client.put("/admin/brand/logo", headers=_auth(client, "root"), json={"key": None})
+    assert response.status_code == 200
+    assert response.json()["logo"] is None
+
+
+def test_export_settings_carry_the_per_project_logo_choice(client, db):
+    # The image is global; whether to use it is not.
+    _user(db, "alice")
+    headers = _auth(client, "alice")
+    created = client.post(
+        "/projects",
+        headers=headers,
+        json={"name": "Тест", "filename": "a.mp4", "size_bytes": 1024},
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["project_id"]
+    body = client.get(f"/projects/{project_id}", headers=headers).json()
+
+    logo = body["export"]["logo"]
+    assert logo["enabled"] is False  # off until someone asks for it
+    assert logo["position"] == "top-right"  # clear of the bottom subtitles

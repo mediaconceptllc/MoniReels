@@ -92,6 +92,20 @@ export interface Suggestions {
   youtube: YoutubePlan[];
 }
 
+export type LogoPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
+/** Where the brand logo goes on THIS project's exports. The image itself is
+ *  global and lives in the admin settings — one studio, one mark. */
+export interface LogoSettings {
+  enabled: boolean;
+  position: LogoPosition;
+  /** Percentages of the frame, never pixels: the same project renders
+   *  portrait and landscape. */
+  width_pct: number;
+  opacity: number;
+  margin_pct: number;
+}
+
 export interface ExportSettings {
   orientation: "portrait" | "landscape";
   portrait_fill: "blur" | "crop" | "pad";
@@ -99,6 +113,18 @@ export interface ExportSettings {
   preset: string;
   burn_subtitles: boolean;
   write_srt: boolean;
+  logo: LogoSettings;
+}
+
+export interface BrandLogo {
+  key: string;
+  /** Signed and short-lived; refetch rather than cache. */
+  url: string | null;
+}
+
+export interface BrandSettings {
+  logo: BrandLogo | null;
+  storage: boolean;
 }
 
 export interface SubtitleStyle {

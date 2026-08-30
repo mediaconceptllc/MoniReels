@@ -202,6 +202,20 @@ class OutputOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class LogoUploadIn(BaseModel):
+    """Asks for a presigned PUT. The type is checked here rather than at
+    render time, where a format ffmpeg cannot read would fail an export the
+    logo is only decorating."""
+
+    content_type: str = Field(max_length=64)
+
+
+class LogoSaveIn(BaseModel):
+    """`key` null clears the logo. Bounded because it becomes an R2 key."""
+
+    key: str | None = Field(default=None, max_length=KEY_MAX)
+
+
 class ProviderSettingsIn(BaseModel):
     """Every field is optional and means three different things.
 
