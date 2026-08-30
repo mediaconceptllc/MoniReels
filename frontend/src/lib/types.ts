@@ -31,6 +31,9 @@ export interface VideoMeta {
   has_audio: boolean;
   codec: string;
   thumbnail_key: string;
+  /** The speech track, extracted once at import. Empty on projects imported
+   *  before it existed and on sources with no audio. */
+  audio_key: string;
 }
 
 export interface Segment {

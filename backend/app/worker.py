@@ -33,7 +33,7 @@ from app.jobs.queue import JobCancelled, JobHandle
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
 from app.stt.duudlaga_client import build_client as build_stt_client
-from app.stt.pipeline import transcribe_audio
+from app.stt.pipeline import separation_available, transcribe_audio
 from app.subtitle.srt import segments_to_srt
 from app.utils.logging import get_logger, setup_logging
 from app.utils.paths import (
@@ -43,7 +43,7 @@ from app.utils.paths import (
     ensure_free,
     job_workdir,
 )
-from app.video.audio import extract_audio_native_wav
+from app.video.audio import extract_audio_16k_mono_wav, extract_audio_native_wav
 from app.video.capabilities import build_capabilities
 from app.video.ffmpeg import discover_ffmpeg
 from app.video.probe import generate_thumbnail, probe_video
@@ -97,6 +97,19 @@ async def handle_import_video(handle: JobHandle) -> dict:
     await handle.set_progress(0.5, stage="probe", message="Reading video metadata")
     raw = await probe_video(binaries.ffprobe, local)
 
+    # Extract the speech track once, here, while the video is already on
+    # disk. Every transcribe used to pull the whole source down again — a
+    # 200 MB+ download and a second ffmpeg pass — to arrive at ~32 MB of
+    # audio that never changes. Re-runs are what made that hurt: the video is
+    # fetched once, the audio is re-read on every attempt.
+    audio_key = ""
+    if raw["has_audio"]:
+        await handle.set_progress(0.6, stage="audio", message="Extracting the audio track")
+        audio_local = workdir / "audio.wav"
+        await extract_audio_16k_mono_wav(binaries.ffmpeg, local, audio_local)
+        audio_key = r2.audio_key(handle.project_id or "", "audio.wav")
+        await asyncio.to_thread(r2.upload_file, audio_local, audio_key, "audio/wav")
+
     await handle.set_progress(0.7, stage="thumbnail", message="Extracting a thumbnail")
     thumb = workdir / "thumbnail.jpg"
     # Half-way in, not the first frame: an opening fade or a black slate makes
@@ -116,10 +129,12 @@ async def handle_import_video(handle: JobHandle) -> dict:
             has_audio=raw["has_audio"],
             codec=raw["codec"],
             thumbnail_key=thumb_key,
+            audio_key=audio_key,
         )
         save(db, project)
         row = get_row(db, project.id)
         row.thumbnail_key = thumb_key
+        row.audio_key = audio_key or None
 
     logger.info("Imported %s (%s): %.1fs", project_name, source_key, raw["duration_sec"])
     return {"duration_sec": raw["duration_sec"], "has_audio": raw["has_audio"]}
@@ -142,13 +157,25 @@ async def handle_transcribe(handle: JobHandle) -> dict:
     if not project.video.has_audio:
         raise RuntimeError("This video has no audio track")
 
-    await handle.set_progress(0.02, stage="download", message="Fetching the video")
-    local = workdir / f"source{Path(project.video.source_key).suffix or '.mp4'}"
-    await asyncio.to_thread(r2.download_file, project.video.source_key, local)
-
-    await handle.set_progress(0.05, stage="extract_audio", message="Extracting audio")
     audio_path = workdir / "audio.wav"
-    await extract_audio_native_wav(binaries.ffmpeg, local, audio_path)
+    # Demucs is the one consumer that wants the source's own sample rate:
+    # separation degrades on audio already narrowed to the 16 kHz mono STT
+    # contract, so the stored copy is a shortcut only while separation is off.
+    separating = separation_available(settings)
+    if project.video.audio_key and not separating:
+        # ~32 MB instead of the whole source, and no second ffmpeg pass.
+        await handle.set_progress(0.02, stage="download", message="Fetching the audio")
+        await asyncio.to_thread(r2.download_file, project.video.audio_key, audio_path)
+    else:
+        await handle.set_progress(0.02, stage="download", message="Fetching the video")
+        local = workdir / f"source{Path(project.video.source_key).suffix or '.mp4'}"
+        await asyncio.to_thread(r2.download_file, project.video.source_key, local)
+
+        await handle.set_progress(0.05, stage="extract_audio", message="Extracting audio")
+        if separating:
+            await extract_audio_native_wav(binaries.ffmpeg, local, audio_path)
+        else:
+            await extract_audio_16k_mono_wav(binaries.ffmpeg, local, audio_path)
 
     client = build_stt_client(settings)
     try:

@@ -9,6 +9,7 @@ a worker slot spent retrying a cap that only the clock will clear.
 from __future__ import annotations
 
 import wave
+from pathlib import Path
 
 import httpx
 import pytest
@@ -17,7 +18,14 @@ from app.stt.duudlaga_client import TRANSCRIBE_PATH, DuudlagaClient, DuudlagaCon
 
 
 def _client(handler, **cfg) -> DuudlagaClient:
-    base = {"base_url": "https://api.duudlaga.dev/v1", "api_key": "dk_live_test", "max_audio_sec": 60.0}
+    # Compression off unless a test asks for it: encoding placeholder bytes
+    # would shell out to a real ffmpeg, and these tests are hermetic.
+    base = {
+        "base_url": "https://api.duudlaga.dev/v1",
+        "api_key": "dk_live_test",
+        "max_audio_sec": 60.0,
+        "upload_bitrate": "",
+    }
     base.update(cfg)
     return DuudlagaClient(
         DuudlagaConfig(**base),
@@ -547,3 +555,96 @@ def test_a_client_side_status_is_neither_retried_nor_split(status):
     error = DuudlagaError("boom", status=status)
     assert error.retryable is False
     assert error.blames_the_payload is False
+
+
+# ---------------------------------------------------------------------------
+# Compressed upload
+# ---------------------------------------------------------------------------
+
+
+def _fake_encoder(monkeypatch, sizes: list[int] | None = None):
+    """Stand in for ffmpeg: writes a small file where the Opus would go."""
+    import app.stt.duudlaga_client as mod
+
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: Path("ffmpeg"))
+
+    async def _encode(ffmpeg, src, out, bitrate):
+        out.write_bytes(b"OggS" + b"\0" * 16)
+        if sizes is not None:
+            sizes.append(len(src.read_bytes()))
+
+    monkeypatch.setattr(mod, "encode_for_upload", _encode)
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_is_uploaded_compressed(tmp_path, monkeypatch, chunk):
+    """16 kHz mono PCM is 32 kB per second on the wire, and every chunk the
+    API refused was one of the large ones."""
+    _fake_encoder(monkeypatch)
+    sent: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        # The multipart body carries the filename and the content type.
+        sent.append(
+            (
+                "audio/ogg" if b"audio/ogg" in body else "audio/wav",
+                "opus" if b".opus" in body else "wav",
+            )
+        )
+        return httpx.Response(200, json={"text": "болсон"})
+
+    text = await _client(handler, upload_bitrate="32k").transcribe_chunk_text(chunk)
+
+    assert text == "болсон"
+    assert sent == [("audio/ogg", "opus")]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_format_falls_back_to_wav_and_stops_guessing(
+    tmp_path, monkeypatch, chunk, _fast_backoff
+):
+    """The documented request shows a .wav and the accepted formats are
+    written down nowhere, so compression is a guess. Taking it back has to
+    rescue the chunk, and it has to happen once — not on all 55."""
+    _fake_encoder(monkeypatch)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        compressed = b"audio/ogg" in request.content
+        seen.append("opus" if compressed else "wav")
+        if compressed:
+            return _error(400, "invalid_request")
+        return httpx.Response(200, json={"text": "болсон"})
+
+    client = _client(handler, upload_bitrate="32k")
+
+    assert await client.transcribe_chunk_text(chunk) == "болсон"
+    assert await client.transcribe_chunk_text(chunk) == "болсон"
+
+    # One rejected attempt, then WAV for good — not one wasted encode and
+    # round trip per chunk for the rest of the job.
+    assert seen == ["opus", "wav", "wav"]
+
+
+@pytest.mark.asyncio
+async def test_an_encoder_that_is_not_there_is_not_fatal(tmp_path, monkeypatch, chunk):
+    """ffmpeg without libopus is a build detail, not a reason to lose the
+    transcription."""
+    import app.stt.duudlaga_client as mod
+    from app.stt.chunking import ChunkingError
+
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: Path("ffmpeg"))
+
+    async def _encode(ffmpeg, src, out, bitrate):
+        raise ChunkingError("no libopus in this build")
+
+    monkeypatch.setattr(mod, "encode_for_upload", _encode)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append("opus" if b"audio/ogg" in request.content else "wav")
+        return httpx.Response(200, json={"text": "болсон"})
+
+    assert await _client(handler, upload_bitrate="32k").transcribe_chunk_text(chunk) == "болсон"
+    assert seen == ["wav"]

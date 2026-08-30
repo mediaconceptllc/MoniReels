@@ -280,3 +280,32 @@ async def extract_chunk(ffmpeg: Path, wav_path: Path, out_path: Path, start: flo
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise ChunkingError(f"Audio chunk extraction failed: {stderr.decode(errors='replace')[-300:]}")
+
+
+async def encode_for_upload(ffmpeg: Path, src: Path, out_path: Path, bitrate: str) -> None:
+    """Re-encode a chunk into Opus for the wire.
+
+    The provider bills by audio duration, so this saves no money on the
+    transcription itself — it saves the bytes, and the bytes are what the API
+    kept refusing: every chunk it answered with a 500 or a 520 was one of the
+    large ones, and every small one succeeded.
+
+    Opus is the format to fall back FROM, not to: `_post_chunk` reverts to the
+    original WAV for the rest of the job if the API rejects it, because the
+    documented request shows only a .wav and the accepted formats are not
+    written down anywhere.
+    """
+    args = [
+        str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(src),
+        "-c:a", "libopus", "-b:a", bitrate, "-ac", "1",
+        str(out_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not out_path.exists():
+        raise ChunkingError(
+            f"Opus encode failed for {src.name}: {stderr.decode(errors='replace')[-300:]}"
+        )
