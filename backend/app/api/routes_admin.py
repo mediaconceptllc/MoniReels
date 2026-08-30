@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import r2
 from app.db import get_db
 from app.dbmodels import Job, Project, User
-from app.schemas import CreateUserIn, Password, ProviderSettingsIn
+from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, Password, ProviderSettingsIn
 from app.security import Principal, hash_password, require_admin, stamp_password_change
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -164,6 +165,71 @@ def provider_settings_write(
     # Names only. The audit middleware records the request without its body,
     # and this response is the one other place a value could escape.
     return {"changed": changed, "settings": provider_settings.describe(db)}
+
+
+@router.get("/brand")
+def brand_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """Every brand asset, with a short-lived presigned GET for each.
+
+    The URL lets the admin page show what is actually stored rather than what
+    was last uploaded from this browser.
+    """
+    from app import brand
+
+    assets: dict[str, dict | None] = {}
+    for name in brand.ASSETS:
+        key = brand.get(db, name)
+        url = None
+        if key and r2.enabled():
+            try:
+                url = r2.presign_get(key)
+            except Exception:  # noqa: BLE001 - a missing preview must not 500 the page
+                url = None
+        assets[name] = {"key": key, "url": url} if key else None
+    return {**assets, "storage": r2.enabled()}
+
+
+@router.post("/brand/{asset}/upload-url")
+def brand_upload_url(asset: str, body: BrandUploadIn) -> dict:
+    """A presigned PUT. The file never passes through here.
+
+    Same rule as every other media file in this system (app.r2): the browser
+    uploads straight to R2 and the API only ever learns the key. The content
+    type is checked now rather than at render time, where a format ffmpeg
+    cannot read would fail an export these assets are only decorating.
+    """
+    from app import brand
+
+    if not r2.enabled():
+        raise HTTPException(status_code=503, detail="Object storage is not configured on this server")
+    try:
+        key = brand.new_key(asset, body.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"key": key, "url": r2.presign_put(key, body.content_type)}
+
+
+@router.put("/brand/{asset}")
+def brand_save(asset: str, body: BrandSaveIn, db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """Adopt an uploaded object, or clear the slot with a null key.
+
+    The key is checked to live under `brand/` so this route cannot adopt
+    someone else's source video, and to exist, because a client that
+    presigned a URL and then failed to PUT would otherwise leave every export
+    hunting a file that was never stored.
+    """
+    from app import brand
+
+    if asset not in brand.ASSETS:
+        raise HTTPException(status_code=404, detail=f"Unknown brand asset {asset!r}")
+    if body.key is not None:
+        if not body.key.startswith(f"brand/{asset}-"):
+            raise HTTPException(status_code=400, detail=f"Not a {asset} key")
+        if r2.enabled() and not r2.exists(body.key):
+            raise HTTPException(status_code=400, detail="That upload did not complete")
+    brand.set_asset(db, asset, body.key)
+    db.commit()
+    return brand_read(db)
 
 
 @router.get("/jobs")

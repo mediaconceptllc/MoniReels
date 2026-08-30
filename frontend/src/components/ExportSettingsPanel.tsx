@@ -12,7 +12,16 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
-import type { ExportSettings } from "@/lib/types";
+import type { ExportSettings, LogoPosition } from "@/lib/types";
+
+// Corners only: a mark anywhere else is a watermark over the face the
+// short is about. Top by default — subtitles sit at the bottom.
+const LOGO_POSITIONS: [LogoPosition, string][] = [
+  ["top-right", "Баруун дээд"],
+  ["top-left", "Зүүн дээд"],
+  ["bottom-right", "Баруун доод"],
+  ["bottom-left", "Зүүн доод"],
+];
 import { Alert, Badge, Button, Field } from "@/components/ui";
 
 const PRESETS = ["veryfast", "faster", "fast", "medium", "slow"] as const;
@@ -141,7 +150,88 @@ export function ExportSettingsPanel({
           />
           .srt файл тусад нь гаргах
         </label>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={draft.logo.enabled}
+            onChange={(e) => update("logo", { ...draft.logo, enabled: e.target.checked })}
+          />
+          Лого тавих
+        </label>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={draft.use_intro}
+            onChange={(e) => update("use_intro", e.target.checked)}
+          />
+          Эхлэлийн видео залгах
+        </label>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={draft.use_outro}
+            onChange={(e) => update("use_outro", e.target.checked)}
+          />
+          Төгсгөлийн видео залгах
+        </label>
       </div>
+
+      {(draft.use_intro || draft.use_outro) && (
+        <p className="text-xs text-ink-3">
+          Эхлэл/төгсгөлийн видеог админ ⚙️ Тохиргооноос оруулна. Нягтралт, кадрын давтамжийг нь
+          систем экспортод тааруулж, шилжилтийг өөрөө тавина. Хадмал тэдгээр дээр гарахгүй.
+        </p>
+      )}
+
+      {draft.logo.enabled && (
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="Логоны байрлал">
+            <select
+              className="rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink"
+              value={draft.logo.position}
+              onChange={(e) =>
+                update("logo", { ...draft.logo, position: e.target.value as LogoPosition })
+              }
+            >
+              {LOGO_POSITIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label={`Өргөн — кадрын ${draft.logo.width_pct}%`}>
+            <input
+              type="range"
+              min={4}
+              max={40}
+              step={1}
+              value={draft.logo.width_pct}
+              onChange={(e) =>
+                update("logo", { ...draft.logo, width_pct: Number(e.target.value) })
+              }
+              className="w-full"
+            />
+          </Field>
+          <Field label={`Тунгалаг — ${Math.round(draft.logo.opacity * 100)}%`}>
+            <input
+              type="range"
+              min={20}
+              max={100}
+              step={5}
+              value={Math.round(draft.logo.opacity * 100)}
+              onChange={(e) =>
+                update("logo", { ...draft.logo, opacity: Number(e.target.value) / 100 })
+              }
+              className="w-full"
+            />
+          </Field>
+          <p className="text-xs text-ink-3 sm:col-span-3">
+            Логоны зургийг админ ⚙️ Тохиргооноос нэг удаа оруулна — студид нэг лого.
+            Энд зөвхөн энэ төсөлд хэрхэн тавихыг сонгоно.
+          </p>
+        </div>
+      )}
 
       {error && <Alert>{error}</Alert>}
 
