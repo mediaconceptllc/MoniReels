@@ -101,7 +101,7 @@ def compute_pause_boundaries(
     anyway (with a small overlap, since there's no safe gap to cut in), so
     every returned chunk is guaranteed <= max_chunk_sec. Candidate cuts
     closer together than min_chunk_sec are merged away, so no chunk is ever
-    too short for Chimege's own /transcribe minimums.
+    too short for the provider's own minimum request size.
     """
     if total_duration <= 0:
         return []
@@ -140,7 +140,7 @@ def shift_transcript(transcript: Transcript, offset_sec: float) -> Transcript:
     """Returns a copy of `transcript` with every timestamp shifted by offset_sec.
 
     This offset addition is the most common bug in chunked STT pipelines —
-    see test_chimege_client.py for the regression test.
+    see test_chunking.py for the regression test.
     """
     shifted_segments = [
         Segment(
@@ -149,7 +149,7 @@ def shift_transcript(transcript: Transcript, offset_sec: float) -> Transcript:
             end=seg.end + offset_sec,
             text=seg.text,
             speaker=seg.speaker,
-            words=[],  # Chimege never returns word-level timings (see module docstring)
+            words=[],  # no provider here returns word-level timings (see module docstring)
         )
         for seg in transcript.segments
     ]
@@ -191,7 +191,7 @@ def merge_transcripts(chunk_results: list[tuple[float, Transcript]]) -> Transcri
 def split_into_sentences(text: str) -> list[str]:
     """Splits on sentence-ending punctuation; a bare fallback of the whole
     text as one "sentence" if none is found. Shared by every place that
-    apportions one chunk's Chimege text across sub-positions by character
+    apportions one chunk's returned text across sub-positions by character
     count (see synthesize_segments_from_text and
     app.audio.vad_chunking.synthesize_segments_for_chunk).
     """
@@ -203,7 +203,7 @@ def split_into_sentences(text: str) -> list[str]:
 
 
 def synthesize_segments_from_text(text: str, duration_sec: float) -> list[Segment]:
-    """Chimege never returns word/segment timings: splits a chunk's text on
+    """No provider here returns word/segment timings: splits a chunk's text on
     sentence boundaries and allocates that chunk's (exactly known) duration
     proportional to each sentence's share of the character count — only
     needed when a single pause-bounded chunk still contains >1 sentence.

@@ -1,7 +1,7 @@
 """app.audio.separation tests. Running real Demucs requires downloading the
 htdemucs weights (~80MB+) on first use, which is unsuitable for a unit test
 suite - the synchronous inference call is monkeypatched instead, mirroring
-how test_chimege_client.py patches real ffmpeg calls to stay hermetic.
+how test_duudlaga_client.py patches real ffmpeg calls to stay hermetic.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ async def test_separate_vocals_wraps_failure_in_separation_error(tmp_path, monke
         )
 
 
-def test_output_contract_is_chimege_and_vad_compatible():
-    # Both app.stt.chimege_client and app.audio.vad assume 16kHz mono.
+def test_output_contract_matches_vad_and_stt():
+    # Both app.stt.chunking and app.audio.vad assume 16kHz mono.
     assert OUTPUT_SAMPLE_RATE == 16000
     assert OUTPUT_CHANNELS == 1

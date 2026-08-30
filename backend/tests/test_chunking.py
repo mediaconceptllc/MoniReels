@@ -108,7 +108,7 @@ def test_compute_pause_boundaries_forced_cut_tail_stays_short_instead_of_balloon
     max_chunk_sec — it must stay a short trailing chunk instead.
     """
     # No pauses at all -> one forced cut at max_chunk_sec, leaving a short
-    # tail below TARGET_CHUNK_MIN_SEC but still above Chimege's real minimum.
+    # tail below TARGET_CHUNK_MIN_SEC but still above the provider's real minimum.
     # This is a pure-function test of compute_pause_boundaries itself, so
     # max_chunk_sec here is just a test value, not tied to any client config.
     max_chunk_sec = 8.0

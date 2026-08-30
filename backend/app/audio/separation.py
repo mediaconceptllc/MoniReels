@@ -1,5 +1,5 @@
 """Vocal isolation via Demucs (htdemucs) — separates music/background noise
-out of extracted audio before VAD + Chimege, so neither has to contend with
+out of extracted audio before VAD and transcription, so neither has to contend with
 non-speech content. Both the isolated vocal stem and a combined music/
 background stem (drums+bass+other summed) are produced and saved, so the
 project directory keeps a record of both halves of the split; the original
@@ -28,7 +28,7 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Chimege/Silero VAD's shared input contract (see app.stt.chimege_client,
+# The shared input contract of the STT provider and Silero VAD (see app.stt.chunking,
 # app.audio.vad) - the vocal stem is downsampled straight to this on the
 # way out, so nothing downstream needs its own resample pass.
 OUTPUT_SAMPLE_RATE = 16000
@@ -128,7 +128,7 @@ def _resample_to_16k_mono_sync(audio_path: Path, out_path: Path) -> None:
 
 async def resample_to_16k_mono(audio_path: Path, out_path: Path) -> Path:
     """Downsamples `audio_path` (e.g. the native-quality Demucs input) to
-    Chimege/VAD's shared 16kHz mono contract, without needing Demucs' model
+    the 16kHz mono contract shared by VAD and the STT provider, without Demucs' model
     or ffmpeg - used when vocal separation itself couldn't run, so the
     legacy silence-based fallback still gets audio in the format it
     expects instead of the wrong sample rate/channel layout.

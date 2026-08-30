@@ -1,4 +1,9 @@
-"""Audio extraction for STT: always 16 kHz mono 16-bit PCM WAV, per the Chimege contract."""
+"""Audio extraction for STT: always 16 kHz mono 16-bit PCM WAV.
+
+That format is the contract shared by Silero VAD and the STT provider (see
+app.stt.chunking) — sending anything else means either a resample nobody
+asked for or a rejected request.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +46,7 @@ async def extract_audio_native_wav(ffmpeg_path: Path, video_path: Path, output_p
     16k/mono downmix) - used as Demucs' separation input (see
     app/audio/separation.py), since source separation quality degrades on
     audio already narrowed to the 16kHz mono STT contract. The 16kHz mono
-    Chimege/VAD contract is applied afterwards, downstream of separation.
+    16kHz mono contract is applied afterwards, downstream of separation.
     """
     args = [
         str(ffmpeg_path),
