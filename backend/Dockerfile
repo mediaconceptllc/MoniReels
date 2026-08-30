@@ -14,10 +14,16 @@ ENV PYTHONUNBUFFERED=1 \
 # are rendered by libass against a font installed in this image, and the
 # default container font set has no Cyrillic coverage — Mongolian text would
 # render as empty boxes in every exported video.
+#
+# fontconfig is what libass resolves a font NAME through, and it also brings
+# `fc-list` — which is the only way to answer "does this image actually have
+# a Cyrillic face" without rendering a video and looking at it. CI asks
+# exactly that question.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
         fonts-noto-core \
+        fontconfig \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

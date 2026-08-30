@@ -246,7 +246,7 @@ class DuudlagaClient(SttProvider):
                 value = payload.get(key)
                 if isinstance(value, str):
                     return value.strip()
-                if isinstance(value, (list, dict)):
+                if isinstance(value, list | dict):
                     return DuudlagaClient._parse_response(value)
             segments = payload.get("segments")
             if isinstance(segments, list):
