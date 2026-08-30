@@ -18,6 +18,10 @@ KEY_MAX = 512
 TITLE_MAX = 300
 PASSWORD_MIN = 8
 PASSWORD_MAX = 200
+# Long enough for any provider key in use; short enough that the field
+# cannot be used to park arbitrary data in the settings table.
+SECRET_MAX = 400
+MODEL_MAX = 120
 
 # A username reaches R2 object keys. A slash forges a path, a space breaks
 # the signature, so the character set is constrained at creation time.
@@ -191,3 +195,23 @@ class OutputOut(BaseModel):
     play_url: str
     download_url: str
     srt_url: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+
+
+class ProviderSettingsIn(BaseModel):
+    """Every field is optional and means three different things.
+
+    Absent — leave it alone. A value — store it. An empty string — drop the
+    stored value and fall back to the environment. Collapsing the last two
+    would make a mistyped key permanent.
+    """
+
+    openrouter_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
+    duudlaga_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
+    # Accepted and stored before anything reads it — see config.Settings.
+    elevenlabs_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
+    openrouter_model: str | None = Field(default=None, max_length=MODEL_MAX)

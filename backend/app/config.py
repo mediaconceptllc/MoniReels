@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     # pause-free stretch reaches this; real pauses split well below it.
     duudlaga_max_audio_sec: int = 60
 
+    # ---- TTS: ElevenLabs ---------------------------------------------
+    # Stored, not yet used. Nothing in the pipeline synthesises speech; the
+    # key exists so it can be entered and rotated in the same place as the
+    # others rather than being remembered somewhere else until TTS lands.
+    elevenlabs_api_key: str = ""
+
     # ---- audio pipeline ----------------------------------------------
     # Demucs is OFF by default. On a shared container torch does not read
     # the cgroup CPU limit and spawns one thread per *host* core, which

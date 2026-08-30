@@ -212,3 +212,26 @@ export interface QueueStatus {
     min_free_bytes: number;
   };
 }
+
+/** One provider value as the server is willing to describe it. The value
+ *  itself never crosses this boundary — `hint` is the masked tail of a
+ *  secret, or the plain value of a field that is not one. */
+export interface ProviderField {
+  source: "db" | "env" | "unset";
+  set: boolean;
+  hint: string;
+}
+
+export interface ProviderSettings {
+  openrouter_api_key: ProviderField;
+  duudlaga_api_key: ProviderField;
+  elevenlabs_api_key: ProviderField;
+  openrouter_model: ProviderField;
+}
+
+/** Only the fields the operator actually edited. An omitted field is left
+ *  alone; an empty string clears the stored value and falls back to the
+ *  server's environment. */
+export type ProviderSettingsPatch = Partial<
+  Record<keyof ProviderSettings, string>
+>;

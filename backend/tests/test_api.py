@@ -398,3 +398,130 @@ def test_an_admin_cannot_disable_their_own_account(client, db):
         f"/admin/users/{root.id}/active?active=false", headers=_auth(client, "root")
     )
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Provider settings
+# ---------------------------------------------------------------------------
+
+
+def test_provider_settings_never_return_the_stored_value(client, db):
+    """The point of storing a key server-side is that it stops being
+    readable. A response that echoes it back turns the settings page into a
+    way for anyone who reaches it to walk off with the credential."""
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    secret = "sk-or-v1-0123456789abcdefSECRET9f3a"
+
+    written = client.put("/admin/settings", json={"openrouter_api_key": secret}, headers=headers)
+    assert written.status_code == 200, written.text
+    assert written.json()["changed"] == ["openrouter_api_key"]
+    assert secret not in written.text
+
+    read = client.get("/admin/settings", headers=headers)
+    assert read.status_code == 200
+    assert secret not in read.text
+    field = read.json()["openrouter_api_key"]
+    assert field["source"] == "db"
+    assert field["set"] is True
+    assert field["hint"].endswith("9f3a")
+
+
+def test_a_stored_key_is_what_the_next_job_uses(client, db):
+    """The worker is a different process; it cannot be handed the new value.
+    Both sides read the same table, so the write has to be visible there."""
+    from app import provider_settings
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"duudlaga_api_key": "dd-live-abcd"}, headers=headers)
+
+    assert provider_settings.effective(db).duudlaga_api_key == "dd-live-abcd"
+
+
+def test_clearing_a_key_falls_back_to_the_environment(client, db, monkeypatch):
+    """Without a way back, one mistyped key is permanent — the environment
+    value it shadows could never be reached again."""
+    from app import provider_settings
+    from app.config import get_settings
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-the-environment")
+    get_settings.cache_clear()
+
+    client.put("/admin/settings", json={"openrouter_api_key": "from-the-page"}, headers=headers)
+    assert provider_settings.effective(db).openrouter_api_key == "from-the-page"
+
+    client.put("/admin/settings", json={"openrouter_api_key": ""}, headers=headers)
+    assert provider_settings.effective(db).openrouter_api_key == "from-the-environment"
+    assert client.get("/admin/settings", headers=headers).json()["openrouter_api_key"]["source"] == "env"
+
+
+def test_a_field_that_was_not_sent_is_left_alone(client, db):
+    """The page saves one form. Sending only what changed must not blank the
+    keys the operator did not touch."""
+    from app import provider_settings
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put(
+        "/admin/settings",
+        json={"openrouter_api_key": "keep-me", "duudlaga_api_key": "keep-me-too"},
+        headers=headers,
+    )
+
+    client.put("/admin/settings", json={"openrouter_model": "openai/gpt-5"}, headers=headers)
+
+    effective = provider_settings.effective(db)
+    assert effective.openrouter_api_key == "keep-me"
+    assert effective.duudlaga_api_key == "keep-me-too"
+    assert effective.openrouter_model == "openai/gpt-5"
+
+
+def test_the_endpoint_cannot_redirect_where_the_key_is_sent(client, db):
+    """A key plus the freedom to choose the host it goes to is exfiltration:
+    point the base URL at your own server and collect it on the first call.
+    Only the closed set of fields is writable."""
+    from app import provider_settings
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    before = provider_settings.effective(db).openrouter_base_url
+
+    client.put(
+        "/admin/settings",
+        json={"openrouter_api_key": "k", "openrouter_base_url": "https://attacker.example/v1"},
+        headers=headers,
+    )
+
+    assert provider_settings.effective(db).openrouter_base_url == before
+
+
+def test_provider_settings_are_admin_only(client, db):
+    _user(db, "alice")
+    headers = _auth(client, "alice")
+    assert client.get("/admin/settings", headers=headers).status_code == 403
+    assert client.put("/admin/settings", json={"openrouter_api_key": "x"}, headers=headers).status_code == 403
+
+
+def test_a_rejected_value_is_never_read_back(client, db):
+    """Pydantic puts the rejected value in `input` and FastAPI hands it back
+    by default: an over-long password, or an API key pasted into the settings
+    form, would be echoed into the response body and anything that logs it."""
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    secret = "SECRET-VALUE-" * 60
+
+    too_long_password = client.post(
+        "/auth/login", json={"username": "root", "password": secret}
+    )
+    assert too_long_password.status_code == 422
+    assert secret[:20] not in too_long_password.text
+    assert "password" in too_long_password.text
+
+    too_long_key = client.put(
+        "/admin/settings", json={"openrouter_api_key": secret}, headers=headers
+    )
+    assert too_long_key.status_code == 422
+    assert secret[:20] not in too_long_key.text

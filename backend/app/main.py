@@ -17,7 +17,9 @@ import time
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
@@ -120,6 +122,30 @@ def _configure_cors(application: FastAPI) -> None:
 
 
 _configure_cors(app)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Name the field and the rule it broke, never the value that broke it.
+
+    Pydantic records the rejected value in `input`, and FastAPI's default
+    handler passes it straight back — so a password one character over the
+    limit, or an API key pasted into the settings form, is echoed in the
+    response body and into whatever logs or error reporters see it. The
+    caller submitted the value and does not need it read back; the field and
+    the reason are the whole useful part.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": jsonable_encoder(
+                [
+                    {"type": e.get("type", ""), "loc": e.get("loc", ()), "msg": e.get("msg", "")}
+                    for e in exc.errors()
+                ]
+            )
+        },
+    )
 
 
 @app.middleware("http")

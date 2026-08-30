@@ -18,6 +18,8 @@ import type {
   Output,
   Project,
   ProjectSummary,
+  ProviderSettings,
+  ProviderSettingsPatch,
   QueueStatus,
   TokenResponse,
 } from "./types";
@@ -203,6 +205,15 @@ export const api = {
     request<{ canceled: boolean }>(`/jobs/${jobId}/cancel`, { method: "POST" }),
 
   queueStatus: () => request<QueueStatus>("/jobs/queue"),
+
+  // -- admin --------------------------------------------------------------
+  providerSettings: () => request<ProviderSettings>("/admin/settings"),
+
+  saveProviderSettings: (patch: ProviderSettingsPatch) =>
+    request<{ changed: string[]; settings: ProviderSettings }>("/admin/settings", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
 };
 
 export { BASE as API_BASE };

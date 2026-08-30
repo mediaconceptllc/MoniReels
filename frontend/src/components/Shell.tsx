@@ -16,6 +16,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </Link>
           {user && (
             <div className="flex items-center gap-3 text-sm">
+              {/* Convenience only. /admin/* is closed on the server, so
+                  hiding the link is not what keeps anyone out. */}
+              {user.role === "admin" && (
+                <Link href="/admin" className="text-ink-3 hover:text-ink">
+                  Тохиргоо
+                </Link>
+              )}
               <span className="text-ink-3">{user.username}</span>
               <Button tone="quiet" onClick={signOut}>
                 Гарах
