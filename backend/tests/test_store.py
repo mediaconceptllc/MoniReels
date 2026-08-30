@@ -1,94 +1,150 @@
-import json
+"""Project persistence against Postgres.
+
+The desktop build's test wrote project.json to a temp dir. That store is
+gone, so these cover what replaced it — and specifically the two properties
+the hybrid column/JSONB layout exists to preserve: the domain document
+survives a round trip intact, and the schema-version ladder still runs.
+"""
+from __future__ import annotations
 
 import pytest
 
-from app.models import SCHEMA_VERSION, Project
-from app.store import ProjectNotFound, delete_project, list_projects, load_project, save_project
-from app.utils.paths import project_dir
+from app.dbmodels import User
+from app.models import SCHEMA_VERSION, Cut, Project, Segment, ShortIdea, Suggestions, Transcript, VideoMeta
+from app.security import hash_password
+from app.store import ProjectNotFound, get_row, list_for_owner, load, save, summary
+from tests.conftest import requires_db
+
+pytestmark = requires_db
 
 
-@pytest.fixture(autouse=True)
-def _isolated_data_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-def test_save_and_load_roundtrip():
-    project = Project(name="My Project")
-    save_project(project)
-
-    loaded = load_project(project.id)
-    assert loaded.id == project.id
-    assert loaded.name == "My Project"
-    assert loaded.schema_version == SCHEMA_VERSION
+@pytest.fixture
+def owner(db):
+    salt, digest = hash_password("pw")
+    user = User(username="owner", pw_salt=salt, pw_hash=digest, role="editor")
+    db.add(user)
+    db.commit()
+    return user
 
 
-def test_load_migrates_v1_youtube_object_to_list():
-    """v1 on-disk files have suggestions.youtube as a single object-or-null;
-    v2 expects a list (0 or 3 items) - see models.py's _migrate_v1_to_v2.
+def _video() -> VideoMeta:
+    return VideoMeta(
+        source_key="sources/p1/source.mp4",
+        duration_sec=120.5,
+        width=1920,
+        height=1080,
+        fps=30.0,
+        has_audio=True,
+        codec="h264",
+        thumbnail_key="thumbnails/p1/thumb.jpg",
+    )
+
+
+def test_save_and_load_round_trip(db, owner):
+    project = Project(name="Дугаар нэг")
+    project.video = _video()
+    project.transcript = Transcript(
+        language="mn",
+        segments=[Segment(id="s0", start=0.0, end=2.0, text="Сайн байна уу")],
+        full_text="Сайн байна уу",
+    )
+    save(db, project, owner_id=owner.id)
+    db.commit()
+
+    loaded = load(db, project.id)
+    assert loaded.name == "Дугаар нэг"
+    assert loaded.video is not None and loaded.video.source_key == "sources/p1/source.mp4"
+    # Cyrillic must survive the JSONB round trip byte for byte — every piece
+    # of user-facing text in this product is Mongolian.
+    assert loaded.transcript is not None
+    assert loaded.transcript.segments[0].text == "Сайн байна уу"
+
+
+def test_load_missing_raises(db):
+    with pytest.raises(ProjectNotFound):
+        load(db, "does-not-exist")
+
+
+def test_load_wrong_owner_is_not_found(db, owner):
+    """A project belonging to someone else must be indistinguishable from one
+    that does not exist — a 403 would confirm it is real."""
+    other_salt, other_hash = hash_password("pw")
+    other = User(username="other", pw_salt=other_salt, pw_hash=other_hash)
+    db.add(other)
+    project = Project(name="Private")
+    save(db, project, owner_id=owner.id)
+    db.commit()
+
+    assert load(db, project.id, owner.id).name == "Private"
+    with pytest.raises(ProjectNotFound):
+        load(db, project.id, other.id)
+
+
+def test_schema_version_is_stamped(db, owner):
+    project = Project(name="v")
+    save(db, project, owner_id=owner.id)
+    db.commit()
+    assert get_row(db, project.id).schema_version == SCHEMA_VERSION
+
+
+def test_legacy_document_is_migrated_on_read(db, owner):
+    """A v3 document holds a local `path`; v4 holds an R2 key.
+
+    A desktop path names a file no server has, so the video block is cleared
+    and the user re-uploads — but the transcript is expensive to recreate and
+    still correct, so it must survive.
     """
-    project = Project(name="Old Project")
-    save_project(project)
-    path = project_dir(project.id) / "project.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["schema_version"] = 1
-    data["suggestions"] = {
-        "shorts": [],
-        "youtube": {"title": "t", "description": "d", "ranges": [], "total_duration": 0.0},
+    project = Project(name="legacy")
+    row = save(db, project, owner_id=owner.id)
+    row.schema_version = 3
+    row.doc = {
+        "video": {
+            "path": r"C:\Users\me\video.mp4",
+            "duration_sec": 60.0, "width": 1920, "height": 1080, "fps": 30.0,
+            "has_audio": True, "codec": "h264", "thumbnail_path": r"C:\Users\me\thumb.jpg",
+        },
+        "transcript": {
+            "language": "mn",
+            "segments": [{"id": "s0", "start": 0.0, "end": 1.0, "text": "хуучин"}],
+            "full_text": "хуучин",
+        },
     }
-    path.write_text(json.dumps(data), encoding="utf-8")
+    db.commit()
 
-    loaded = load_project(project.id)
-    assert loaded.schema_version == SCHEMA_VERSION
-    assert loaded.suggestions.youtube == [loaded.suggestions.youtube[0]]
-    assert loaded.suggestions.youtube[0].title == "t"
-
-
-def test_load_migrates_v1_null_youtube_to_empty_list():
-    project = Project(name="Old Project 2")
-    save_project(project)
-    path = project_dir(project.id) / "project.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["schema_version"] = 1
-    data["suggestions"] = {"shorts": [], "youtube": None}
-    path.write_text(json.dumps(data), encoding="utf-8")
-
-    loaded = load_project(project.id)
-    assert loaded.suggestions.youtube == []
+    loaded = load(db, project.id)
+    assert loaded.video is None
+    assert loaded.transcript is not None
+    assert loaded.transcript.segments[0].text == "хуучин"
 
 
-def test_load_missing_project_raises():
-    with pytest.raises(ProjectNotFound):
-        load_project("does-not-exist")
+def test_list_is_newest_first(db, owner):
+    for name in ("first", "second", "third"):
+        project = Project(name=name)
+        save(db, project, owner_id=owner.id)
+        db.commit()
+    assert [r.name for r in list_for_owner(db, owner.id)] == ["third", "second", "first"]
 
 
-def test_list_projects_sorted_by_updated_at_desc():
-    p1 = Project(name="First")
-    save_project(p1)
-    p2 = Project(name="Second")
-    p2.updated_at = p1.updated_at + 10
-    save_project(p2)
+def test_summary_does_not_require_a_full_document(db, owner):
+    """The list view must not pay to deserialize every transcript and
+    suggestion block it never shows."""
+    project = Project(name="s")
+    project.video = _video()
+    project.suggestions = Suggestions(
+        shorts=[
+            ShortIdea(
+                id="i1", title="t", hook_text="h", hook_quote="q",
+                cuts=[Cut(start=0, end=5, role="hook", reason="r")],
+                caption="c", why_it_works="w",
+            )
+        ]
+    )
+    row = save(db, project, owner_id=owner.id)
+    row.video_key = "sources/x/source.mp4"
+    db.commit()
 
-    projects = list_projects()
-    assert [p.name for p in projects] == ["Second", "First"]
-
-
-def test_delete_project():
-    project = Project(name="Temp")
-    save_project(project)
-    delete_project(project.id)
-    with pytest.raises(ProjectNotFound):
-        load_project(project.id)
-
-
-def test_save_is_atomic_no_tmp_leftover(tmp_path):
-    project = Project(name="Atomic")
-    save_project(project)
-    from app.utils.paths import project_dir
-
-    files = list(project_dir(project.id).iterdir())
-    assert not any(f.suffix == ".tmp" for f in files)
+    result = summary(row)
+    assert result["has_video"] is True
+    assert result["has_suggestions"] is True
+    assert result["has_transcript"] is False
+    assert result["duration_sec"] == 120.5

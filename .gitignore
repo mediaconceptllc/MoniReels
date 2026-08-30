@@ -45,3 +45,12 @@ Thumbs.db
 
 # Claude Code harness state
 .claude/
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+frontend/.vercel
+
+# Local scratch
+backend/_probe.db

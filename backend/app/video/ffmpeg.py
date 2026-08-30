@@ -1,13 +1,20 @@
-"""FFmpeg/FFprobe binary discovery and subprocess execution with progress + cancel.
+"""FFmpeg/FFprobe discovery and subprocess execution with progress + cancel.
 
-Discovery order: FFMPEG_PATH env -> backend/bin/ -> system PATH.
-Never raises on "not found" at import/startup time — callers check `FfmpegBinaries.available`.
+On a container ffmpeg is installed by the image and lives on PATH, so the
+desktop build's three-tier search (FFMPEG_PATH -> backend/bin/ -> PATH) and
+its PyInstaller `sys.frozen` branch are gone: both existed to find a binary
+the installer had placed next to a Windows .exe.
+
+FFMPEG_PATH is still honoured, for a local checkout with a custom build.
+
+Discovery never raises — callers check `FfmpegBinaries.available` — so an
+image built without ffmpeg produces a clear 503 on the routes that need it
+rather than a crash at import time.
 """
 from __future__ import annotations
 
 import asyncio
 import shutil
-import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,22 +24,6 @@ from app.utils.logging import get_logger
 from app.utils.timecode import ffmpeg_out_time_to_seconds
 
 logger = get_logger(__name__)
-
-
-def _local_bin_dir() -> Path:
-    """Same sys.frozen split as app.utils.env_file.env_file_path: once
-    PyInstaller freezes this module, __file__ resolves under the bundle's
-    _internal/ tree, not next to the exe - parents[2] from there lands on
-    _internal/, not the packaged backend/bin/ the installer actually places
-    ffmpeg.exe/ffprobe.exe in. Use the exe's own directory when frozen.
-    """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "bin"
-    # backend/app/video/ffmpeg.py -> backend/bin
-    return Path(__file__).resolve().parents[2] / "bin"
-
-
-LOCAL_BIN_DIR = _local_bin_dir()
 
 
 @dataclass(frozen=True)
@@ -46,32 +37,20 @@ class FfmpegBinaries:
 
 
 def _find_one(exe_name: str) -> Path | None:
-    settings = get_settings()
+    configured = getattr(get_settings(), "ffmpeg_path", "")
+    if configured:
+        path = Path(configured)
+        candidate = path if path.is_file() else path / exe_name
+        if candidate.is_file():
+            return candidate
 
-    # 1. FFMPEG_PATH env: may point at a directory or directly at the exe.
-    if settings.ffmpeg_path:
-        configured = Path(settings.ffmpeg_path)
-        candidates = [configured] if configured.suffix.lower() == ".exe" else [configured / exe_name]
-        for c in candidates:
-            if c.is_file():
-                return c
-
-    # 2. backend/bin/
-    local = LOCAL_BIN_DIR / exe_name
-    if local.is_file():
-        return local
-
-    # 3. system PATH
     found = shutil.which(exe_name)
-    if found:
-        return Path(found)
-
-    return None
+    return Path(found) if found else None
 
 
 def discover_ffmpeg() -> FfmpegBinaries:
-    ffmpeg = _find_one("ffmpeg.exe")
-    ffprobe = _find_one("ffprobe.exe")
+    ffmpeg = _find_one("ffmpeg")
+    ffprobe = _find_one("ffprobe")
     if not ffmpeg or not ffprobe:
         logger.warning("FFmpeg binaries not fully found: ffmpeg=%s ffprobe=%s", ffmpeg, ffprobe)
     return FfmpegBinaries(ffmpeg=ffmpeg, ffprobe=ffprobe)
@@ -85,7 +64,7 @@ async def get_ffmpeg_version(ffmpeg_path: Path) -> str:
     )
     out, _ = await proc.communicate()
     first_line = out.decode("utf-8", errors="replace").splitlines()[0] if out else ""
-    # e.g. "ffmpeg version 6.1.1-full_build-www.gyan.dev Copyright ..."
+    # e.g. "ffmpeg version 6.1.1-static ..."
     parts = first_line.split()
     return parts[2] if len(parts) >= 3 else first_line
 

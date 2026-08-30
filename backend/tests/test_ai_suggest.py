@@ -1,4 +1,4 @@
-"""End-to-end suggest() orchestration against a fake OpenAI transport — no
+"""End-to-end suggest() orchestration against a fake OpenRouter transport —
 network, no real API key needed.
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ import json
 import httpx
 import pytest
 
-from app.ai.openai_client import OpenAIClient, OpenAIConfig
+from app.ai.openrouter_client import OpenRouterClient, OpenRouterConfig
 from app.ai.schema import SuggestionValidationError
 from app.ai.suggest import generate_suggestions
 from app.models import Segment, Transcript
@@ -70,15 +70,15 @@ def _three_youtube_dicts() -> list[dict]:
     ]
 
 
-def _client(handler) -> OpenAIClient:
+def _client(handler) -> OpenRouterClient:
     transport = httpx.MockTransport(handler)
-    return OpenAIClient(
-        OpenAIConfig(api_key="sk-test", model="gpt-test", base_url="https://fake.openai/v1"),
+    return OpenRouterClient(
+        OpenRouterConfig(api_key="sk-test", model="gpt-test", base_url="https://fake.openrouter/api/v1"),
         http_client=httpx.AsyncClient(transport=transport),
     )
 
 
-def _openai_response(payload: dict) -> httpx.Response:
+def _llm_response(payload: dict) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(payload)}}]})
 
 
@@ -89,7 +89,7 @@ async def test_generate_suggestions_single_pass_short_transcript():
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         assert _schema_name(request) == "suggestions"
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": []})
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
 
     transcript = _transcript(150)
     client = _client(handler)
@@ -109,8 +109,8 @@ async def test_generate_suggestions_retries_once_on_wrong_short_count():
         calls["n"] += 1
         two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
         if calls["n"] == 1:
-            return _openai_response(two_shorts)
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": []})
+            return _llm_response(two_shorts)
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
 
     transcript = _transcript(150)
     client = _client(handler)
@@ -126,7 +126,7 @@ async def test_generate_suggestions_fails_after_retry_still_wrong_count():
     two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return _openai_response(two_shorts)
+        return _llm_response(two_shorts)
 
     transcript = _transcript(150)
     client = _client(handler)
@@ -151,8 +151,8 @@ async def test_generate_suggestions_retries_once_on_invalid_cut_structure():
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         if calls["n"] == 1:
-            return _openai_response(bad_response)
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": []})
+            return _llm_response(bad_response)
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
 
     transcript = _transcript(150)
     client = _client(handler)
@@ -174,10 +174,10 @@ async def test_generate_suggestions_chunks_long_transcript_and_picks_best():
         if name == "candidates":
             calls["candidates"] += 1
             cands = [_short_dict(f"cand-{calls['candidates']}-{j}", j * 50) for j in range(2)]
-            return _openai_response({"shorts": cands, "youtube": []})
+            return _llm_response({"shorts": cands, "youtube": []})
         calls["pick_best"] += 1
         assert name == "pick_best"
-        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": []})
+        return _llm_response({"short_indices": [0, 1, 2], "youtube_indices": []})
 
     client = _client(handler)
     result = await generate_suggestions(client, transcript, duration_sec=600.0)
@@ -211,10 +211,10 @@ async def test_generate_suggestions_candidates_retry_rescues_over_duration_short
             candidate_attempts["n"] += 1
             if candidate_attempts["n"] == 1:
                 bad_short = {**_short_dict("too-long", 0), "cuts": too_long_cuts}
-                return _openai_response({"shorts": [bad_short], "youtube": []})
+                return _llm_response({"shorts": [bad_short], "youtube": []})
             cands = [_short_dict(f"fixed-{j}", j * 50) for j in range(3)]
-            return _openai_response({"shorts": cands, "youtube": []})
-        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": []})
+            return _llm_response({"shorts": cands, "youtube": []})
+        return _llm_response({"short_indices": [0, 1, 2], "youtube_indices": []})
 
     client = _client(handler)
     result = await generate_suggestions(client, transcript, duration_sec=600.0)
@@ -227,7 +227,7 @@ async def test_generate_suggestions_candidates_retry_rescues_over_duration_short
 @pytest.mark.asyncio
 async def test_generate_suggestions_single_pass_long_video_returns_three_youtube_plans():
     def handler(request: httpx.Request) -> httpx.Response:
-        return _openai_response({"shorts": _three_shorts_dicts(), "youtube": _three_youtube_dicts()})
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": _three_youtube_dicts()})
 
     transcript = _transcript(500)
     client = _client(handler)
@@ -252,14 +252,14 @@ async def test_generate_suggestions_chunks_flatten_multiple_youtube_plans_from_c
         name = _schema_name(request)
         if name == "candidates":
             cands = [_short_dict(f"cand-{len(pick_bodies)}-{j}", j * 50) for j in range(2)]
-            return _openai_response(
+            return _llm_response(
                 {
                     "shorts": cands,
                     "youtube": [_youtube_dict("A", [(0, 49)]), _youtube_dict("B", [(60, 99)])],
                 }
             )
         pick_bodies.append(json.loads(request.content)["messages"][-1]["content"])
-        return _openai_response({"short_indices": [0, 1, 2], "youtube_indices": [0, 1, 2]})
+        return _llm_response({"short_indices": [0, 1, 2], "youtube_indices": [0, 1, 2]})
 
     client = _client(handler)
     result = await generate_suggestions(client, transcript, duration_sec=1500.0)

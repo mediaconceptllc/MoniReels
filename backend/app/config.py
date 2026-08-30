@@ -1,6 +1,15 @@
-"""Application configuration, loaded from environment / .env file.
+"""Application configuration, loaded from the environment.
 
-All secrets and machine-specific paths live here — never hardcoded elsewhere.
+Cloud deployment (Railway) — every value arrives as an environment variable
+set on the service, never from a file this process can write. The desktop
+build's `.env`-writing settings endpoint is gone on purpose: an HTTP handler
+that rewrites the process's own credentials is harmless on one Windows
+machine and a full credential-takeover on a public URL.
+
+`DATA_DIR` is deliberately NOT a persistent location any more. Railway's
+container filesystem is ephemeral and per-instance; every artifact that has
+to survive a restart goes to R2 (see app.r2), and everything under
+`resolved_work_dir` is scratch space one job is free to delete.
 """
 from __future__ import annotations
 
@@ -11,85 +20,171 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _default_data_dir() -> str:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return str(Path(appdata) / "AIVideoEditor")
-    return str(Path.home() / ".aivideoeditor")
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_host: str = "127.0.0.1"
-    app_port: int = 0  # 0 => choose a free port at startup
-
-    ffmpeg_path: str = ""  # explicit dir or exe path override
-
-    chimege_stt_url: str = "https://api.chimege.com/v1.2"  # base URL; endpoints appended in chimege_client.py
-    chimege_token: str = ""
-    # The ceiling for pause-based audio chunking (chimege_client.py) - a
-    # chunk only gets force-cut once a pause-free stretch reaches this many
-    # seconds; real pauses drive splitting well below it. Also documents
-    # Chimege's real /transcribe hard cap: 3MB, ~98s of 16kHz mono 16-bit PCM
-    # audio — this default leaves a safety margin under that.
-    chimege_max_audio_sec: int = 60
-
-    # Which provider app.ai.suggest uses for suggestion generation. "openai"
-    # or "anthropic" - both clients stay configured/switchable so the app
-    # isn't locked to whichever one happens to be having a bad day.
-    ai_provider: str = "openai"
-
-    openai_api_key: str = ""
-    openai_model: str = ""
-    openai_base_url: str = "https://api.openai.com/v1"
-
-    anthropic_api_key: str = ""
-    anthropic_model: str = ""
-
+    # ---- process -----------------------------------------------------
+    # Railway injects PORT. Binding 0.0.0.0 (not 127.0.0.1 as the desktop
+    # build did) is required or the platform's health check never connects.
+    port: int = 8000
+    host: str = "0.0.0.0"
+    ffmpeg_path: str = ""  # optional override for a local checkout
     log_level: str = "INFO"
-    data_dir: str = ""
+    environment: str = "production"
 
-    # Managed-mode heartbeat: exit if idle this long (spec: 60s while spawned by Flutter).
-    idle_shutdown_sec: int = 60
-    managed: bool = False
+    # Comma-separated exact origins. "*" is refused in production by
+    # main.py: credentials + wildcard is rejected by every browser anyway,
+    # and the desktop build's blanket "*" was only ever safe because the
+    # server was bound to loopback.
+    cors_origins: str = ""
 
-    # Vocal separation (app/audio/separation.py) - htdemucs weights are
-    # downloaded on first use via torch.hub and cached under
-    # resolved_data_dir/models, never bundled with the installer.
+    # ---- data --------------------------------------------------------
+    database_url: str = ""
+    jwt_secret: str = ""
+    jwt_hours: int = 12
+    # Creates the first admin at startup ONLY when the users table is
+    # empty. Without it a fresh deployment has no way in at all; with it
+    # unconditional, rotating the variable would silently reset an
+    # existing account.
+    bootstrap_admin_username: str = ""
+    bootstrap_admin_password: str = ""
+
+    # ---- object storage (Cloudflare R2) ------------------------------
+    # Media NEVER passes through this API: the browser PUTs to a presigned
+    # URL and reads back through a presigned GET. A 13GB source video going
+    # through a Railway dyno is both a timeout and a bandwidth bill.
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket: str = ""
+    r2_endpoint: str = ""  # defaults to https://{account}.r2.cloudflarestorage.com
+    r2_presign_ttl_s: int = 3600
+    # Aborts multipart uploads older than this. A worker killed mid-upload
+    # (OOM, redeploy) leaves parts that are billed but appear in no ordinary
+    # listing, so they can only be found by age, never by prefix.
+    r2_mpu_abort_h: int = 24
+
+    # ---- LLM: OpenRouter is the only provider ------------------------
+    openrouter_api_key: str = ""
+    openrouter_model: str = "anthropic/claude-sonnet-4.5"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # OpenRouter attributes usage to these two headers on its public
+    # leaderboards; both are optional and neither affects billing.
+    openrouter_app_url: str = ""
+    openrouter_app_title: str = "MoniReels"
+
+    # ---- STT: duudlaga.dev -------------------------------------------
+    duudlaga_base_url: str = "https://api.duudlaga.dev/v1"
+    duudlaga_api_key: str = ""
+    duudlaga_model: str = ""
+    # Ceiling for pause-based chunking. A chunk is only force-cut once a
+    # pause-free stretch reaches this; real pauses split well below it.
+    duudlaga_max_audio_sec: int = 60
+
+    # ---- audio pipeline ----------------------------------------------
+    # Demucs is OFF by default. On a shared container torch does not read
+    # the cgroup CPU limit and spawns one thread per *host* core, which
+    # throttles the whole container — including the uvicorn that answers
+    # the platform health check, which then restarts the service mid-job.
+    # Turn it on only on a worker service, never on the API service.
+    enable_separation: bool = False
     demucs_model: str = "htdemucs"
+    # Hard ceiling for any torch/ffmpeg thread pool. 0 => derive from the
+    # container's own cgroup quota (see heavy_threads).
+    torch_threads: int = 0
+    cpu_reserve: int = 1
 
-    # VAD (app/audio/vad.py) - Silero VAD, same download-on-first-use caching.
-    # Threshold is the model's own speech-probability cutoff (0..1); the two
-    # durations mirror Silero's get_speech_timestamps knobs. min_silence_ms
-    # is the main "how finely does this split" lever: lowered from an
-    # original 350ms so shorter pauses (a quick breath between phrases, not
-    # just full sentence-scale gaps) also count as a split point, producing
-    # more/smaller VAD segments - which flows through to smaller Chimege
-    # chunks too, since a chunk can only ever be cut at a segment boundary.
     vad_threshold: float = 0.5
     vad_min_speech_ms: int = 250
-    # Lowered again (150ms -> 100ms): a speaker with few full-sentence-scale
-    # pauses still produces long single VAD segments (observed: 25s of
-    # continuous speech as one segment), and any segment spanning multiple
-    # sentences falls back to proportional-by-character/word estimated
-    # splitting (app.audio.vad_chunking.synthesize_segments_for_chunk) for
-    # its internal cut points instead of a real detected boundary - that
-    # estimate is what AI-suggested cuts inherit their imprecision from.
-    # 100ms is close to Silero VAD's practical floor before normal phoneme-
-    # level gaps (stops/plosives) start getting misread as sentence breaks.
     vad_min_silence_ms: int = 100
     vad_speech_pad_ms: int = 100
 
-    @property
-    def resolved_data_dir(self) -> Path:
-        return Path(self.data_dir) if self.data_dir else Path(_default_data_dir())
+    # ---- worker ------------------------------------------------------
+    # Jobs run concurrently, but an ffmpeg render or a Demucs pass saturates
+    # the box on its own — see jobs.LANES for the per-resource caps that
+    # actually bound this.
+    worker_concurrency: int = 2
+    # A job whose worker stopped heartbeating for this long is presumed
+    # dead and returned to the queue. Must exceed the heartbeat interval by
+    # a wide margin or a merely busy worker loses its own job.
+    job_stale_sec: int = 300
+    job_keep_days: int = 30
+    work_dir: str = "/tmp/monireels"
+    # Refuse to start a disk-heavy job below this much free space rather
+    # than failing halfway through with [Errno 28].
+    work_free_min_mb: int = 2048
 
     @property
-    def resolved_model_cache_dir(self) -> Path:
-        return self.resolved_data_dir / "models"
+    def resolved_work_dir(self) -> Path:
+        return Path(self.work_dir)
+
+    @property
+    def resolved_r2_endpoint(self) -> str:
+        if self.r2_endpoint:
+            return self.r2_endpoint.rstrip("/")
+        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
+    @property
+    def r2_enabled(self) -> bool:
+        return bool(self.r2_access_key_id and self.r2_secret_access_key and self.r2_bucket)
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def heavy_threads() -> int:
+    """Thread ceiling for torch/ffmpeg that respects the CONTAINER's quota.
+
+    `os.cpu_count()` reports the host's cores, not the share this container
+    was actually granted. torch reads the former and happily spawns past the
+    cgroup limit; the kernel's answer is to throttle every thread in the
+    container, uvicorn included, so the platform health check times out and
+    the service is restarted — killing whatever job caused it. Reading the
+    real quota out of the cgroup is the only way to size the pool correctly.
+
+    `cpu_reserve` keeps a core free for the web process when a worker shares
+    a box with it.
+    """
+    settings = get_settings()
+    if settings.torch_threads > 0:
+        return settings.torch_threads
+
+    quota = _cgroup_cpu_quota()
+    if quota is None:
+        quota = os.cpu_count() or 2
+    return max(1, quota - settings.cpu_reserve)
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """Whole cores this container may use, or None when not in a cgroup."""
+    # cgroup v2: "max 100000" (unlimited) or "200000 100000" (2 cores)
+    v2 = Path("/sys/fs/cgroup/cpu.max")
+    if v2.is_file():
+        try:
+            quota_s, period_s = v2.read_text().split()
+            if quota_s != "max":
+                period = int(period_s)
+                if period > 0:
+                    return max(1, int(int(quota_s) / period))
+        except (ValueError, OSError):
+            pass
+
+    # cgroup v1: two files, quota of -1 means unlimited
+    v1_quota = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    v1_period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    if v1_quota.is_file() and v1_period.is_file():
+        try:
+            quota = int(v1_quota.read_text().strip())
+            period = int(v1_period.read_text().strip())
+            if quota > 0 and period > 0:
+                return max(1, int(quota / period))
+        except (ValueError, OSError):
+            pass
+
+    return None

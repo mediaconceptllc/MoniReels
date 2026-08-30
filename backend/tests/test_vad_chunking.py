@@ -17,7 +17,7 @@ from app.audio.vad_chunking import (
     group_vad_segments_into_chunks,
     synthesize_segments_for_chunk,
 )
-from app.stt.chimege_client import MIN_CHUNK_SEC, TARGET_CHUNK_MIN_SEC
+from app.stt.chunking import MIN_CHUNK_SEC, TARGET_CHUNK_MIN_SEC
 
 torch = pytest.importorskip("torch")
 torchaudio = pytest.importorskip("torchaudio")

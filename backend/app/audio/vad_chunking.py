@@ -1,11 +1,11 @@
-"""Turns VAD speech segments into Chimege-sized request chunks and turns
-Chimege's response back into a Transcript with real, gap-free timing.
+"""Turns VAD speech segments into provider-sized request chunks and turns
+the provider's response back into a Transcript with real, gap-free timing.
 
 Three concerns, deliberately kept in one module since they're one pipeline
 step conceptually:
 
 1. group_vad_segments_into_chunks - pure grouping, mirrors
-   chimege_client.compute_pause_boundaries' merge/force-split rules but
+   chunking.compute_pause_boundaries' merge/force-split rules but
    operates directly on "keep" (speech) intervals instead of deriving cut
    points from detected silence.
 2. synthesize_segments_for_chunk / chunk_text_to_transcript - maps one
@@ -15,11 +15,11 @@ step conceptually:
    exact VAD segment (never a span crossing the dropped gap between two of
    them) - only the *text* split across segments is an estimate (by each
    segment's share of the chunk's word count), an unavoidable consequence
-   of Chimege never returning per-segment text for a merged request.
+   of the provider never returning per-segment text for a merged request.
 3. extract_voice_only_wav - the actual "make only voice parts" audio step:
    slices and concatenates just the given segments out of a loaded
    waveform, dropping silence/music in between, so nothing but detected
-   speech is ever sent to Chimege.
+   speech is ever sent to the STT provider.
 
 (1) and (2) are pure functions with no torch dependency, so they're
 unit-testable without the optional ML dependencies installed; only (3)
@@ -32,7 +32,7 @@ import uuid as uuid_lib
 from pathlib import Path
 
 from app.models import Segment, Transcript
-from app.stt.chimege_client import (
+from app.stt.chunking import (
     FORCED_CUT_OVERLAP_SEC,
     TARGET_CHUNK_MIN_SEC,
     synthesize_segments_from_text,
@@ -49,7 +49,7 @@ class VoiceExtractionError(Exception):
 
 
 # --------------------------------------------------------------------------
-# 1. Grouping VAD segments into Chimege-sized chunks.
+# 1. Grouping VAD segments into provider-sized chunks.
 # --------------------------------------------------------------------------
 
 
@@ -63,7 +63,7 @@ def group_vad_segments_into_chunks(
     *speech-only* duration (sum of segment durations, not wall-clock span)
     stays <= max_chunk_sec. Short adjacent segments are merged into the same
     chunk until min_chunk_sec of real speech is reached, so no chunk is
-    rejected as too short by Chimege. A single segment longer than
+    rejected as too short by the provider. A single segment longer than
     max_chunk_sec on its own (VAD found no pause during it) is force-split,
     with a small overlap, same fallback as compute_pause_boundaries.
     """
@@ -122,22 +122,22 @@ def group_vad_segments_into_chunks(
 
 
 def synthesize_segments_for_chunk(text: str, chunk_segments: list[VadSegment]) -> list[Segment]:
-    """Chimege returns one text string per chunk, never per-sentence timing.
+    """The STT provider returns one text string per chunk, never per-sentence timing.
 
     When the chunk is exactly one VAD segment, that segment's boundaries
-    are already exact - delegates to chimege_client.synthesize_segments_from_text
+    are already exact - delegates to chunking.synthesize_segments_from_text
     (proportional-by-character sentence splitting) shifted onto that
     segment's real [start, end], same as the legacy pause-chunking path.
 
     When several VAD segments were merged into one chunk (to meet
-    Chimege's minimum request size), splits the text on *word* boundaries
+    the provider's minimum request size), splits the text on *word* boundaries
     and allocates each real segment a share of the words proportional to
     its own share of the chunk's total speech duration. Every emitted
     segment's [start, end] is therefore still one real, exact VAD
     boundary - it can never span the dropped gap between two segments the
     way a proportional-by-time split of the whole chunk would. Only the
     word-to-segment attribution is an estimate, an unavoidable consequence
-    of Chimege never returning per-segment text for a merged request.
+    of the provider never returning per-segment text for a merged request.
     """
     text = text.strip()
     if not text or not chunk_segments:

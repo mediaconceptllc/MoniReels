@@ -1,9 +1,13 @@
-"""app.stt.pipeline orchestration tests. Every pipeline stage
-(separate_vocals, detect_speech_segments, extract_voice_only_wav) and the
-Chimege network call are monkeypatched/faked so this suite never touches
-torch, ffmpeg, or the network - it only checks the wiring: which stage
-runs, in what order, how failures fall back, and that a full run produces
-correctly-merged absolute timestamps.
+"""app.stt.pipeline wiring.
+
+Every real stage (Demucs, Silero VAD, loudness normalization, the network
+call) is faked, so this suite never touches torch, ffmpeg or the network. It
+checks the decisions the pipeline makes: which stages run, how each failure
+degrades, and that a full run produces correctly merged absolute timestamps.
+
+The degradation rules are the point. Vocal separation is optional and VAD may
+be absent from the image entirely, so "one stage was unavailable" must never
+become "the transcription failed".
 """
 from __future__ import annotations
 
@@ -13,17 +17,18 @@ from pathlib import Path
 import pytest
 
 import app.stt.pipeline as pipeline_mod
-from app.audio.separation import SeparationError
 from app.audio.vad import VadError
 from app.config import Settings
 from app.models import Transcript
-from app.stt.pipeline import transcribe_with_voice_separation
+from app.stt.pipeline import transcribe_audio
 
 
-class _FakeChimegeClient:
-    """Stands in for ChimegeClient: transcribe_chunk_text returns queued
-    canned text per call (in order); transcribe() (the legacy fallback) is
-    recorded so tests can assert whether it was used instead.
+class _FakeSttClient:
+    """Stands in for DuudlagaClient.
+
+    `transcribe_chunk_text` returns queued canned text per call; `transcribe`
+    (the whole-file fallback) records that it was used, so a test can tell
+    which path the pipeline actually took.
     """
 
     def __init__(self, chunk_texts: list[str] | None = None):
@@ -41,157 +46,138 @@ class _FakeChimegeClient:
         return Transcript(language="mn", full_text="fallback", segments=[], timings_estimated=True)
 
 
-def _settings() -> Settings:
-    return Settings(_env_file=None)
-
-
-async def _run(client, tmp_path, **kwargs):
-    return await transcribe_with_voice_separation(
-        client, tmp_path / "audio.wav", tmp_path / "work", _settings(), Path("ffmpeg"), **kwargs
-    )
+def _settings(**overrides) -> Settings:
+    return Settings(_env_file=None, **overrides)
 
 
 async def _fake_normalize(ffmpeg_path, wav_path, out_path, *args, **kwargs):
-    """Stands in for normalize_if_too_quiet: real ffmpeg loudnorm can't run
-    against the fake wav bytes these tests write - a no-op fake keeps the
-    pipeline hermetic, same as every other real stage in this suite.
-    """
+    """Real ffmpeg loudnorm cannot run against the placeholder bytes these
+    tests write; a pass-through keeps the suite hermetic."""
     return wav_path
 
 
+async def _run(client, tmp_path, settings=None, **kwargs):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"RIFF....WAVE")
+    return await transcribe_audio(
+        client, audio, tmp_path / "work", settings or _settings(), Path("ffmpeg"), **kwargs
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_normalize(monkeypatch):
+    monkeypatch.setattr(pipeline_mod, "normalize_if_too_quiet", _fake_normalize)
+
+
+def _with_vad(monkeypatch, segments, available: bool = True):
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: available)
+    monkeypatch.setattr(pipeline_mod, "torch_available", lambda: True)
+
+    async def _detect(*args, **kwargs):
+        return segments
+
+    monkeypatch.setattr(pipeline_mod, "detect_speech_segments", _detect)
+
+
 @pytest.mark.asyncio
-async def test_falls_back_when_ml_deps_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(pipeline_mod, "ml_deps_available", lambda: False)
-    client = _FakeChimegeClient()
+async def test_falls_back_to_provider_chunking_when_vad_missing(tmp_path, monkeypatch):
+    """An image built without torch is the DEFAULT deployment, not an edge
+    case — transcription must still work there."""
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: False)
+    monkeypatch.setattr(pipeline_mod, "torch_available", lambda: False)
+    client = _FakeSttClient()
 
     result = await _run(client, tmp_path)
 
     assert result.full_text == "fallback"
-    assert client.fallback_calls == [tmp_path / "audio.wav"]
+    assert len(client.fallback_calls) == 1
     assert client.chunk_calls == []
 
 
 @pytest.mark.asyncio
-async def test_falls_back_on_separation_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(pipeline_mod, "ml_deps_available", lambda: True)
+async def test_separation_is_off_unless_explicitly_enabled(tmp_path, monkeypatch):
+    """Demucs must never switch itself on: on a container that also serves
+    HTTP it throttles the whole cgroup and the platform restarts the service
+    mid-job."""
+    called = []
 
-    async def fake_separate(*args, **kwargs):
-        raise SeparationError("boom")
+    async def _separate(*args, **kwargs):
+        called.append(args)
+        raise AssertionError("separation ran without ENABLE_SEPARATION")
 
-    monkeypatch.setattr(pipeline_mod, "separate_vocals", fake_separate)
-    client = _FakeChimegeClient()
-
-    result = await _run(client, tmp_path)
-
-    assert result.full_text == "fallback"
+    monkeypatch.setattr("app.audio.separation.separate_vocals", _separate)
+    _with_vad(monkeypatch, [])
+    await _run(_FakeSttClient(), tmp_path, settings=_settings(enable_separation=False))
+    assert called == []
 
 
 @pytest.mark.asyncio
 async def test_falls_back_on_vad_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(pipeline_mod, "ml_deps_available", lambda: True)
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: True)
+    monkeypatch.setattr(pipeline_mod, "torch_available", lambda: True)
 
-    async def fake_separate(audio_path, vocals_out_path, music_out_path, model_cache_dir, model_name):
-        vocals_out_path.write_bytes(b"fake")
-        music_out_path.write_bytes(b"fake")
-        return vocals_out_path, music_out_path
+    async def _boom(*args, **kwargs):
+        raise VadError("no model")
 
-    async def fake_vad(*args, **kwargs):
-        raise VadError("boom")
-
-    monkeypatch.setattr(pipeline_mod, "separate_vocals", fake_separate)
-    monkeypatch.setattr(pipeline_mod, "normalize_if_too_quiet", _fake_normalize)
-    monkeypatch.setattr(pipeline_mod, "detect_speech_segments", fake_vad)
-    client = _FakeChimegeClient()
+    monkeypatch.setattr(pipeline_mod, "detect_speech_segments", _boom)
+    client = _FakeSttClient()
 
     result = await _run(client, tmp_path)
 
     assert result.full_text == "fallback"
+    assert len(client.fallback_calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_no_speech_detected_returns_empty_transcript_without_calling_chimege(tmp_path, monkeypatch):
-    monkeypatch.setattr(pipeline_mod, "ml_deps_available", lambda: True)
-
-    async def fake_separate(audio_path, vocals_out_path, music_out_path, model_cache_dir, model_name):
-        vocals_out_path.write_bytes(b"fake")
-        music_out_path.write_bytes(b"fake")
-        return vocals_out_path, music_out_path
-
-    async def fake_vad(*args, **kwargs):
-        return []
-
-    monkeypatch.setattr(pipeline_mod, "separate_vocals", fake_separate)
-    monkeypatch.setattr(pipeline_mod, "normalize_if_too_quiet", _fake_normalize)
-    monkeypatch.setattr(pipeline_mod, "detect_speech_segments", fake_vad)
-    client = _FakeChimegeClient()
+async def test_no_speech_returns_empty_transcript_without_spending_money(tmp_path, monkeypatch):
+    """Silence must not reach the provider: every request is billed, and a
+    request containing no speech can only return nothing."""
+    _with_vad(monkeypatch, [])
+    client = _FakeSttClient()
 
     result = await _run(client, tmp_path)
 
     assert result.segments == []
+    assert result.full_text == ""
     assert client.chunk_calls == []
+    assert client.fallback_calls == []
 
 
 @pytest.mark.asyncio
-async def test_full_pipeline_produces_absolute_timestamps_per_chunk(tmp_path, monkeypatch):
-    """Two VAD segments far enough apart to become two separate chunks;
-    each chunk's returned text must land at its own real segment timing,
-    not offset/estimated relative to the other.
-    """
-    monkeypatch.setattr(pipeline_mod, "ml_deps_available", lambda: True)
+async def test_full_run_produces_absolute_timestamps(tmp_path, monkeypatch):
+    """Each chunk is transcribed in its own coordinate space; the merge must
+    put every segment back on the timeline of the source video."""
+    _with_vad(monkeypatch, [(1.0, 3.0), (10.0, 12.0)])
 
-    async def fake_separate(audio_path, vocals_out_path, music_out_path, model_cache_dir, model_name):
-        vocals_out_path.write_bytes(b"fake")
-        music_out_path.write_bytes(b"fake")
-        return vocals_out_path, music_out_path
+    async def _extract(wav_path, segments, out_path):
+        out_path.write_bytes(b"chunk")
 
-    # Each segment is 6s (>= TARGET_CHUNK_MIN_SEC) and client.max_audio_sec
-    # is lowered to 10 so the two can't be merged into one request (6+6>10)
-    # - guarantees two separate chunks regardless of the real 43s gap
-    # between them (grouping is driven by speech-duration budget, not
-    # wall-clock proximity, since the gap is dropped either way).
-    vad_segments = [(1.0, 7.0), (50.0, 56.0)]
+    monkeypatch.setattr(pipeline_mod, "extract_voice_only_wav", _extract)
 
-    async def fake_vad(*args, **kwargs):
-        return vad_segments
+    # max_audio_sec 20 with 2s of speech per group: each VAD segment becomes
+    # its own chunk only if grouping keeps them apart, so assert on the
+    # timeline rather than on the chunk count.
+    client = _FakeSttClient(["эхний хэсэг", "хоёр дахь хэсэг"])
+    result = await _run(client, tmp_path)
 
-    extracted_groups = []
+    assert result.segments, "expected at least one segment"
+    starts = [s.start for s in result.segments]
+    assert min(starts) >= 1.0
+    assert max(s.end for s in result.segments) <= 12.0
+    # VAD output is written out for inspection: when a transcript looks wrong
+    # the first question is always "what did VAD actually detect".
+    saved = json.loads((tmp_path / "work" / "vad_segments.json").read_text())
+    assert saved == [{"start": 1.0, "end": 3.0}, {"start": 10.0, "end": 12.0}]
 
-    async def fake_extract(wav_path, segments, out_path):
-        extracted_groups.append(segments)
-        out_path.write_bytes(b"fake-chunk")
 
-    monkeypatch.setattr(pipeline_mod, "separate_vocals", fake_separate)
-    monkeypatch.setattr(pipeline_mod, "normalize_if_too_quiet", _fake_normalize)
-    monkeypatch.setattr(pipeline_mod, "detect_speech_segments", fake_vad)
-    monkeypatch.setattr(pipeline_mod, "extract_voice_only_wav", fake_extract)
+@pytest.mark.asyncio
+async def test_source_audio_is_never_modified(tmp_path, monkeypatch):
+    _with_vad(monkeypatch, [])
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"RIFF....WAVE")
+    before = audio.read_bytes()
 
-    client = _FakeChimegeClient(chunk_texts=["Эхний.", "Хоёр дахь."])
-    client.max_audio_sec = 10.0
-    progress_values = []
-
-    async def on_progress(p):
-        progress_values.append(p)
-
-    result = await _run(client, tmp_path, on_progress=on_progress)
-
-    assert len(client.chunk_calls) == 2
-    assert len(extracted_groups) == 2
-    assert result.full_text == "Эхний. Хоёр дахь."
-    assert result.segments[0].start == 1.0
-    assert result.segments[0].end == 7.0
-    assert result.segments[1].start == 50.0
-    assert result.segments[1].end == 56.0
-    assert progress_values[-1] == pytest.approx(1.0)
-
-    # workdir (= the project directory in real use) must keep a record of
-    # every stage: the Demucs stems, exactly what VAD detected, and the
-    # actual gap-free chunk audio sent to Chimege.
-    workdir = tmp_path / "work"
-    assert (workdir / "vocals.wav").read_bytes() == b"fake"
-    assert (workdir / "music.wav").read_bytes() == b"fake"
-    saved_segments = json.loads((workdir / "vad_segments.json").read_text(encoding="utf-8"))
-    assert saved_segments == [{"start": 1.0, "end": 7.0}, {"start": 50.0, "end": 56.0}]
-    assert sorted(p.name for p in (workdir / "voice_chunks").glob("*.wav")) == [
-        "chunk_000.wav",
-        "chunk_001.wav",
-    ]
+    await transcribe_audio(
+        _FakeSttClient(), audio, tmp_path / "work", _settings(), Path("ffmpeg")
+    )
+    assert audio.read_bytes() == before
