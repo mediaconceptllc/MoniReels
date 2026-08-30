@@ -848,3 +848,89 @@ async def test_a_fatal_chunk_still_fails_the_job(tmp_path, monkeypatch, _fast_ba
 
     with pytest.raises(DuudlagaError):
         await _client(handler, concurrency=3).transcribe(audio)
+
+
+# --------------------------------------------------------------------------
+# A verdict about the ACCOUNT ends the run. Production hit 402 with an empty
+# balance and sent all 62 chunks anyway — free, because a rejected request
+# transcribes nothing, but the same shape means credits running out midway
+# fires every remaining chunk at a wall.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_empty_balance_stops_the_remaining_chunks(tmp_path, monkeypatch):
+    import app.stt.duudlaga_client as mod
+
+    audio = tmp_path / "audio.wav"
+    _wav(audio, seconds=120.0)
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: tmp_path / "ffmpeg")
+
+    async def _silences(ffmpeg, path):
+        return [(float(t), t + 0.5) for t in range(10, 120, 10)]
+
+    async def _extract(ffmpeg, src, out, start, end):
+        out.write_bytes(b"chunk")
+
+    monkeypatch.setattr(mod, "detect_silences", _silences)
+    monkeypatch.setattr(mod, "extract_chunk", _extract)
+
+    sent = 0
+
+    def handler(_request):
+        nonlocal sent
+        sent += 1
+        if sent <= 2:
+            return httpx.Response(200, json={"text": "яриа."})
+        return _error(402, "insufficient_credits", "Not enough credits")
+
+    with pytest.raises(mod.DuudlagaError) as raised:
+        # concurrency=1 so the order is deterministic: two succeed, the third
+        # is refused, and everything after it must never be sent.
+        await _client(handler, concurrency=1).transcribe(audio)
+
+    assert sent == 3, f"{sent - 3} chunk(s) were sent after the balance ran out"
+    assert raised.value.status == 402
+    assert "2/" in str(raised.value)  # says how many were already paid for
+
+
+@pytest.mark.asyncio
+async def test_a_402_without_a_code_still_ends_the_run(tmp_path, monkeypatch):
+    # The status has to decide too: production's 402 arrived with the credits
+    # message, and a code-only check would have let the whole batch fly.
+    import app.stt.duudlaga_client as mod
+
+    audio = tmp_path / "audio.wav"
+    _wav(audio, seconds=60.0)
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: tmp_path / "ffmpeg")
+    monkeypatch.setattr(mod, "detect_silences", lambda *_: _silences_every_ten())
+    monkeypatch.setattr(mod, "extract_chunk", _write_chunk)
+
+    sent = 0
+
+    def handler(_request):
+        nonlocal sent
+        sent += 1
+        return httpx.Response(402, json={"message": "Top up your balance."})
+
+    with pytest.raises(mod.DuudlagaError):
+        await _client(handler, concurrency=1).transcribe(audio)
+
+    assert sent == 1
+
+
+async def _silences_every_ten():
+    return [(float(t), t + 0.5) for t in range(10, 60, 10)]
+
+
+async def _write_chunk(ffmpeg, src, out, start, end):
+    out.write_bytes(b"chunk")
+
+
+def test_a_retryable_failure_is_not_treated_as_fatal():
+    from app.stt.duudlaga_client import DuudlagaError
+
+    assert not DuudlagaError("busy", status=429, code="rate_limit_exceeded").ends_the_run
+    assert not DuudlagaError("boom", status=500, code="internal_error").ends_the_run
+    assert DuudlagaError("broke", status=402, code="insufficient_credits").ends_the_run
+    assert DuudlagaError("cap", status=403, code="daily_spend_cap_exceeded").ends_the_run
