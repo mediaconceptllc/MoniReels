@@ -8,8 +8,9 @@ guarantees every cut lands on a real segment boundary.
 from __future__ import annotations
 
 import re
+from math import ceil
 
-from app.ai.schema import CUT_PAD_SEC
+from app.ai.schema import CUT_PAD_SEC, MAX_SHORT_DURATION, MIN_SHORT_DURATION
 from app.models import Transcript
 from app.utils.timecode import seconds_to_mmss
 
@@ -182,6 +183,79 @@ SUGGESTIONS_SCHEMA: dict = {
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
+def _split_on_words(
+    start: float, end: float, text: str, max_sec: float
+) -> list[tuple[float, float, str]]:
+    """Splits a span with no usable sentence boundaries into pieces of at most
+    max_sec, packing whole words and giving each word a share of the span
+    proportional to its length.
+
+    This is the case the sentence split cannot serve at all: duudlaga.dev
+    returns Mongolian ASR text with no terminal punctuation, so `_SENTENCE_END`
+    finds nothing to cut on and the chunk reached the model whole. Measured on
+    the production transcript that failed - 68 chunks over 17:44 - that left
+    32 of 68 segments above this cap and a median segment of 14.3s: half the
+    video offered only take-it-or-leave-it blocks.
+
+    A 35-60s short needs 3+ cuts, so building one out of blocks that size
+    overshoots as soon as the model picks anything but the shortest scraps -
+    observed as shorts of 80s, 93s, 108s, 109s and 120s. The repair prompt
+    then asked it to "narrow a cut's index range" when every cut was already
+    a single indivisible segment, so the retry could not converge either and
+    the job died having paid for two calls. Not strictly unreachable (the
+    shortest three segments summed to 14.5s), but unreachable for any sensible
+    choice of content, which amounts to the same failure.
+
+    Word timing inside the piece is an estimate, exactly as the sentence split
+    above already is - good enough to choose cuts, and the editor still lets
+    the user nudge the handles afterwards.
+    """
+    words = text.split()
+    span = end - start
+    if span <= max_sec or len(words) < 2:
+        return [(start, end, text)]
+
+    # Lay the words into the fewest EVEN pieces that all fit under the cap,
+    # rather than filling each piece to the cap and letting the remainder fall
+    # out as a tail: greedy filling turns a 15.4s segment into 15.0s + 0.4s,
+    # and a one-word fragment is not a cut unit anyone can use. Pieces are cut
+    # on cumulative character position, so a word lands wholly in one piece and
+    # the boundaries stay proportional to the text.
+    total_chars = sum(len(w) for w in words) or 1
+
+    def lay_out(n: int) -> list[tuple[float, float, str]]:
+        groups: list[list[str]] = [[] for _ in range(n)]
+        cum = 0
+        for word in words:
+            # The word's midpoint decides its piece, so a word straddling a
+            # boundary goes to the side holding more of it.
+            groups[min(n - 1, int((cum + len(word) / 2) * n / total_chars))].append(word)
+            cum += len(word)
+
+        out: list[tuple[float, float, str]] = []
+        cursor, chars = start, 0
+        for k, group in enumerate(groups):
+            if not group:
+                continue
+            chars += sum(len(w) for w in group)
+            # The tail ends exactly on the original end, so float drift
+            # accumulated across the shares can never leave a gap or an
+            # overhang at the boundary.
+            stop = end if k == n - 1 else start + span * (chars / total_chars)
+            out.append((cursor, stop, " ".join(group)))
+            cursor = stop
+        return out
+
+    # A word is atomic, so an even split can still overshoot the cap by part of
+    # one word; one more piece is the fix. Bounded by one piece per word, and a
+    # single word longer than the cap is emitted anyway - never lose transcript
+    # to the arithmetic.
+    pieces = lay_out(ceil(span / max_sec))
+    while len(pieces) < len(words) and any(e - s > max_sec for s, e, _ in pieces):
+        pieces = lay_out(len(pieces) + 1)
+    return pieces
+
+
 def split_long_segments(transcript: Transcript, max_sec: float = MAX_SEGMENT_SEC):
     """Splits segments longer than max_sec at sentence boundaries, distributing the
     original time span proportionally to sentence length.
@@ -204,7 +278,7 @@ def split_long_segments(transcript: Transcript, max_sec: float = MAX_SEGMENT_SEC
 
         sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
         if len(sentences) < 2:
-            out.append((seg.start, seg.end, text))
+            out.extend(_split_on_words(seg.start, seg.end, text, max_sec))
             continue
 
         total_chars = sum(len(s) for s in sentences)
@@ -212,7 +286,10 @@ def split_long_segments(transcript: Transcript, max_sec: float = MAX_SEGMENT_SEC
         for i, sentence in enumerate(sentences):
             share = span * (len(sentence) / total_chars)
             end = seg.end if i == len(sentences) - 1 else cursor + share
-            out.append((cursor, end, sentence))
+            # One sentence can be longer than max_sec on its own, so the
+            # sentence path needs the same word-level fallback rather than
+            # emitting a block the model still cannot cut inside.
+            out.extend(_split_on_words(cursor, end, sentence, max_sec))
             cursor = end
     return out
 
@@ -390,8 +467,8 @@ def validate_shorts(shorts: list[dict], segments: list[tuple[float, float, str]]
             # already called "usable".
             total += (segments[e][1] - segments[s][0]) + 2 * CUT_PAD_SEC
 
-        if not 35 <= total <= 60:
-            # Must match schema.py's MIN/MAX_SHORT_DURATION (35-60s) exactly -
+        if not MIN_SHORT_DURATION <= total <= MAX_SHORT_DURATION:
+            # The bounds come from schema.py rather than being restated here:
             # this function decides whether a candidate is "usable" for the
             # chunked pipeline (app.ai.suggest), so any gap between this gate
             # and postprocess_suggestions' real enforcement lets a duration
@@ -406,17 +483,18 @@ def validate_shorts(shorts: list[dict], segments: list[tuple[float, float, str]]
             # vs narrow/drop a cut, using the real per-segment timestamps
             # already in the prompt) is something a retry can actually
             # follow.
-            if total < 35:
+            lo, hi = MIN_SHORT_DURATION, MAX_SHORT_DURATION
+            if total < lo:
                 problems.append(
-                    f"Short {n}: total duration {total:.0f}s is too short, must be 35-60s. "
-                    f"Add {35 - total:.0f} to {60 - total:.0f} more seconds by widening an existing "
+                    f"Short {n}: total duration {total:.0f}s is too short, must be {lo:.0f}-{hi:.0f}s. "
+                    f"Add {lo - total:.0f} to {hi - total:.0f} more seconds by widening an existing "
                     f"cut's start_index/end_index further apart, or adding one more cut (up to 5 "
                     f"total) - use the real segment timestamps shown to pick a range that size."
                 )
             else:
                 problems.append(
-                    f"Short {n}: total duration {total:.0f}s is too long, must be 35-60s. "
-                    f"Cut {total - 60:.0f} to {total - 35:.0f} seconds by narrowing a cut's index "
+                    f"Short {n}: total duration {total:.0f}s is too long, must be {lo:.0f}-{hi:.0f}s. "
+                    f"Cut {total - hi:.0f} to {total - lo:.0f} seconds by narrowing a cut's index "
                     f"range, or dropping the weakest cut (down to 3 minimum)."
                 )
 
@@ -434,12 +512,18 @@ def validate_shorts(shorts: list[dict], segments: list[tuple[float, float, str]]
 
 
 # ---------------------------------------------------------------------------
-# Deterministic repair — code-side fixes for the two failure modes observed
-# most often (Claude models in particular): a too-long total duration and a
-# hook_quote that drifted from a true verbatim substring. Applied before
-# validate_shorts gets the final say, so a near-miss the model won't reliably
-# self-correct even with a specific repair prompt gets fixed outright instead
-# of spending (and possibly exhausting) a retry, or being discarded.
+# Deterministic repair — code-side fixes for the failure modes observed most
+# often (Claude models in particular): a too-long total duration, fixed by
+# dropping a cut or narrowing one, and a hook_quote that drifted from a true
+# verbatim substring. Applied before validate_shorts gets the final say, so a
+# near-miss the model won't reliably self-correct even with a specific repair
+# prompt gets fixed outright instead of spending (and possibly exhausting) a
+# retry, or being discarded.
+#
+# Duration is arithmetic on timestamps we already hold, so asking a model to
+# redo it is the wrong tool twice over: it costs a billed call and it is the
+# part the model is worst at. The repair prompt states the exact remedy in
+# seconds and production still came back over the limit on the retry.
 # ---------------------------------------------------------------------------
 
 
@@ -490,10 +574,10 @@ def _shrink_short_to_fit(short: dict, segments: list[tuple[float, float, str]]) 
     def total_duration(cs: list[dict]) -> float:
         return sum(cut_span(c) + 2 * CUT_PAD_SEC for c in cs)
 
-    if len(cuts) <= 3 or total_duration(cuts) <= 60:
+    if len(cuts) <= 3 or total_duration(cuts) <= MAX_SHORT_DURATION:
         return short
 
-    while len(cuts) > 3 and total_duration(cuts) > 60:
+    while len(cuts) > 3 and total_duration(cuts) > MAX_SHORT_DURATION:
         interior = [
             (i, c) for i, c in enumerate(cuts) if i != 0 and i != len(cuts) - 1 and c.get("role") != "hook"
         ]
@@ -502,9 +586,68 @@ def _shrink_short_to_fit(short: dict, segments: list[tuple[float, float, str]]) 
         drop_i, _ = min(interior, key=lambda ic: cut_span(ic[1]))
         cuts.pop(drop_i)
 
-    if total_duration(cuts) <= 60:
+    if total_duration(cuts) <= MAX_SHORT_DURATION:
         return {**short, "cuts": cuts}
     return short
+
+
+def _narrow_cuts_to_fit(short: dict, segments: list[tuple[float, float, str]]) -> dict:
+    """If the short is still over MAX_SHORT_DURATION after dropping cuts, trims
+    one segment at a time off the widest cut until it fits - the other half of
+    the remedy `validate_shorts` names ("narrowing a cut's index range") and
+    the only one left once a short is at the 3-cut floor, where
+    `_shrink_short_to_fit` returns immediately by construction. A short with
+    exactly 3 wide cuts therefore got no code-side repair at all and spent the
+    single retry on a prompt the model had already failed once.
+
+    Which end is trimmed follows the roles the system prompt assigns: a payoff
+    cut (and the last cut, whatever its role, since that is the one played
+    last) loses its FIRST segment so the landing survives; every other cut
+    loses its LAST, keeping the opening the hook depends on.
+
+    Never trims below MIN_SHORT_DURATION: one segment can be worth 30s, so a
+    single careless trim can take a 62s short to 32s, trading one validation
+    failure for the opposite one. A trim that would undershoot is skipped in
+    favour of the next-widest cut, and when no cut can be trimmed safely the
+    short is returned unchanged for `validate_shorts` to reject - same
+    best-effort contract as `_shrink_short_to_fit`.
+    """
+    cuts = [dict(c) for c in short.get("cuts", [])]
+    if not cuts:
+        return short
+
+    def cut_span(c: dict) -> float:
+        s, e = c.get("start_index"), c.get("end_index")
+        if isinstance(s, int) and isinstance(e, int) and 0 <= s <= e < len(segments):
+            return segments[e][1] - segments[s][0]
+        return 0.0
+
+    def total_duration(cs: list[dict]) -> float:
+        return sum(cut_span(c) + 2 * CUT_PAD_SEC for c in cs)
+
+    def trim(c: dict, is_last: bool) -> dict | None:
+        s, e = c.get("start_index"), c.get("end_index")
+        if not isinstance(s, int) or not isinstance(e, int) or e <= s:
+            return None  # single-segment cut: nothing left to narrow
+        if is_last or c.get("role") == "payoff":
+            return {**c, "start_index": s + 1}
+        return {**c, "end_index": e - 1}
+
+    while total_duration(cuts) > MAX_SHORT_DURATION:
+        # Widest first: the largest single reduction, and it evens the cuts out
+        # rather than whittling one down to nothing.
+        for i in sorted(range(len(cuts)), key=lambda j: cut_span(cuts[j]), reverse=True):
+            narrowed = trim(cuts[i], i == len(cuts) - 1)
+            if narrowed is None:
+                continue
+            candidate = cuts[:i] + [narrowed] + cuts[i + 1 :]
+            if total_duration(candidate) >= MIN_SHORT_DURATION:
+                cuts = candidate
+                break
+        else:
+            return short
+
+    return {**short, "cuts": cuts}
 
 
 def repair_short_dict(short: dict, segments: list[tuple[float, float, str]]) -> dict:
@@ -513,6 +656,10 @@ def repair_short_dict(short: dict, segments: list[tuple[float, float, str]]) -> 
     under-length short, or one broken in some other way, passes through
     unchanged) - just improves the odds without spending another API call.
     """
-    short = _fix_hook_quote_if_invalid(short, segments)
+    # Cuts settle before the quote does: narrowing can move the hook cut's
+    # boundaries, and a quote sourced from the cut it no longer covers reads
+    # as a quote from somewhere else in the video.
     short = _shrink_short_to_fit(short, segments)
+    short = _narrow_cuts_to_fit(short, segments)
+    short = _fix_hook_quote_if_invalid(short, segments)
     return short
