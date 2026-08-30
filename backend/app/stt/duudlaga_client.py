@@ -174,6 +174,10 @@ class DuudlagaConfig:
     # Empty sends the WAV as-is. Anything else is an Opus bitrate to
     # re-encode each chunk to before uploading.
     upload_bitrate: str = "32k"
+    # Chunks in flight at once. The provider's own transcription is ~0.45x
+    # realtime and is where essentially all the wall clock goes: 8 seconds of
+    # ffmpeg against 8 minutes of waiting, measured on a 17:44 source.
+    concurrency: int = 4
 
 
 class DuudlagaClient(SttProvider):
@@ -232,17 +236,41 @@ class DuudlagaClient(SttProvider):
         workdir = wav_path.parent / f"{wav_path.stem}_chunks"
         workdir.mkdir(parents=True, exist_ok=True)
         try:
+            limit = asyncio.Semaphore(max(1, self._config.concurrency))
+
+            async def one(i: int, start: float, end: float) -> list[tuple[float, Transcript]]:
+                async with limit:
+                    logger.info(
+                        "Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end
+                    )
+                    return await self._transcribe_span(
+                        ffmpeg, wav_path, workdir, start, end, f"{i:03d}"
+                    )
+
+            # gather, and never as_completed: merge_transcripts joins the text
+            # in list order and does not sort, so the order of these results IS
+            # the order of the transcript. gather returns them in argument
+            # order however they finish; taking them as they complete would
+            # shuffle the interview into nonsense one slow chunk at a time.
+            #
+            # return_exceptions so a fatal chunk does not leave the rest
+            # running unawaited into a workdir this function is about to
+            # delete. They are already in flight and already billed; the first
+            # failure in chunk order is raised once they have all settled.
+            settled = await asyncio.gather(
+                *(one(i, s, e) for i, (s, e) in enumerate(boundaries)),
+                return_exceptions=True,
+            )
+
             results: list[tuple[float, Transcript]] = []
             silent = 0
-            for i, (start, end) in enumerate(boundaries):
-                logger.info("Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end)
-                spans = await self._transcribe_span(
-                    ffmpeg, wav_path, workdir, start, end, f"{i:03d}"
-                )
-                if not spans:
+            for outcome in settled:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                if not outcome:
                     silent += 1
                     continue
-                results.extend(spans)
+                results.extend(outcome)
             if silent:
                 logger.info("%d/%d chunk(s) contained no speech", silent, len(boundaries))
             return merge_transcripts(results)
@@ -473,6 +501,7 @@ def build_client(settings) -> DuudlagaClient:
             max_audio_sec=settings.duudlaga_max_audio_sec,
             model=settings.duudlaga_model,
             upload_bitrate=settings.duudlaga_upload_bitrate,
+            concurrency=settings.duudlaga_concurrency,
         )
     )
 
