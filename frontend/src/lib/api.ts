@@ -12,6 +12,7 @@
  */
 
 import type {
+  BrandAsset,
   BrandSettings,
   CreateProjectResponse,
   Job,
@@ -218,17 +219,17 @@ export const api = {
 
   brand: () => request<BrandSettings>("/admin/brand"),
 
-  /** Presigned PUT for the logo. The image goes straight to storage — see
-   *  lib/upload.ts — and only the key comes back here. */
-  logoUploadUrl: (contentType: string) =>
-    request<{ key: string; url: string }>("/admin/brand/logo/upload-url", {
+  /** Presigned PUT for a brand asset. The file goes straight to storage —
+   *  see lib/upload.ts — and only the key comes back here. */
+  brandUploadUrl: (asset: BrandAsset, contentType: string) =>
+    request<{ key: string; url: string }>(`/admin/brand/${asset}/upload-url`, {
       method: "POST",
       body: JSON.stringify({ content_type: contentType }),
     }),
 
-  /** `key: null` clears the logo. */
-  saveLogo: (key: string | null) =>
-    request<BrandSettings>("/admin/brand/logo", {
+  /** `key: null` clears the slot. */
+  saveBrandAsset: (asset: BrandAsset, key: string | null) =>
+    request<BrandSettings>(`/admin/brand/${asset}`, {
       method: "PUT",
       body: JSON.stringify({ key }),
     }),

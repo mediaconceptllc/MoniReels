@@ -44,7 +44,10 @@ def _split_segment_for_clip(segment: Segment, clip: Clip, output_offset: float) 
 
 
 def retime_segments_for_output(
-    segments: list[Segment], clips: list[Clip], clip_output_starts: list[float]
+    segments: list[Segment],
+    clips: list[Clip],
+    clip_output_starts: list[float],
+    transcript_source: str | None = None,
 ) -> list[Segment]:
     """clip_output_starts[i] is where clips[i]'s content begins in the final
     rendered output — cumulative durations for a straight concat join, or the
@@ -54,9 +57,19 @@ def retime_segments_for_output(
     Positional: clip_output_starts[i] must correspond to clips[i] exactly as
     passed in (i.e. already in render/timeline order) — this function does not
     itself sort clips, it only sorts the resulting segments by their new start.
+
+    `transcript_source` names the file the segments were transcribed FROM.
+    A timeline can hold clips cut from somewhere else — a brand intro or
+    outro — and those overlap the transcript's timeline by coincidence of
+    seconds, not because anyone said those words: an intro running 0-6s would
+    otherwise be captioned with whatever the source video says in its first
+    six. Left None, every clip is treated as the source's, which is what a
+    timeline of nothing but cuts always was.
     """
     result: list[Segment] = []
     for clip, output_start in zip(clips, clip_output_starts, strict=True):
+        if transcript_source is not None and clip.source_path != transcript_source:
+            continue
         for segment in segments:
             shifted = _split_segment_for_clip(segment, clip, output_start)
             if shifted is not None:

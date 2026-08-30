@@ -172,3 +172,38 @@ async def test_render_all_ideas_final_progress_is_one(tmp_path, monkeypatch):
     await _run(monkeypatch, tmp_path, suggestions, handle=handle)
 
     assert progresses[-1] == 1.0
+
+
+# --------------------------------------------------------------------------
+# Frame rate. A brand intro sits at clips[0] and is not what the render
+# should take its timing from.
+# --------------------------------------------------------------------------
+
+
+def test_the_frame_rate_comes_from_the_content_not_the_intro():
+    from app.export.pipeline import pick_fps_source
+    from app.timeline.models import Clip
+
+    intro = Clip(id="i", source_path="/w/intro.mp4", start=0.0, end=4.0, order=-1)
+    content = Clip(id="c", source_path="/w/source.mp4", start=10.0, end=20.0, order=0)
+
+    assert pick_fps_source([intro, content], "/w/source.mp4") is content
+
+
+def test_with_no_named_source_the_first_clip_still_decides():
+    from app.export.pipeline import pick_fps_source
+    from app.timeline.models import Clip
+
+    a = Clip(id="a", source_path="/w/source.mp4", start=0.0, end=5.0, order=0)
+    b = Clip(id="b", source_path="/w/source.mp4", start=9.0, end=12.0, order=1)
+
+    assert pick_fps_source([a, b], None) is a
+
+
+def test_a_source_that_is_not_in_the_timeline_falls_back():
+    # Never raise over a frame rate: an export must survive a mismatch here.
+    from app.export.pipeline import pick_fps_source
+    from app.timeline.models import Clip
+
+    only = Clip(id="i", source_path="/w/intro.mp4", start=0.0, end=4.0, order=0)
+    assert pick_fps_source([only], "/w/gone.mp4") is only

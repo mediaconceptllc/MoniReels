@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { useAuth, errorMessage } from "@/lib/auth";
 import type { ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
 import { Alert, Button, Card, Field, Spinner, TextInput } from "@/components/ui";
-import { BrandLogoCard } from "@/components/BrandLogoCard";
+import { BrandAssetsCard } from "@/components/BrandAssetsCard";
 
 type SecretName = "openrouter_api_key" | "duudlaga_api_key" | "elevenlabs_api_key";
 
@@ -151,7 +151,7 @@ export default function AdminPage() {
         </div>
       </Card>
 
-      <BrandLogoCard />
+      <BrandAssetsCard />
 
       <p className="text-xs text-ink-3">
         Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана. Мартвал шинээр

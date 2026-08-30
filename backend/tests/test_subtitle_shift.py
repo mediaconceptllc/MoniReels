@@ -87,3 +87,41 @@ def test_results_sorted_by_start_regardless_of_input_order():
 def test_empty_segments_returns_empty():
     clips = [_clip(0, 0.0, 10.0)]
     assert retime_segments_for_output([], clips, [0.0]) == []
+
+
+# --------------------------------------------------------------------------
+# Brand clips. A timeline can hold an intro or outro cut from a DIFFERENT
+# file; those overlap the transcript's timeline by coincidence of seconds,
+# not because anyone said those words.
+# --------------------------------------------------------------------------
+
+
+def test_a_brand_intro_is_not_captioned_with_the_sources_first_words():
+    # The intro runs 0-6s of intro.mp4. Without the source check it collects
+    # whatever the video says in its own first six seconds.
+    segments = [Segment(id="s1", start=1.0, end=3.0, text="эхний өгүүлбэр")]
+    clips = [_clip(0, 0.0, 6.0, source="intro.mp4"), _clip(1, 0.0, 10.0, source="video.mp4")]
+
+    out = retime_segments_for_output(segments, clips, [0.0, 6.0], "video.mp4")
+
+    assert len(out) == 1
+    assert out[0].start == 7.0  # 1.0 into the content, which begins at 6.0
+
+
+def test_without_a_named_source_every_clip_still_counts():
+    # A timeline of nothing but cuts is what this function always saw; that
+    # behaviour has to survive the new argument being left off.
+    segments = [Segment(id="s1", start=1.0, end=3.0, text="эхний өгүүлбэр")]
+    clips = [_clip(0, 0.0, 6.0, source="intro.mp4"), _clip(1, 0.0, 10.0, source="video.mp4")]
+
+    assert len(retime_segments_for_output(segments, clips, [0.0, 6.0])) == 2
+
+
+def test_an_outro_at_the_end_collects_nothing_either():
+    segments = [Segment(id="s1", start=1.0, end=3.0, text="яриа")]
+    clips = [_clip(0, 0.0, 10.0, source="video.mp4"), _clip(1, 0.0, 5.0, source="outro.mp4")]
+
+    out = retime_segments_for_output(segments, clips, [0.0, 10.0], "video.mp4")
+
+    assert len(out) == 1
+    assert out[0].start == 1.0

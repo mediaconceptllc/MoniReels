@@ -157,6 +157,10 @@ class ExportSettings(BaseModel):
     burn_subtitles: bool = True
     write_srt: bool = True
     logo: LogoSettings = Field(default_factory=LogoSettings)
+    # The intro/outro FILES are global brand assets, like the logo. These say
+    # whether this project's exports carry them.
+    use_intro: bool = False
+    use_outro: bool = False
 
 
 class Project(BaseModel):

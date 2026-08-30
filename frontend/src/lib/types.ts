@@ -114,6 +114,10 @@ export interface ExportSettings {
   burn_subtitles: boolean;
   write_srt: boolean;
   logo: LogoSettings;
+  /** The intro/outro FILES are global brand assets. These say whether this
+   *  project's exports carry them. */
+  use_intro: boolean;
+  use_outro: boolean;
 }
 
 export interface BrandLogo {
@@ -122,8 +126,12 @@ export interface BrandLogo {
   url: string | null;
 }
 
+export type BrandAsset = "logo" | "intro" | "outro";
+
 export interface BrandSettings {
   logo: BrandLogo | null;
+  intro: BrandLogo | null;
+  outro: BrandLogo | null;
   storage: boolean;
 }
 

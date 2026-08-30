@@ -546,6 +546,8 @@ def test_no_logo_is_set_to_begin_with(client, db):
     _user(db, "root", role="admin")
     body = client.get("/admin/brand", headers=_auth(client, "root")).json()
     assert body["logo"] is None
+    assert body["intro"] is None
+    assert body["outro"] is None
 
 
 def test_the_upload_url_is_presigned_and_the_image_never_posts_here(client, db):
@@ -609,3 +611,69 @@ def test_export_settings_carry_the_per_project_logo_choice(client, db):
     logo = body["export"]["logo"]
     assert logo["enabled"] is False  # off until someone asks for it
     assert logo["position"] == "top-right"  # clear of the bottom subtitles
+
+
+def test_every_brand_slot_has_its_own_upload_url(client, db):
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    for asset, content_type, ext in [
+        ("logo", "image/png", ".png"),
+        ("intro", "video/mp4", ".mp4"),
+        ("outro", "video/mp4", ".mp4"),
+    ]:
+        response = client.post(
+            f"/admin/brand/{asset}/upload-url", headers=headers, json={"content_type": content_type}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["key"] == f"brand/{asset}-" + response.json()["key"].split("-", 1)[1]
+        assert response.json()["key"].endswith(ext)
+
+
+def test_a_video_cannot_be_uploaded_as_the_logo(client, db):
+    # Nor an image as the intro: each slot takes what ffmpeg can use for it.
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    assert (
+        client.post(
+            "/admin/brand/logo/upload-url", headers=headers, json={"content_type": "video/mp4"}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/admin/brand/intro/upload-url", headers=headers, json={"content_type": "image/png"}
+        ).status_code
+        == 400
+    )
+
+
+def test_an_intro_key_cannot_be_adopted_as_the_outro(client, db):
+    # Otherwise one upload silently fills two slots and the export plays the
+    # title card at both ends.
+    _user(db, "root", role="admin")
+    response = client.put(
+        "/admin/brand/outro", headers=_auth(client, "root"), json={"key": "brand/intro-123.mp4"}
+    )
+    assert response.status_code == 400
+
+
+def test_an_unknown_brand_slot_is_a_404(client, db):
+    _user(db, "root", role="admin")
+    response = client.put(
+        "/admin/brand/watermark", headers=_auth(client, "root"), json={"key": None}
+    )
+    assert response.status_code == 404
+
+
+def test_intro_and_outro_are_off_until_a_project_asks(client, db):
+    _user(db, "alice")
+    headers = _auth(client, "alice")
+    created = client.post(
+        "/projects",
+        headers=headers,
+        json={"name": "Тест", "filename": "a.mp4", "size_bytes": 1024},
+    )
+    body = client.get(f"/projects/{created.json()['project_id']}", headers=headers).json()
+
+    assert body["export"]["use_intro"] is False
+    assert body["export"]["use_outro"] is False

@@ -28,6 +28,11 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 LOGO_KEY = "brand_logo_key"
+INTRO_KEY = "brand_intro_key"
+OUTRO_KEY = "brand_outro_key"
+
+# The three assets an admin uploads, by the name the API uses for each.
+ASSETS = {"logo": LOGO_KEY, "intro": INTRO_KEY, "outro": OUTRO_KEY}
 
 # What a logo may be. SVG is absent on purpose: ffmpeg cannot rasterise it
 # without librsvg, which this image does not carry, so accepting one would
@@ -39,30 +44,46 @@ LOGO_CONTENT_TYPES = {
 }
 
 
-def new_logo_key(content_type: str) -> str:
-    ext = LOGO_CONTENT_TYPES.get(content_type)
+# What an intro or outro may be. Whatever it is, it gets normalised to the
+# export's own resolution and frame rate before the join, so only the
+# container has to be one ffmpeg reads without a hunt.
+CLIP_CONTENT_TYPES = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+
+
+def new_key(asset: str, content_type: str) -> str:
+    if asset not in ASSETS:
+        raise ValueError(f"Unknown brand asset {asset!r}")
+    allowed = LOGO_CONTENT_TYPES if asset == "logo" else CLIP_CONTENT_TYPES
+    ext = allowed.get(content_type)
     if ext is None:
-        raise ValueError(f"Unsupported logo type {content_type!r}")
-    return f"brand/logo-{int(time.time())}{ext}"
+        raise ValueError(f"Unsupported {asset} type {content_type!r}")
+    # Timestamped, not a fixed name: the admin page previews these through a
+    # signed GET, and a replacement behind an unchanged URL is served from
+    # cache — the operator uploads a new file, sees the old one, uploads again.
+    return f"brand/{asset}-{int(time.time())}{ext}"
 
 
-def get(db: Session, key: str = LOGO_KEY) -> str | None:
-    row = db.scalars(select(Setting).where(Setting.key == key)).first()
+def get(db: Session, asset: str = "logo") -> str | None:
+    row = db.scalars(select(Setting).where(Setting.key == ASSETS[asset])).first()
     return row.value if row and row.value else None
 
 
-def set_logo(db: Session, r2_key: str | None) -> None:
-    """Points the brand logo at a new object and removes the one it replaces.
+def set_asset(db: Session, asset: str, r2_key: str | None) -> None:
+    """Points a brand asset at a new object and removes the one it replaces.
 
     Deleting the old object is best-effort: an orphan in R2 costs a few
-    kilobytes, while a failed delete that propagated would lose the operator
+    kilobytes, while a failed delete that propagated would cost the operator
     the upload they just made.
     """
-    previous = get(db)
-    row = db.scalars(select(Setting).where(Setting.key == LOGO_KEY)).first()
+    setting_key = ASSETS[asset]
+    previous = get(db, asset)
+    row = db.scalars(select(Setting).where(Setting.key == setting_key)).first()
     if row is None:
-        row = Setting(key=LOGO_KEY, value=r2_key or "")
-        db.add(row)
+        db.add(Setting(key=setting_key, value=r2_key or ""))
     else:
         row.value = r2_key or ""
 
@@ -70,4 +91,4 @@ def set_logo(db: Session, r2_key: str | None) -> None:
         try:
             r2.delete(previous)
         except Exception:  # noqa: BLE001 - an orphan object is not worth failing on
-            logger.warning("Could not delete the replaced logo %s", previous, exc_info=True)
+            logger.warning("Could not delete the replaced %s %s", asset, previous, exc_info=True)

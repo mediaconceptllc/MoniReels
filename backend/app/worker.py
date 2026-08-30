@@ -298,6 +298,25 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
         else:
             logger.warning("Project asked for the brand logo but none is uploaded")
 
+    async def _brand_clip(asset: str) -> Path | None:
+        """Fetches an intro/outro if the project wants one and it exists.
+
+        A missing asset is a warning, never a failure: an export must not die
+        over a title card, and the alternative is a producer discovering at
+        render time that the outro nobody uploaded has cost them the render.
+        """
+        with session_scope() as db:
+            key = brand.get(db, asset)
+        if not key:
+            logger.warning("Project asked for the brand %s but none is uploaded", asset)
+            return None
+        path = workdir / f"{asset}{Path(key).suffix or '.mp4'}"
+        await asyncio.to_thread(r2.download_file, key, path)
+        return path
+
+    intro_path = await _brand_clip("intro") if project.export.use_intro else None
+    outro_path = await _brand_clip("outro") if project.export.use_outro else None
+
     if all_ideas:
         if project.suggestions is None or not (
             project.suggestions.shorts or project.suggestions.youtube
@@ -311,7 +330,8 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             output_dir=out_dir, job_id=handle.job_id,
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
-            logo=logo, logo_path=logo_path,
+            logo=logo, logo_path=logo_path, transcript_source=str(local),
+            intro_path=intro_path, outro_path=outro_path,
         )
     else:
         if not project.clips:
@@ -327,7 +347,8 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             supported_xfade=caps.xfade_transitions, workdir=workdir, output_path=output_path,
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
-            logo=logo, logo_path=logo_path,
+            logo=logo, logo_path=logo_path, transcript_source=str(local),
+            intro_path=intro_path, outro_path=outro_path,
         )
         rendered = [{"kind": "export", "title": project_name, "output_path": str(output_path)}]
 

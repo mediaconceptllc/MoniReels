@@ -206,6 +206,67 @@ def _cumulative_starts(durations: list[float]) -> list[float]:
     return starts
 
 
+def pick_fps_source(clips: list[Clip], transcript_source: str | None) -> Clip:
+    """Which clip's frame rate the whole render adopts.
+
+    The CONTENT's, not whatever happens to be first. With a brand intro
+    prepended, clips[0] is a title card that may well be 25 or 60fps, and
+    every second of the actual video would be resampled to match a few
+    seconds of animation nobody is watching for the motion.
+
+    Falls back to the first clip when nothing identifies the source, which is
+    what a timeline of nothing but cuts always was.
+    """
+    if transcript_source is None:
+        return clips[0]
+    return next((c for c in clips if c.source_path == transcript_source), clips[0])
+
+
+async def _bracket_with_brand(
+    binaries: FfmpegBinaries,
+    clips: list[Clip],
+    intro_path: Path | None,
+    outro_path: Path | None,
+) -> list[Clip]:
+    """Puts the brand intro in front of the timeline and the outro behind it.
+
+    Here, in render_timeline's own preparation, rather than at either call
+    site: a single export and a batch of ideas must bracket identically, and
+    two implementations of "and then add the outro" is how one of them ends up
+    without it.
+
+    A brand clip is a whole file, so its range is 0..duration. It goes through
+    exactly the same normalisation as every other clip — resolution, frame
+    rate, pixel format — so a 4K 60fps title card joins a 1080x1920 30fps
+    reel without a word from the operator.
+    """
+    if intro_path is None and outro_path is None:
+        return clips
+
+    async def whole_file(path: Path, order: int) -> Clip | None:
+        meta = await probe_video(binaries.ffprobe, path)  # type: ignore[arg-type]
+        duration = float(meta.get("duration") or 0.0)
+        if duration <= 0:
+            # A file ffprobe reports as zero-length would join as nothing and
+            # can make xfade's offsets negative. Skipping is the safe read.
+            logger.warning("Brand clip %s has no duration; leaving it out", path.name)
+            return None
+        return Clip(
+            id=uuid.uuid4().hex, source_path=str(path), start=0.0, end=duration, order=order
+        )
+
+    bracketed = list(clips)
+    if outro_path is not None:
+        outro = await whole_file(outro_path, order=len(clips) + 1)
+        if outro is not None:
+            bracketed.append(outro)
+    if intro_path is not None:
+        intro = await whole_file(intro_path, order=-1)
+        if intro is not None:
+            bracketed.insert(0, intro)
+    return bracketed
+
+
 async def render_timeline(
     handle: JobHandle,
     binaries: FfmpegBinaries,
@@ -224,6 +285,9 @@ async def render_timeline(
     transcript_segments: list[Segment] | None = None,
     logo: LogoOverlay | None = None,
     logo_path: Path | None = None,
+    transcript_source: str | None = None,
+    intro_path: Path | None = None,
+    outro_path: Path | None = None,
 ) -> Path:
     if not clips:
         raise ValueError("Cannot render an empty clip list")
@@ -239,6 +303,7 @@ async def render_timeline(
     want_subtitles = bool(transcript_segments) and (write_srt or burn_subtitles)
 
     ordered_clips = sorted(clips, key=lambda c: c.order)
+    ordered_clips = await _bracket_with_brand(binaries, ordered_clips, intro_path, outro_path)
     workdir.mkdir(parents=True, exist_ok=True)
     # Keep the extension (output.part.mp4, not output.mp4.part) so ffmpeg's
     # muxer can still infer the output format from the temp filename.
@@ -247,7 +312,8 @@ async def render_timeline(
     normalized_paths: list[Path] = []
 
     try:
-        first_meta = await probe_video(binaries.ffprobe, Path(ordered_clips[0].source_path))  # type: ignore[arg-type]
+        fps_source = pick_fps_source(ordered_clips, transcript_source)
+        first_meta = await probe_video(binaries.ffprobe, Path(fps_source.source_path))  # type: ignore[arg-type]
         target_fps = first_meta["fps"] if first_meta["fps"] > 0 else 30.0
 
         n = len(ordered_clips)
@@ -298,7 +364,7 @@ async def render_timeline(
         retimed_segments: list[Segment] = []
         if want_subtitles and transcript_segments:
             retimed_segments = retime_segments_for_output(
-                transcript_segments, ordered_clips, clip_output_starts
+                transcript_segments, ordered_clips, clip_output_starts, transcript_source
             )
 
         if write_srt and retimed_segments:
@@ -379,6 +445,9 @@ async def render_all_ideas(
     transcript_segments: list[Segment] | None = None,
     logo: LogoOverlay | None = None,
     logo_path: Path | None = None,
+    transcript_source: str | None = None,
+    intro_path: Path | None = None,
+    outro_path: Path | None = None,
 ) -> list[dict]:
     """Renders one standalone output file per suggested idea (up to 3 reels +
     up to 3 youtube compilations), reusing render_timeline unchanged for each.
@@ -427,6 +496,7 @@ async def render_all_ideas(
             supported_xfade=supported_xfade, workdir=idea_workdir, output_path=output_path,
             write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
             transcript_segments=transcript_segments, logo=logo, logo_path=logo_path,
+            transcript_source=transcript_source, intro_path=intro_path, outro_path=outro_path,
         )
         results.append({"kind": kind, "title": title, "output_path": str(output_path)})
 

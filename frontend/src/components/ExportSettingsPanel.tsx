@@ -158,7 +158,30 @@ export function ExportSettingsPanel({
           />
           Лого тавих
         </label>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={draft.use_intro}
+            onChange={(e) => update("use_intro", e.target.checked)}
+          />
+          Эхлэлийн видео залгах
+        </label>
+        <label className="flex items-center gap-2 text-sm text-ink-2">
+          <input
+            type="checkbox"
+            checked={draft.use_outro}
+            onChange={(e) => update("use_outro", e.target.checked)}
+          />
+          Төгсгөлийн видео залгах
+        </label>
       </div>
+
+      {(draft.use_intro || draft.use_outro) && (
+        <p className="text-xs text-ink-3">
+          Эхлэл/төгсгөлийн видеог админ ⚙️ Тохиргооноос оруулна. Нягтралт, кадрын давтамжийг нь
+          систем экспортод тааруулж, шилжилтийг өөрөө тавина. Хадмал тэдгээр дээр гарахгүй.
+        </p>
+      )}
 
       {draft.logo.enabled && (
         <div className="grid gap-4 sm:grid-cols-3">
