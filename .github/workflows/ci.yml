@@ -46,7 +46,7 @@ jobs:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -95,7 +95,7 @@ jobs:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -121,12 +121,20 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      # A runner's DEFAULT buildx builder uses the `docker` driver, which
+      # cannot export a cache — `cache-to: type=gha` fails the build outright
+      # with "Cache export is not supported for the docker driver". This
+      # switches to the `docker-container` driver, which supports both the
+      # GHA cache and `load: true`.
+      - uses: docker/setup-buildx-action@v3
 
       # Both Railway services run this one image, so a Dockerfile that no
       # longer builds breaks the API and the worker together — and would
-      # otherwise only be discovered at deploy time. `load: true` keeps the
-      # result available to the next step instead of building it twice.
+      # otherwise only be discovered at deploy time. `load: true` hands the
+      # built image to the local daemon so the next step can run it, instead
+      # of building it a second time.
       - uses: docker/build-push-action@v6
         with:
           context: backend
