@@ -44,10 +44,16 @@ def _not_found(project_id: str) -> HTTPException:
 
 
 def _require_r2() -> None:
-    if not r2.enabled():
+    """Refuse the request while naming the variable that is wrong.
+
+    The reason is safe to hand back: it names environment variables, never
+    their values.
+    """
+    problem = get_settings().r2_config_error
+    if problem:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Object storage is not configured on this server.",
+            detail=f"Object storage is not configured on this server: {problem}",
         )
 
 

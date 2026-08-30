@@ -25,7 +25,7 @@ pytestmark = requires_db
 
 # Presigning is pure local signing — boto3 needs credentials, never a network
 # call — so a fake account exercises the real code path.
-os.environ.setdefault("R2_ACCOUNT_ID", "testaccount")
+os.environ.setdefault("R2_ACCOUNT_ID", "0123456789abcdef0123456789abcdef")
 os.environ.setdefault("R2_ACCESS_KEY_ID", "testkey")
 os.environ.setdefault("R2_SECRET_ACCESS_KEY", "testsecret")
 os.environ.setdefault("R2_BUCKET", "testbucket")
@@ -150,6 +150,28 @@ def test_create_project_returns_a_direct_upload_url(client, db):
     # Keyed on the project id, which never changes: a rename must not orphan
     # the object already uploaded under the old name.
     assert body["upload_key"] == f"sources/{body['project_id']}/source.mp4"
+
+
+def test_a_misconfigured_account_id_is_503_not_500(client, db, monkeypatch):
+    """Production put the Cloudflare API token into R2_ACCOUNT_ID. boto3 built
+    the endpoint from it and raised `Invalid endpoint` from four frames deep:
+    the caller got a bare 500, and the token was printed into the deploy log.
+    A configuration mistake has to be refused at the door, and named."""
+    from app.config import get_settings
+
+    _user(db, "alice")
+    headers = _auth(client, "alice")
+    monkeypatch.setenv("R2_ACCOUNT_ID", "cfat_" + "x" * 43)
+    get_settings.cache_clear()
+
+    response = client.post(
+        "/projects", json={"name": "x", "filename": "a.mp4", "size_bytes": 10}, headers=headers
+    )
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert "R2_ACCOUNT_ID" in detail
+    assert "cfat_" not in detail
 
 
 def test_create_project_rejects_an_unsupported_format(client, db):
