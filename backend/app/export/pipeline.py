@@ -19,10 +19,9 @@ from app.export.presets import (
     AUDIO_SAMPLE_RATE,
     build_audio_encoder_args,
     build_video_encoder_args,
-    choose_encoder,
     resolve_dimensions,
 )
-from app.jobs.manager import JobCancelled, JobHandle
+from app.jobs.queue import JobCancelled, JobHandle
 from app.models import Segment, SubtitleStyle, Suggestions
 from app.subtitle.ass import build_ass_document
 from app.subtitle.shift import retime_segments_for_output
@@ -31,7 +30,7 @@ from app.timeline.models import Clip, Transition
 from app.transition.filtergraph import TransitionPlan, build_xfade_filtergraph, plan_transition
 from app.transition.registry import resolve as resolve_transition
 from app.utils.logging import get_logger
-from app.utils.paths import ascii_safe_filename, atomic_write_text, new_job_workdir
+from app.utils.paths import ascii_safe_filename, atomic_write_text, job_workdir
 from app.video.ffmpeg import FfmpegBinaries, FfmpegCancelled, FfmpegRun
 from app.video.probe import probe_video
 
@@ -59,7 +58,6 @@ async def _cut_and_normalize_clip(
     preset: str,
     orientation: str,
     portrait_fill: str,
-    encoder: str,
     out_path: Path,
     progress_lo: float,
     progress_hi: float,
@@ -77,7 +75,7 @@ async def _cut_and_normalize_clip(
             "-i", f"anullsrc=channel_layout={AUDIO_CHANNEL_LAYOUT}:sample_rate={AUDIO_SAMPLE_RATE}",
             "-vf", vf, "-map", "0:v", "-map", "1:a", "-shortest",
         ]
-    args += build_video_encoder_args(encoder, crf, preset)
+    args += build_video_encoder_args(crf, preset)
     args += build_audio_encoder_args()
     args += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(out_path)]
 
@@ -125,7 +123,6 @@ async def _join_xfade(
     plan: TransitionPlan,
     crf: int,
     preset: str,
-    encoder: str,
     out_path: Path,
 ) -> None:
     filter_complex, v_out, a_out = build_xfade_filtergraph(len(normalized_paths), xfade_name, plan)
@@ -134,7 +131,7 @@ async def _join_xfade(
     for p in normalized_paths:
         args += ["-i", str(p)]
     args += ["-filter_complex", filter_complex, "-map", f"[{v_out}]", "-map", f"[{a_out}]"]
-    args += build_video_encoder_args(encoder, crf, preset)
+    args += build_video_encoder_args(crf, preset)
     args += build_audio_encoder_args()
     args += ["-movflags", "+faststart", str(out_path)]
 
@@ -156,7 +153,6 @@ async def _burn_subtitles(
     workdir: Path,
     crf: int,
     preset: str,
-    encoder: str,
     expected_duration: float,
 ) -> None:
     """Burns workdir/subs.ass into input_path. `subs.ass` is referenced by bare
@@ -165,7 +161,7 @@ async def _burn_subtitles(
     the colon, since ffmpeg's filter-option parser also uses ':' as a separator.
     """
     args = ["-i", str(input_path), "-vf", "subtitles=subs.ass"]
-    args += build_video_encoder_args(encoder, crf, preset)
+    args += build_video_encoder_args(crf, preset)
     args += build_audio_encoder_args()
     args += ["-movflags", "+faststart", str(out_path)]
 
@@ -198,8 +194,6 @@ async def render_timeline(
     preset: str,
     orientation: str,
     portrait_fill: str,
-    use_hwaccel: bool,
-    working_hwaccel_encoder: str | None,
     supported_xfade: list[str],
     workdir: Path,
     output_path: Path,
@@ -213,7 +207,6 @@ async def render_timeline(
 
     validate_portrait_fill(portrait_fill)
     width, height = resolve_dimensions(orientation)
-    encoder = choose_encoder(use_hwaccel, working_hwaccel_encoder)
     want_subtitles = bool(transcript_segments) and (write_srt or burn_subtitles)
 
     ordered_clips = sorted(clips, key=lambda c: c.order)
@@ -239,7 +232,7 @@ async def render_timeline(
             out_path = workdir / f"clip_{i:03d}.mp4"
             await _cut_and_normalize_clip(
                 binaries, handle, clip, meta["has_audio"], width, height, target_fps,
-                crf, preset, orientation, portrait_fill, encoder, out_path, lo, hi,
+                crf, preset, orientation, portrait_fill, out_path, lo, hi,
             )
             normalized_paths.append(out_path)
             clip_durations.append(clip.end - clip.start)
@@ -265,7 +258,7 @@ async def render_timeline(
                     message=f"Transition duration reduced to {plan.duration:.2f}s to fit the shortest clip",
                 )
             await _join_xfade(
-                binaries, handle, normalized_paths, xfade_name, plan, crf, preset, encoder, join_target
+                binaries, handle, normalized_paths, xfade_name, plan, crf, preset, join_target
             )
 
         handle.raise_if_cancelled()
@@ -283,7 +276,7 @@ async def render_timeline(
             ass_content = build_ass_document(retimed_segments, subtitle_style or SubtitleStyle())
             (workdir / "subs.ass").write_text(ass_content, encoding="utf-8")
             await _burn_subtitles(
-                binaries, handle, joined_path, part_path, workdir, crf, preset, encoder, final_duration
+                binaries, handle, joined_path, part_path, workdir, crf, preset, final_duration
             )
         elif need_burn_pass:
             # Subtitles were requested but there was nothing to burn (e.g. no
@@ -340,8 +333,6 @@ async def render_all_ideas(
     preset: str,
     orientation: str,
     portrait_fill: str,
-    use_hwaccel: bool,
-    working_hwaccel_encoder: str | None,
     supported_xfade: list[str],
     container: str,
     output_dir: Path,
@@ -384,16 +375,17 @@ async def render_all_ideas(
             continue
 
         logger.info("Exporting idea %d/%d: %s %d/%d (%r)", i + 1, n, kind, idx, kind_totals[kind], title)
-        await handle.set_progress(i / n, stage="rendering", message=f"Rendering {kind} {idx}/{kind_totals[kind]}")
+        await handle.set_progress(
+            i / n, stage="rendering", message=f"Rendering {kind} {idx}/{kind_totals[kind]}"
+        )
 
         filename = f"{kind}_{idx}_{ascii_safe_filename(f'{title}.{ext}')}"
         output_path = output_dir / filename
-        idea_workdir = new_job_workdir(f"{job_id}_{i}")
+        idea_workdir = job_workdir(f"{job_id}_{i}")
 
         await render_timeline(
             handle, binaries, clips, transition,
             crf=crf, preset=preset, orientation=orientation, portrait_fill=portrait_fill,
-            use_hwaccel=use_hwaccel, working_hwaccel_encoder=working_hwaccel_encoder,
             supported_xfade=supported_xfade, workdir=idea_workdir, output_path=output_path,
             write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
             transcript_segments=transcript_segments,

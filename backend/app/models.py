@@ -12,18 +12,29 @@ from pydantic import BaseModel, Field
 
 from app.timeline.models import Clip, Transition
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class VideoMeta(BaseModel):
-    path: str
+    """Where the source lives and what it is.
+
+    `source_key` / `thumbnail_key` are R2 object keys, not filesystem paths.
+    The desktop build stored absolute local paths here; on a container those
+    are meaningless the moment the instance is replaced, and the same project
+    is served by several instances at once.
+
+    A render still works on a local file — the worker downloads the object to
+    scratch space first and passes that path as `Clip.source_path`.
+    """
+
+    source_key: str
     duration_sec: float
     width: int
     height: int
     fps: float
     has_audio: bool
     codec: str
-    thumbnail_path: str
+    thumbnail_key: str = ""
 
 
 class Word(BaseModel):
@@ -105,13 +116,20 @@ class SubtitleStyle(BaseModel):
 
 
 class ExportSettings(BaseModel):
-    container: str = "mp4"  # "mp4" | "mov"
-    orientation: str = "landscape"  # "landscape" | "portrait"
+    """Render options.
+
+    `container` and `use_hwaccel` are gone. Reels and Shorts only accept MP4,
+    so a MOV option was a second contract nobody wanted; and with no GPU on
+    the server, a hardware-encoder toggle offered a choice that had no effect.
+    Old documents carrying those keys still load — pydantic ignores unknown
+    fields — so no migration step is needed for their removal.
+    """
+
+    orientation: str = "portrait"  # "portrait" | "landscape"
     portrait_fill: str = "blur"  # "blur" | "crop" | "pad"
-    use_hwaccel: bool = True
     crf: int = 20
     preset: str = "medium"
-    burn_subtitles: bool = False
+    burn_subtitles: bool = True
     write_srt: bool = True
 
 
@@ -169,6 +187,22 @@ def _migrate_v2_to_v3(data: dict) -> dict:
     return data
 
 
+def _migrate_v3_to_v4(data: dict) -> dict:
+    """v3 VideoMeta held absolute local paths (`path`, `thumbnail_path`); v4
+    holds R2 object keys (`source_key`, `thumbnail_key`).
+
+    A path from a desktop install names a file that does not exist on any
+    server, so it cannot be translated into a key — the whole `video` block
+    is cleared and the user re-uploads. Everything else in the project
+    (transcript, suggestions, clips) is kept: re-running transcription is
+    expensive and the text is still correct.
+    """
+    video = data.get("video")
+    if isinstance(video, dict) and "source_key" not in video:
+        data["video"] = None
+    return data
+
+
 def migrate_project_dict(data: dict) -> dict:
     """Upgrade an on-disk project.json to the current schema_version in place.
 
@@ -184,5 +218,8 @@ def migrate_project_dict(data: dict) -> dict:
     if version == 2:
         data = _migrate_v2_to_v3(data)
         version = 3
+    if version == 3:
+        data = _migrate_v3_to_v4(data)
+        version = 4
     data["schema_version"] = SCHEMA_VERSION
     return data

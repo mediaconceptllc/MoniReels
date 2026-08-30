@@ -1,63 +1,88 @@
-# autoReel
+# MoniReels
 
-autoReel нь урт хэмжээний видеог автоматаар богино хэмжээний видео болгон хувиргадаг. Видео оруулахад аудиог нь текст болгон хөрвүүлж, хиймэл оюун ухаан хамгийн сонирхолтой хэсгүүдийг сонгон, эхлэл (hook) болон хадмал текстийг бэлдэж өгнө. Үүний дараа Instagram Reels, YouTube Shorts болон товчилсон YouTube хувилбарыг бүгдийг нь нэг Windows програм дотроос экспортлох боломжтой.
+Урт видеог автоматаар богино хэмжээний видео болгон хувиргах вэб студи.
+Видео оруулахад яриаг нь текст болгож, LLM хамгийн сонирхолтой хэсгүүдийг
+сонгон Reels/Shorts болон YouTube хураангуй санал болгож, FFmpeg-ээр угсарч
+экспортолно.
 
-## Татаж авах
+Бүх интерфэйс монгол хэл дээр.
 
-**[Windows-д зориулсан autoReel татах (autoReel-Setup-1.0.0.exe)](https://github.com/tuvshinorg/autoReel/releases/latest)**
+```
+Хөтөч (Vercel)  ──presigned PUT──►  Cloudflare R2  ◄──  Worker (Railway)
+      │                                   ▲                   ▲
+      └──────► API (Railway) ─────────────┘                   │
+                    │                                          │
+                    └──────────► Postgres (ажлын дараалал) ────┘
+```
 
-- Windows 10/11, 64-bit
-- Суулгахад админ эрх шаардлагагүй
-- Нэмэлт програм суулгах шаардлагагүй — програм, backend болон FFmpeg бүгд суулгагчид багтсан
+- **`backend/`** — FastAPI API + worker (нэг Docker image, хоёр entrypoint) → Railway
+- **`frontend/`** — Next.js App Router → Vercel
+- **`docs/`** — DEPLOY.md · ARCHITECTURE.md
 
-Татаж авсан `.exe` файлаа ажиллуулаад суулгах алхмуудыг дагана уу. Суулгасны дараа **Start Menu** (эсвэл суулгах үед сонгосон бол Desktop Shortcut)-оос autoReel-ийг ажиллуулна.
+## Хэлхээ
 
-> Windows SmartScreen анх удаа ажиллуулах үед **"Unrecognized app"** гэсэн анхааруулга гарч болно. Учир нь энэ хувилбар одоогоор code signing хийгдээгүй байгаа. **More info → Run anyway** дээр дарж үргэлжлүүлнэ үү.
+```
+Видео хуулах        хөтчөөс шууд R2 руу, сервер дундуур дамжихгүй
+   ↓ import_video   ffprobe → метадата, хальс
+   ↓ transcribe     duudlaga.dev → монгол хадмал (завсраар хэсэглэн)
+   ↓ suggest        OpenRouter → 3 богино видео + 3 YouTube төлөвлөгөө
+   ↓ export_all     ffmpeg → угсралт, хадмал, R2 руу
+```
 
-## Юу хийдэг вэ
+## Гадаад үйлчилгээ
 
-1. **Видео импортлох** — Видео файлаа сонгоно.
-2. **Текст болгон хөрвүүлэх** — Яриаг автоматаар текст болгоно (Монгол хэл, [Chimege](https://chimege.mn)-ийг ашиглана).
-3. **AI санал болгох** — Хиймэл оюун ухаан текстийг уншаад богино хэмжээний 3 видео санаа (hook, context, proof, payoff) болон 20 минутаас урт видеонд зориулсан YouTube highlight хувилбаруудыг санал болгоно. **OpenAI (ChatGPT)** эсвэл **Claude**-ийг ашиглах боломжтой бөгөөд Settings хэсгээс хүссэн үедээ сольж, эсвэл **Regenerate with ChatGPT / Regenerate with Claude** товчоор дахин үүсгэж болно.
-4. **Шалгаж засварлах** — Текстийн алдааг засах эсвэл өөрийн хүссэн мөрүүдийг сонгон custom видео үүсгэх боломжтой.
-5. **Экспортлох** — Сонгосон санал бүрийг тусдаа видео болгон transition, хадмал текст болон боломжтой бол hardware encoder ашиглан өндөр хурдтайгаар экспортлоно.
+| Ажил | Үйлчилгээ | Тохиргоо |
+|---|---|---|
+| Текстийн бүх ажил | [OpenRouter](https://openrouter.ai) | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
+| Монгол яриа таних | [duudlaga.dev](https://duudlaga.dev) | `DUUDLAGA_API_KEY`, `DUUDLAGA_BASE_URL` |
+| Медиа хадгалалт | [Cloudflare R2](https://developers.cloudflare.com/r2/) | `R2_*` |
 
-## Анхны тохиргоо
+> **STT ба LLM хоёулаа хүсэлт тутам ТӨЛБӨРТЭЙ.** duudlaga.dev-ийн консол
+> дээр түлхүүр тутам өдрийн зарлагын хязгаар ба зэрэгцээ хүсэлтийн тоог
+> ЗААВАЛ тавь: `WORKER_CONCURRENCY` нь АЖЛЫГ хязгаарладаг, хүсэлтийг биш —
+> нэг transcribe ажил аудионы хэсэг тутамд нэг хүсэлт явуулна.
+> `GET /admin/providers` үлдэгдлийг харуулна, тиймээс «кредит дууссан»
+> гэдгийг ажил worker эзэлж, видеогоо татсаны ДАРАА биш, өмнө нь мэднэ.
 
-Програмыг суулгасны дараа **Settings** хэсгийг нээгээд дараах мэдээллүүдийг оруулна уу.
-
-- **Chimege API Token** — [console.chimege.com](https://console.chimege.com)-оос авна (текст болгон хөрвүүлэхэд шаардлагатай).
-- **OpenAI API Key** ([platform.openai.com](https://platform.openai.com)) болон/эсвэл **Anthropic (Claude) API Key** ([console.anthropic.com](https://console.anthropic.com)) — Эхлэхэд аль нэг нь байхад хангалттай. Харин хоёуланг нь ашиглавал хоёр AI-ийн үр дүнг харьцуулж болно.
-
-Эдгээр түлхүүрүүд нь програмын хажууд байрлах локал `.env` файлд хадгалагдах бөгөөд зөвхөн Chimege, OpenAI болон Anthropic-ийн албан ёсны API руу шууд илгээгдэнэ. Өөр газар дамжуулахгүй.
-
-## Эх кодоос ажиллуулах
-
-Windows суулгагч нь autoReel-ийг ашиглах хамгийн хялбар арга юм. Харин эх кодоос ажиллуулахыг хүсвэл:
-
-**Backend** (Python 3.11, FastAPI)
+## Хөгжүүлэлт
 
 ```bash
+# Backend — ЖИНХЭНЭ Postgres шаардана (JSONB ба FOR UPDATE SKIP LOCKED)
 cd backend
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python -m app.main
-```
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+createdb monireels && createdb monireels_test
+export DATABASE_URL=postgresql://localhost/monireels JWT_SECRET=dev-secret
+.venv/bin/alembic upgrade head
+.venv/bin/python -m app.main            # API  → :8000/docs
+.venv/bin/python -m app.worker          # Worker (тусдаа терминал!)
 
-**Frontend** (Flutter, Windows Desktop)
+DATABASE_URL=postgresql://localhost/monireels_test .venv/bin/python -m pytest tests -q
+.venv/bin/ruff check app tests
 
-```bash
+# Frontend
 cd frontend
-flutter pub get
-flutter run -d windows
+npm install
+npm run dev                             # :3000
+npm run typecheck && npm run lint && npm run build
 ```
 
-Хоёуланг нь ажиллуулсны дараа desktop програм нь локал backend-тэй автоматаар холбогдоно (`frontend/lib/application/backend_launcher.dart`).
+## Хэзээ ч зөрчиж болохгүй дүрмүүд
 
-GitHub дээрхтэй ижил Windows суулгагчийг бүтээх бол `installer/setup.iss` файлыг ашиглана (Inno Setup 6, backend-д PyInstaller болон `flutter build windows --release` шаардлагатай).
-
-## Ашигласан технологи
-
-- Яриаг текст болгох: [Chimege](https://chimege.mn)
-- AI санал боловсруулах: [OpenAI](https://openai.com) эсвэл [Anthropic Claude](https://www.anthropic.com)
-- Видео боловсруулах: [FFmpeg](https://ffmpeg.org) (суулгагчид багтсан. FFmpeg нь LGPL/GPL лицензтэй үнэгүй нээлттэй эхийн програм бөгөөд лицензийн мэдээллийг [ffmpeg.org/legal.html](https://ffmpeg.org/legal.html)-ээс үзнэ үү.)
+1. **Медиа backend-ээр дамжихгүй.** Хуулалт нь presigned PUT, унших нь
+   presigned GET. Хэдэн ГБ файлыг dyno дундуур нэвтрүүлэх нь timeout ба
+   давхар трафикийн зардал.
+2. **R2-ийн ТҮЛХҮҮР бол ХАЯГ, татагдах НЭР бол ХАРАГДАЦ.** Түлхүүр нь
+   `project_id` дээр тогтдог ба хэзээ ч өөрчлөгддөггүй — төслийн нэр
+   солиход байгаа объект эзэнгүй үлдэх ёсгүй. Татагдах нэрийг signed URL
+   бүрд `response-content-disposition`-оор өгнө.
+3. **Хүнд ажил үргэлж job, үргэлж worker дээр.** HTTP хүсэлт дотор ffmpeg,
+   torch, LLM ажиллуулахгүй. API-тай нэг контейнерт ffmpeg ажиллуулах нь
+   healthcheck-ийг унагааж, ажлыг дундуур нь тасалдаг.
+4. **`running` төлөв нь амьдын нотолгоо БИШ.** Зөвхөн хөдөлж байгаа
+   heartbeat нотолно — үхсэн worker-ийн цогцос эс бөгөөс эгнээгээ мөнхөд
+   хаана.
+5. **Эрхийн шалгалт ЗӨВХӨН backend дээр.** Frontend зөвхөн UI нуудаг.
+6. **Секрет кодод ч, ДБ-д ч бичихгүй** — зөвхөн орчны хувьсагч. Тэднийг
+   бичдэг HTTP зам БАЙХГҮЙ (ширээний хувилбарт байсан, тэр нь нээлттэй
+   сервер дээр бүрэн эрх алдагдал).
+7. **Багтац, хугацааг клиент дээр тооцохгүй.** Сервер НЭГ газраас өгнө.

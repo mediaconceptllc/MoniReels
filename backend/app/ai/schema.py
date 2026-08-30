@@ -37,7 +37,7 @@ YOUTUBE_TARGET_TOLERANCE = 0.10
 REQUIRED_YOUTUBE_COUNT = 3  # only enforced when the video is >= YOUTUBE_MIN_VIDEO_DURATION_SEC
 MERGE_GAP_SEC = 0.5
 
-# Chimege never returns word-level timestamps, so a segment's start/end is
+# The STT provider returns no word-level timestamps, so a segment's start/end is
 # frequently an estimate (proportional-by-character/word split of a larger
 # chunk, not a real detected boundary - see app.audio.vad_chunking). A cut
 # resolved exactly on that estimate has a real chance of starting a beat

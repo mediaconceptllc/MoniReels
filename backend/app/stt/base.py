@@ -1,4 +1,11 @@
-"""Abstract STT provider contract. Chimege is the only implementation — see HARD RULES."""
+"""The STT provider contract.
+
+app.stt.duudlaga_client is the only implementation. The abstraction still
+earns its place: app.stt.pipeline is written against it, so the provider
+that answers is a construction detail rather than something every stage of
+the pipeline has to know about — which is what made replacing Chimege a
+transport change instead of a rewrite.
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

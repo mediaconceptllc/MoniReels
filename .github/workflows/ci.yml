@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# A new push supersedes the run in flight. Without this, pushing three fixes
+# in a minute queues three full runs and the first two answer questions
+# nobody is asking any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+
+    # A REAL Postgres, not SQLite. The project document is JSONB and the
+    # queue claims rows with FOR UPDATE SKIP LOCKED — neither exists in
+    # SQLite, so a SQLite run would pass while the two things most worth
+    # testing went unexercised.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: monireels
+          POSTGRES_PASSWORD: monireels
+          POSTGRES_DB: monireels_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://monireels:monireels@localhost:5432/monireels_test
+      JWT_SECRET: ci-secret-not-a-real-key
+      LOG_LEVEL: WARNING
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      # The suite is hermetic and passes without ffmpeg, but the runtime
+      # image has it — so CI has it too. A test that only passes because a
+      # binary is missing is a test that will surprise someone in production.
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      # The check that earns its place: `create_all` is never run in
+      # production, so a column added to dbmodels.py without a migration
+      # simply would not exist on the deployed database — and nothing else
+      # would say so until a query failed at runtime.
+      - name: Models match migrations
+        run: |
+          if ! alembic check; then
+            echo "::error::A model changed without a migration. Run: alembic revision --autogenerate -m '...'"
+            exit 1
+          fi
+
+      - name: Migrations reverse cleanly
+        run: alembic downgrade base && alembic upgrade head
+
+      - name: Tests
+        run: pytest tests -q
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run lint
+
+      # A placeholder is fine: NEXT_PUBLIC_API_URL is baked in at build time
+      # and nothing here calls it. What is being checked is that the build
+      # compiles, not that it can reach a server.
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.invalid
+
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # A runner's DEFAULT buildx builder uses the `docker` driver, which
+      # cannot export a cache — `cache-to: type=gha` fails the build outright
+      # with "Cache export is not supported for the docker driver". This
+      # switches to the `docker-container` driver, which supports both the
+      # GHA cache and `load: true`.
+      - uses: docker/setup-buildx-action@v3
+
+      # Both Railway services run this one image, so a Dockerfile that no
+      # longer builds breaks the API and the worker together — and would
+      # otherwise only be discovered at deploy time. `load: true` hands the
+      # built image to the local daemon so the next step can run it, instead
+      # of building it a second time.
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: false
+          load: true
+          tags: monireels-ci:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The image can actually run
+        run: |
+          docker run --rm monireels-ci:latest sh -euc '
+            ffmpeg -version > /dev/null
+            ffprobe -version > /dev/null
+
+            # Burned-in subtitles are rendered by libass against a font in
+            # this image. With no Cyrillic face every Mongolian subtitle
+            # comes out as empty boxes — inside the exported video, where
+            # nobody notices until a customer does.
+            fc-list :lang=mn | grep -q . || {
+              echo "::error::No font with Cyrillic coverage in the image"
+              exit 1
+            }
+
+            # Both entrypoints must import with NO environment set. A module
+            # that reads a required variable at import time turns a missing
+            # config value into a crash loop rather than a clear error.
+            python -c "import app.main, app.worker"
+          '

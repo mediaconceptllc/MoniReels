@@ -1,8 +1,14 @@
-"""Export presets: target dimensions per orientation, and per-encoder CLI flags.
+"""Export presets: target dimensions per orientation and encoder flags.
 
-NVENC/QSV/AMF take different quality/preset flags than libx264 — "listed != working"
-is handled at capability-probe time (app.video.capabilities); this module only
-handles the flag-name differences once an encoder is known to work.
+The desktop build chose between libx264 and whichever of NVENC / QSV / AMF
+tested working on the user's machine. On Railway there is no GPU, so all
+three hardware branches were dead code that only ever offered the operator a
+choice with no effect. libx264 is the encoder.
+
+This is a real, measurable cost, not a tidy-up: software H.264 is several
+times slower than a hardware encoder, so export wall-clock time and the CPU
+bill both rise compared with a desktop run. `crf` and `preset` are therefore
+the two levers that matter, and both stay operator-controlled per project.
 """
 from __future__ import annotations
 
@@ -13,20 +19,7 @@ AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNEL_LAYOUT = "stereo"
 AUDIO_BITRATE = "192k"
 
-# libx264-style preset names -> nearest NVENC preset. NVENC's own preset names
-# (p1..p7, or "slow"/"medium"/"fast" on newer builds) don't line up 1:1 with
-# libx264, so this is a deliberate, documented approximation.
-_NVENC_PRESET_MAP = {
-    "ultrafast": "p1",
-    "superfast": "p2",
-    "veryfast": "p3",
-    "faster": "p4",
-    "fast": "p4",
-    "medium": "p4",
-    "slow": "p6",
-    "slower": "p7",
-    "veryslow": "p7",
-}
+VIDEO_ENCODER = "libx264"
 
 
 def resolve_dimensions(orientation: str) -> tuple[int, int]:
@@ -37,36 +30,18 @@ def resolve_dimensions(orientation: str) -> tuple[int, int]:
     raise ValueError(f"Unknown orientation: {orientation!r}")
 
 
-def build_video_encoder_args(encoder: str, crf: int, preset: str) -> list[str]:
-    """Returns the -c:v ... quality/preset flags for the given encoder.
+def build_video_encoder_args(crf: int, preset: str) -> list[str]:
+    """Video encoder flags.
 
-    `encoder` must be either "libx264" or a working_hwaccel_encoder value
-    already confirmed by app.video.capabilities.probe_hwaccel_encoder — this
-    function does not itself validate that the encoder is available.
+    yuv420p is forced even though each clip is already normalized to it going
+    in: the xfade and subtitle-burn passes re-encode and can silently upconvert
+    chroma (yuv444p has been observed). That produces a High 4:4:4 Predictive
+    stream only permissive players (VLC, anything ffmpeg-based) can decode —
+    every phone and browser fails on it outright, which to a user is
+    indistinguishable from a broken export.
     """
-    # yuv420p is forced on every branch, not just libx264: each clip is
-    # already normalized to yuv420p going in (see normalize.build_video_filter),
-    # but the xfade/subtitle-burn filtergraphs re-encode and can upconvert
-    # chroma (observed: yuv444p) without an explicit target format. A
-    # hwaccel encoder will happily encode that into a "High 4:4:4 Predictive"
-    # stream that only permissive decoders (VLC/ffmpeg-based) can play -
-    # every standard player (Windows Media Player, phones, browsers) fails
-    # on it outright, which is indistinguishable from "broken export".
-    if encoder == "h264_nvenc":
-        nvenc_preset = _NVENC_PRESET_MAP.get(preset, "p4")
-        return ["-c:v", "h264_nvenc", "-cq", str(crf), "-preset", nvenc_preset, "-pix_fmt", "yuv420p"]
-    if encoder == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-global_quality", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
-    if encoder == "h264_amf":
-        return ["-c:v", "h264_amf", "-qp_i", str(crf), "-qp_p", str(crf), "-quality", preset, "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
+    return ["-c:v", VIDEO_ENCODER, "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
 
 
 def build_audio_encoder_args() -> list[str]:
     return ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
-
-
-def choose_encoder(use_hwaccel: bool, working_hwaccel_encoder: str | None) -> str:
-    if use_hwaccel and working_hwaccel_encoder:
-        return working_hwaccel_encoder
-    return "libx264"

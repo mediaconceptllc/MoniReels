@@ -17,7 +17,7 @@ from app.audio.vad_chunking import (
     group_vad_segments_into_chunks,
     synthesize_segments_for_chunk,
 )
-from app.stt.chimege_client import MIN_CHUNK_SEC, TARGET_CHUNK_MIN_SEC
+from app.stt.chunking import MIN_CHUNK_SEC, TARGET_CHUNK_MIN_SEC
 
 torch = pytest.importorskip("torch")
 torchaudio = pytest.importorskip("torchaudio")
@@ -74,7 +74,7 @@ def test_group_merges_too_short_first_chunk_forward():
     assert chunks[0] == segments
 
 
-def test_group_every_chunk_meets_chimege_min_or_stands_alone():
+def test_group_every_chunk_meets_provider_min_or_stands_alone():
     segments = [(0.0, 1.0), (2.0, 3.0), (20.0, 21.0), (40.0, 60.0)]
     chunks = group_vad_segments_into_chunks(
         segments, max_chunk_sec=25.0, min_chunk_sec=TARGET_CHUNK_MIN_SEC

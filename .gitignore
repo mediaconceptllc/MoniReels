@@ -45,3 +45,15 @@ Thumbs.db
 
 # Claude Code harness state
 .claude/
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+frontend/.vercel
+# Written by `tsc --noEmit`; contents depend on the machine that ran it, so
+# committing it makes every `npm run typecheck` show up as a diff.
+frontend/tsconfig.tsbuildinfo
+
+# Local scratch
+backend/_probe.db

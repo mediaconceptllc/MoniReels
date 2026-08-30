@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Optional accuracy stack. Install ON A WORKER SERVICE ONLY, never on the API.
+#
+#   pip install -r requirements.txt -r requirements-ml.txt
+#
+# What it buys:
+#   silero-vad  -> real speech-segment timings instead of proportional
+#                  estimates, which is what cut precision ultimately rests on.
+#   demucs      -> vocal isolation before STT; a large accuracy win on
+#                  music-heavy source audio.
+#
+# What it costs: torch does NOT read the container's cgroup CPU limit. It
+# sizes its thread pool from the HOST core count and exceeds the quota this
+# container was granted; the kernel then throttles every thread in the
+# container. If that container also serves HTTP, the platform health check
+# times out and the service is restarted — mid-job. app.config.heavy_threads
+# reads the real quota and app.worker exports it before torch is imported,
+# but the safe arrangement is still a worker service of its own.
+# ---------------------------------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchaudio==2.5.1+cpu
+silero-vad==6.2.1
+demucs==4.0.1
+soundfile==0.13.1

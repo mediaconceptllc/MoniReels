@@ -1,16 +1,85 @@
-"""Global test isolation.
+"""Shared test setup.
 
-Must run before any test module imports app code: several modules (e.g.
-app.stt.chimege_client) call app.utils.logging.get_logger() at import time,
-which latches setup_logging()'s file handler onto whatever DATA_DIR is
-active at that first call and never re-evaluates it afterwards. If DATA_DIR
-still points at the real %APPDATA%/AIVideoEditor dir at that moment, every
-test's httpx traffic (even against MockTransport) gets appended to the same
-backend.log a real running instance writes to, indistinguishable from
-genuine production log lines. Setting it here, at conftest module scope,
-runs before pytest imports any test module.
+Runs before any test module imports app code, because several modules call
+get_logger() at import time and a few read settings at import time too.
+
+A REAL Postgres is required, not SQLite: the project document is JSONB, and
+the queue's claim path is `SELECT ... FOR UPDATE SKIP LOCKED`. Neither exists
+in SQLite, so a SQLite suite would pass while the two things most worth
+testing went unexercised.
+
+    createdb monireels_test
+    DATABASE_URL=postgresql://.../monireels_test pytest
 """
+from __future__ import annotations
+
 import os
 import tempfile
 
-os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="ai_video_editor_test_")
+os.environ.setdefault("WORK_DIR", tempfile.mkdtemp(prefix="monireels_test_"))
+os.environ.setdefault("JWT_SECRET", "test-secret-not-a-real-key")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+# Off unless a test opts in: the R2 client would otherwise try to sign real
+# requests against a nonexistent account.
+os.environ.pop("R2_ACCESS_KEY_ID", None)
+os.environ.pop("R2_SECRET_ACCESS_KEY", None)
+os.environ.pop("R2_BUCKET", None)
+
+import pytest  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+from app.db import get_engine, get_session_factory  # noqa: E402
+from app.dbmodels import Base  # noqa: E402
+
+DB_CONFIGURED = bool(os.environ.get("DATABASE_URL"))
+requires_db = pytest.mark.skipif(not DB_CONFIGURED, reason="DATABASE_URL is not set")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _schema():
+    if not DB_CONFIGURED:
+        yield
+        return
+    engine = get_engine()
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    yield
+    Base.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def db():
+    session = get_session_factory()()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture(autouse=True)
+def _clean_tables(request):
+    """Every DB test starts from empty tables.
+
+    Order matters: `jobs` and `outputs` reference `projects`, which
+    references `users`. TRUNCATE ... CASCADE would work but also silently
+    empties tables a test did not expect to lose.
+    """
+    if not DB_CONFIGURED or "db" not in request.fixturenames:
+        yield
+        return
+    yield
+    engine = get_engine()
+    with engine.begin() as conn:
+        for table in ("jobs", "outputs", "projects", "users", "audit_log", "settings"):
+            conn.execute(text(f"DELETE FROM {table}"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_ratelimit():
+    from app import ratelimit
+
+    ratelimit.reset()
+    yield
+    ratelimit.reset()

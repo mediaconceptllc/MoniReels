@@ -1,16 +1,49 @@
-# ai_video_editor_frontend
+# MoniReels — вэб клиент
 
-A new Flutter project.
+Next.js App Router, Vercel дээр байрлана. Backend нь Railway дээр
+(`../backend`), медиа нь Cloudflare R2 дээр.
 
-## Getting Started
+## Ажиллуулах
 
-This project is a starting point for a Flutter application.
+```bash
+npm install
+cp .env.example .env.local     # NEXT_PUBLIC_API_URL-ыг өөрийн backend рүү заа
+npm run dev                    # :3000
+```
 
-A few resources to get you started if this is your first Flutter project:
+```bash
+npm run typecheck && npm run lint && npm run build
+```
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Тогтсон шийдвэрүүд
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+**Медиа энэ аппаар дамжихгүй.** Видео нь хөтчөөс шууд R2 руу presigned PUT-аар
+хуулагдана (`lib/upload.ts`), буцаад presigned GET-ээр уншигдана. Хэдэн ГБ
+файлыг сервер дундуур нэвтрүүлэх нь timeout ба давхар трафикийн зардал.
+
+**`XMLHttpRequest` зөвхөн хуулалтад.** `fetch`-д upload progress event
+байхгүй, ба явц харагдахгүй 4 ГБ хуулалт нь гацсанаас ялгагдахгүй.
+
+**POST хэзээ ч автоматаар дахин илгээгддэггүй** (`lib/api.ts`). Хариу
+алдагдсан нь хүсэлт хүрээгүй гэсэн үг БИШ — ажил эхлүүлдэг POST-ыг давтвал
+ижил гарц руу ХОЁР render зэрэг ажиллана.
+
+**Ажлын урсгалд timeout тавьдаггүй** (`lib/jobs.ts`). LLM-ийн ганц дуудлага
+хэдэн минут завсаргүй явдаг тул ердийн receive timeout нь бүрэн ажиллаж
+байгаа холболтыг тасалж, «сервер удлаа» гэж худал мэдээлнэ. `EventSource`
+хэрэглэхгүй: тэр нь Authorization толгой явуулж чаддаггүй, ба токеныг query
+string-д тавих нь бүх proxy-гийн лог руу бичнэ.
+
+**Багтац, хугацааг клиент дээр тооцохгүй.** Огтлолын урт, хадмалын цаг бүгд
+серверээс ирнэ. TypeScript-т хуулбарлавал хоёр тал чимээгүй зөрнө.
+
+**Фонт `next/font`-оор, `cyrillic` subset ЗААВАЛ.** Түүнгүйгээр хөтөч
+латин-only файл татаж, монгол үсэг бүхэлдээ өөр фонтоор буудаг — интерфэйс
+бүхэлдээ кирилл тул энэ нь жижиг доголдол биш.
+
+**`postcss` нь `overrides`-оор түгжигдсэн.** Next 15 нь өндөр зэрэглэлийн
+сэрэмжлүүлэгтэй postcss татдаг (XSS ба `sourceMappingURL`-ээр дамжсан
+дурын `.map` файл унших). Энд боловсруулагдах бүх CSS нь өөрсдийнх тул
+бодит эрсдэл бага, гэхдээ засвар нь ердөө patch bump — атал npm-ийн санал
+болгодог арга нь Next-ийн MAJOR шинэчлэл. Next өөрөө засмагц энэ
+`overrides`-ыг хасна. `npm audit` нь CI-д гардаггүй ч 0 байх ёстой.

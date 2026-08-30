@@ -1,12 +1,22 @@
-"""Rotating file logger (%APPDATA%/AIVideoEditor/logs/) + console."""
+"""Logging to stdout only.
+
+The desktop build also wrote a rotating file under %APPDATA%. On a container
+that is the wrong place twice over: the filesystem is ephemeral, so the file
+is lost on every restart, and the platform already collects stdout — a log
+that only exists inside a dead container is a log nobody can read.
+
+Dropping the file handler also removes a genuine import cycle: the file path
+came from app.utils.paths, which needs a logger of its own.
+
+Reading the level from the environment directly rather than through
+app.config keeps this module importable by everything, including config
+itself, with no cycle to reason about.
+"""
 from __future__ import annotations
 
 import logging
-import logging.handlers
+import os
 import sys
-
-from app.config import get_settings
-from app.utils.paths import logs_dir
 
 _CONFIGURED = False
 
@@ -15,42 +25,30 @@ def setup_logging() -> None:
     global _CONFIGURED
     if _CONFIGURED:
         return
-    settings = get_settings()
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
+    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
 
-    fmt = logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # Spawned headless by the Flutter shell, sys.stdout's encoding defaults to
-    # the legacy Windows codepage (cp1252) rather than UTF-8. Any log message
-    # containing non-Latin1 text (Mongolian/Cyrillic suggestion titles, e.g.
-    # render_all_ideas logging a title) then raises UnicodeEncodeError out of
-    # the handler; logging's fallback error path tries to print that
-    # traceback to stderr, which nothing ever drains on the Dart side - the
-    # write blocks on the full pipe and freezes the entire single-threaded
-    # event loop. Reconfiguring to UTF-8 with a replacing error handler means
-    # a log write can never raise on its own text again.
+    # Titles and transcripts are Mongolian Cyrillic. If the stream's encoding
+    # cannot represent them, the logging call itself raises out of the
+    # handler — a log line must never be able to fail the operation it is
+    # describing.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
-    root.addHandler(console)
-
-    file_handler = logging.handlers.RotatingFileHandler(
-        logs_dir() / "backend.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+        )
     )
-    file_handler.setFormatter(fmt)
-    root.addHandler(file_handler)
+    root.handlers = [handler]
+
+    # These two are extremely chatty at INFO and drown out everything else.
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     _CONFIGURED = True
 

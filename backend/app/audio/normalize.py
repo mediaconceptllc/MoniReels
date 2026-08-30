@@ -1,7 +1,7 @@
-"""Loudness normalization for the isolated vocal stem, run before VAD so
-quiet speech doesn't get missed as silence (a segment VAD never detects
-never reaches Chimege at all - too-quiet audio is a silent failure, not
-just a quality issue).
+"""Loudness normalization, run before VAD so quiet speech is not missed as
+silence. A segment VAD never detects is never transcribed at all — too-quiet
+audio is a SILENT failure, not merely a quality one, because the words simply
+go missing from the transcript with nothing to indicate they were there.
 
 Uses ffmpeg-normalize (https://github.com/slhck/ffmpeg-normalize), which
 wraps ffmpeg's own two-pass EBU R128 `loudnorm` filter - not a separate

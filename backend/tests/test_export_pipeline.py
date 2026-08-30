@@ -12,14 +12,40 @@ from pathlib import Path
 import pytest
 
 from app.export.pipeline import render_all_ideas
-from app.jobs.manager import JobHandle, JobManager
-from app.jobs.models import Job
 from app.models import Cut, KeepRange, ShortIdea, Suggestions, YoutubePlan
 from app.timeline.models import Transition
 
 
-def _handle() -> JobHandle:
-    return JobHandle(JobManager(), Job(id="job-test"))
+class _Handle:
+    """Stand-in for app.jobs.queue.JobHandle.
+
+    The real handle flushes progress to Postgres, which this suite has no
+    reason to involve: what is under test is which renders are requested and
+    with what arguments, not how a percentage is persisted. It implements the
+    exact surface render_all_ideas uses, so a change to that surface breaks
+    here rather than silently in production.
+    """
+
+    def __init__(self, job_id: str = "job-test") -> None:
+        self.job_id = job_id
+        self.cancel_requested = False
+        self.progress: list[float] = []
+
+    async def set_progress(self, progress: float, stage=None, message=None) -> None:
+        self.progress.append(progress)
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancel_requested:
+            from app.jobs.queue import JobCancelled
+
+            raise JobCancelled()
+
+    def set_cancel_hook(self, hook) -> None:
+        self._cancel_hook = hook
+
+
+def _handle() -> _Handle:
+    return _Handle()
 
 
 def _cut(start: float, end: float, role: str = "context") -> Cut:
@@ -58,7 +84,7 @@ async def _run(monkeypatch, tmp_path, suggestions, handle=None):
     results = await render_all_ideas(
         handle or _handle(), binaries=object(), video_path="C:/video.mp4", suggestions=suggestions,
         transition=Transition(), crf=20, preset="medium", orientation="landscape",
-        portrait_fill="blur", use_hwaccel=False, working_hwaccel_encoder=None,
+        portrait_fill="blur",
         supported_xfade=[], container="mp4", output_dir=tmp_path, job_id="job-test",
     )
     return results, calls
