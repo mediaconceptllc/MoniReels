@@ -1,10 +1,14 @@
+from itertools import pairwise
+
 from app.ai.prompts import (
+    MAX_SEGMENT_SEC,
     build_candidates_prompt,
     build_pick_indices_prompt,
     build_segment_lines,
     build_suggestions_prompt,
     chunk_segment_lines,
     repair_short_dict,
+    split_long_segments,
     validate_shorts,
 )
 from app.models import Segment, Transcript
@@ -148,18 +152,68 @@ def test_shrink_short_to_fit_drops_shortest_interior_cut_to_land_in_range():
     assert not validate_shorts([fixed], _SEGMENTS)  # now passes real validation
 
 
-def test_shrink_short_to_fit_gives_up_at_three_cut_floor_if_still_over():
-    # hook(0)=10s, context(1-2)=20s, proof(3)=10s, payoff(4-6)=30s -> 70s raw;
-    # even dropping one interior cut down to the 3-cut floor can't reach <=60.
+def test_narrows_a_cut_when_the_three_cut_floor_blocks_dropping():
+    # hook(0)=10s, context(1-2)=20s, proof(3)=10s, payoff(4-6)=30s -> 70s raw.
+    # Dropping reaches the 3-cut floor still over 60s, which is where
+    # _shrink_short_to_fit stops by construction; narrowing takes it the rest
+    # of the way instead of spending the retry on a prompt already failed once.
     short = {
         "hook_quote": "Нэг",
         "cuts": [_cut(0, 0, "hook"), _cut(1, 2, "context"), _cut(3, 3, "proof"), _cut(4, 6, "payoff")],
     }
     fixed = repair_short_dict(short, _SEGMENTS)
-    # Can't be brought into range by dropping cuts - returned unchanged so the
-    # caller's own validate_shorts() correctly still rejects it.
-    assert fixed["cuts"] == short["cuts"]
-    assert validate_shorts([fixed], _SEGMENTS)  # still flagged as a problem
+
+    assert not validate_shorts([fixed], _SEGMENTS)  # now passes real validation
+    assert fixed["cuts"][0]["role"] == "hook"
+    assert fixed["cuts"][-1]["role"] == "payoff"
+
+
+def test_narrowing_takes_the_last_segment_of_an_ordinary_cut():
+    # Three cuts, none droppable: hook(0)=10s, context(1-3)=30s, payoff(4)=10s
+    # -> 50s raw + 3*0.4 = 51.2s. Push it over by widening context to 1-4.
+    short = {
+        "hook_quote": "Нэг",
+        "cuts": [_cut(0, 0, "hook"), _cut(1, 5, "context"), _cut(6, 6, "payoff")],
+    }
+    fixed = repair_short_dict(short, _SEGMENTS)
+
+    assert not validate_shorts([fixed], _SEGMENTS)
+    # The opening the hook leads into survives; the tail is what goes.
+    assert fixed["cuts"][1]["start_index"] == 1
+    assert fixed["cuts"][1]["end_index"] < 5
+
+
+def test_narrowing_keeps_the_landing_of_the_payoff_cut():
+    # The payoff is the strongest moment and it lands at the END of its cut,
+    # so that cut loses its first segment, not its last.
+    short = {
+        "hook_quote": "Нэг",
+        "cuts": [_cut(0, 0, "hook"), _cut(1, 1, "context"), _cut(2, 6, "payoff")],
+    }
+    fixed = repair_short_dict(short, _SEGMENTS)
+
+    assert not validate_shorts([fixed], _SEGMENTS)
+    assert fixed["cuts"][-1]["end_index"] == 6  # the landing is still there
+    assert fixed["cuts"][-1]["start_index"] > 2
+
+
+def test_narrowing_never_trims_a_short_below_the_minimum():
+    # hook(0)=10s, context(1)=10s, payoff(2-6)=50s -> 70s raw + 2.4 = 72.4s.
+    # Every available trim drops a whole 10s segment; the first two land at
+    # 62.4s and 52.4s, and stopping is correct once <=60 is reached rather
+    # than continuing down past the 35s floor.
+    short = {
+        "hook_quote": "Нэг",
+        "cuts": [_cut(0, 0, "hook"), _cut(1, 1, "context"), _cut(2, 6, "payoff")],
+    }
+    fixed = repair_short_dict(short, _SEGMENTS)
+
+    total = sum(
+        (_SEGMENTS[c["end_index"]][1] - _SEGMENTS[c["start_index"]][0]) + 0.4
+        for c in fixed["cuts"]
+    )
+    assert 35 <= total <= 60
+    assert not validate_shorts([fixed], _SEGMENTS)
 
 
 def test_shrink_short_to_fit_never_touches_a_short_already_in_range():
@@ -169,3 +223,83 @@ def test_shrink_short_to_fit_never_touches_a_short_already_in_range():
     }
     fixed = repair_short_dict(short, _SEGMENTS)
     assert fixed["cuts"] == short["cuts"]
+
+
+# --------------------------------------------------------------------------
+# split_long_segments — the cut unit the model actually gets. duudlaga.dev
+# returns Mongolian ASR text with no terminal punctuation, so the sentence
+# split finds nothing and a whole 30s chunk used to arrive as ONE segment,
+# putting the 35-60s short out of arithmetic reach (3 cuts minimum).
+# --------------------------------------------------------------------------
+
+
+def _one_segment(span: float, text: str) -> Transcript:
+    seg = Segment(id="0", start=0.0, end=span, text=text)
+    return Transcript(language="mn", segments=[seg], full_text=text)
+
+
+def test_split_long_segments_splits_unpunctuated_text_by_words():
+    # A 30s chunk of Mongolian ASR output: no '.', '!' or '?' anywhere.
+    text = " ".join(["үг"] * 60)
+    out = split_long_segments(_one_segment(30.0, text), max_sec=10.0)
+
+    assert len(out) > 1, "an unpunctuated block must still be cuttable"
+    assert all(e - s <= 10.0 + 1e-6 for s, e, _ in out)
+
+
+def test_split_long_segments_keeps_the_span_contiguous_and_whole():
+    text = " ".join(f"үг{i}" for i in range(40))
+    out = split_long_segments(_one_segment(30.0, text), max_sec=7.0)
+
+    assert out[0][0] == 0.0
+    assert out[-1][1] == 30.0  # ends exactly on the original end, no drift
+    for (_, prev_end, _), (next_start, _, _) in pairwise(out):
+        assert prev_end == next_start  # no gaps, no overlaps
+    assert " ".join(t for _, _, t in out) == text  # not one word lost
+
+
+def test_split_long_segments_splits_a_sentence_that_is_itself_too_long():
+    # Two sentences, but each one alone is over max_sec - the sentence path
+    # used to emit those whole.
+    half = " ".join(["үг"] * 30)
+    text = f"{half}. {half}."
+    out = split_long_segments(_one_segment(40.0, text), max_sec=10.0)
+
+    assert all(e - s <= 10.0 + 1e-6 for s, e, _ in out)
+
+
+def test_split_long_segments_leaves_short_segments_alone():
+    transcript = _transcript(3)  # 1.5s each, well under the cap
+    assert len(split_long_segments(transcript)) == 3
+
+
+def test_split_long_segments_never_drops_a_single_unsplittable_word():
+    out = split_long_segments(_one_segment(40.0, "урт-үг"), max_sec=10.0)
+    assert out == [(0.0, 40.0, "урт-үг")]
+
+
+def test_default_cap_keeps_every_cut_unit_under_the_prompt_limit():
+    # The production case end to end: 30s unpunctuated chunks, default cap.
+    text = " ".join(["үг"] * 60)
+    out = split_long_segments(_one_segment(30.0, text))
+    assert all(e - s <= MAX_SEGMENT_SEC + 1e-6 for s, e, _ in out)
+    # Three cuts is the minimum for a short, so this is the floor the 35-60s
+    # rule has to fit under.
+    floor = sum(sorted(e - s for s, e, _ in out)[:3])
+    assert floor <= 60.0
+
+
+def test_split_long_segments_makes_even_pieces_not_a_runt_tail():
+    # Filling each piece to the cap and letting the remainder fall out would
+    # give 15.0s + 0.4s here; a one-word fragment is not a usable cut unit.
+    out = split_long_segments(_one_segment(15.4, " ".join(["үг"] * 77)), max_sec=15.0)
+    spans = [e - s for s, e, _ in out]
+    assert len(spans) == 2
+    assert max(spans) - min(spans) < 1.0
+
+
+def test_split_long_segments_holds_the_cap_when_the_span_divides_exactly():
+    # share == max_sec exactly, so there is no headroom for a word straddling
+    # a boundary - the piece count has to grow instead of the cap giving way.
+    out = split_long_segments(_one_segment(30.0, " ".join(f"үг{i}" for i in range(23))), max_sec=10.0)
+    assert all(e - s <= 10.0 + 1e-6 for s, e, _ in out)

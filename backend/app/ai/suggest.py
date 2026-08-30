@@ -163,6 +163,23 @@ async def generate_suggestions(
     lines = build_segment_lines(transcript)
     chunks = chunk_segment_lines(lines)
 
+    # The cut unit's size is what decides whether the 35-60s rule is reachable
+    # at all: a short needs at least 3 cuts, so 3x the shortest segment is the
+    # floor no prompt or retry can get under. Coarse segments are invisible in
+    # the failure - it surfaces as the model "ignoring" a duration rule - so
+    # the number that explains it is logged before the first call is paid for.
+    if segments:
+        spans = sorted(e - s for s, e, _ in segments)
+        logger.info(
+            "%d segment(s) for cutting: shortest %.1fs, median %.1fs, longest %.1fs "
+            "(a short needs 3+ cuts, so its floor here is ~%.0fs)",
+            len(spans),
+            spans[0],
+            spans[len(spans) // 2],
+            spans[-1],
+            sum(spans[:3]),
+        )
+
     if len(chunks) <= 1:
         user = build_suggestions_prompt(lines, duration_sec, want_youtube)
         raw = await _request_validated(client, SYSTEM_PROMPT, user, segments)
