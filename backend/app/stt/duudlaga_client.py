@@ -126,6 +126,22 @@ class DuudlagaError(Exception):
         return self.status in (408, 425) or (self.status is not None and self.status >= 500)
 
     @property
+    def ends_the_run(self) -> bool:
+        """Whether every remaining chunk is doomed too, not just this one.
+
+        An exhausted balance or a tripped spend cap is a property of the
+        ACCOUNT, so the chunks still queued behind this one cannot succeed
+        either — sending them is 60-odd pointless requests and a log that
+        buries the one line an operator has to read.
+
+        Keyed on the status as well as the code: production answered with
+        402 and the credits message, and the code-only check would have let
+        the whole batch fly. Same lesson as the 422 and the 520 above — the
+        field the API is documented to send is not the field it always sends.
+        """
+        return self.code in FATAL_CODES or self.status == 402
+
+    @property
     def blames_the_payload(self) -> bool:
         """Whether a smaller chunk is worth trying.
 
@@ -237,15 +253,29 @@ class DuudlagaClient(SttProvider):
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             limit = asyncio.Semaphore(max(1, self._config.concurrency))
+            fatal: DuudlagaError | None = None
 
             async def one(i: int, start: float, end: float) -> list[tuple[float, Transcript]]:
+                nonlocal fatal
                 async with limit:
+                    # Checked inside the semaphore, so a verdict that lands
+                    # while this chunk waits its turn still stops it. Chunks
+                    # already past this point are in flight and are left to
+                    # finish; cancelling them is what the comment below is
+                    # about.
+                    if fatal is not None:
+                        raise fatal
                     logger.info(
                         "Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end
                     )
-                    return await self._transcribe_span(
-                        ffmpeg, wav_path, workdir, start, end, f"{i:03d}"
-                    )
+                    try:
+                        return await self._transcribe_span(
+                            ffmpeg, wav_path, workdir, start, end, f"{i:03d}"
+                        )
+                    except DuudlagaError as e:
+                        if e.ends_the_run and fatal is None:
+                            fatal = e
+                        raise
 
             # gather, and never as_completed: merge_transcripts joins the text
             # in list order and does not sort, so the order of these results IS
@@ -261,6 +291,20 @@ class DuudlagaClient(SttProvider):
                 *(one(i, s, e) for i, (s, e) in enumerate(boundaries)),
                 return_exceptions=True,
             )
+
+            if fatal is not None:
+                # Raise the verdict itself, not whichever chunk happens to be
+                # first in order - the ones that merely stopped early carry
+                # the same exception object but say nothing about why. The
+                # count goes in the message because "the run died" and "the
+                # run died after 41 of 62 chunks you have already paid for"
+                # call for different next steps.
+                done = sum(1 for o in settled if not isinstance(o, BaseException))
+                raise DuudlagaError(
+                    f"{fatal} ({done}/{len(boundaries)} чанхаа амжсан)",
+                    status=fatal.status,
+                    code=fatal.code,
+                ) from fatal
 
             results: list[tuple[float, Transcript]] = []
             silent = 0
