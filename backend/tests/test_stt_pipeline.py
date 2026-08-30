@@ -181,3 +181,53 @@ async def test_source_audio_is_never_modified(tmp_path, monkeypatch):
         _FakeSttClient(), audio, tmp_path / "work", _settings(), Path("ffmpeg")
     )
     assert audio.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# The 16 kHz mono contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_provider_gets_16k_mono_even_though_torch_is_absent(tmp_path, monkeypatch):
+    """The conversion used to sit behind torch_available(), because the
+    resampler it called was a torchaudio one in the separation module. torch
+    is deliberately not in this image, so the branch never ran and the API was
+    handed the source's own 48 kHz stereo: 192 kB/s, which made a 59s chunk
+    11 MB — and the API answered chunks that size with 500s and 520s."""
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: False)
+    monkeypatch.setattr(pipeline_mod, "torch_available", lambda: False)
+    converted: list[tuple[Path, Path]] = []
+
+    async def _convert(ffmpeg_path, src, out):
+        converted.append((src, out))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"RIFF16k")
+
+    monkeypatch.setattr(pipeline_mod, "extract_audio_16k_mono_wav", _convert)
+
+    client = _FakeSttClient()
+    await _run(client, tmp_path)
+
+    assert len(converted) == 1, "the audio was sent without being converted"
+    # What reaches the provider is the converted file, not the original.
+    assert client.fallback_calls == [converted[0][1]]
+    assert client.fallback_calls[0].name == "stt_16k_mono.wav"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_conversion_still_sends_the_audio(tmp_path, monkeypatch):
+    """Degrading to the wrong sample rate is worse than nothing only if the
+    request fails outright — a transcription that might work still beats a
+    job that certainly does not."""
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: False)
+
+    async def _boom(ffmpeg_path, src, out):
+        raise RuntimeError("ffmpeg said no")
+
+    monkeypatch.setattr(pipeline_mod, "extract_audio_16k_mono_wav", _boom)
+
+    client = _FakeSttClient()
+    await _run(client, tmp_path)
+
+    assert client.fallback_calls[0].name == "audio.wav"

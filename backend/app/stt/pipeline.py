@@ -39,6 +39,7 @@ from app.config import Settings
 from app.models import Transcript
 from app.stt.chunking import merge_transcripts
 from app.utils.logging import get_logger
+from app.video.audio import extract_audio_16k_mono_wav
 
 logger = get_logger(__name__)
 
@@ -63,28 +64,39 @@ def separation_available(settings: Settings) -> bool:
 
 
 async def _provider_chunking(
-    client, audio_path: Path, workdir: Path, on_progress: ProgressCallback | None
+    client,
+    audio_path: Path,
+    workdir: Path,
+    on_progress: ProgressCallback | None,
+    ffmpeg_path: Path,
 ) -> Transcript:
     """Fallback: hand the whole file to the provider's own pause-based
     chunking.
 
-    `audio_path` here is the native-quality extraction, not the 16 kHz mono
-    the provider requires, so it is resampled first — and if even that fails,
-    the original is sent as-is rather than losing the transcription.
+    `audio_path` is the native-quality extraction — whatever sample rate and
+    channel layout the source had — so it is brought to the 16 kHz mono the
+    provider's contract names before anything is sent.
+
+    That conversion used to sit behind `torch_available()`, because the
+    resampler it called was a torchaudio one living in the separation module.
+    torch is deliberately not installed here, so the branch never ran and the
+    provider was handed 48 kHz stereo: at 192 kB/s a 59s chunk is 11 MB, and
+    the API answered chunks that size with 500s and bodiless 520s. Resampling
+    is an ffmpeg one-liner and ffmpeg is a hard requirement of this image, so
+    there is nothing for the conversion to be conditional on.
 
     `on_progress` is nudged immediately: a caller watching a percentage would
     otherwise see it frozen wherever the pipeline gave up, making a fallback
     that is running look stuck.
     """
     target = audio_path
-    if torch_available():
-        try:
-            from app.audio.separation import resample_to_16k_mono
-
-            workdir.mkdir(parents=True, exist_ok=True)
-            target = await resample_to_16k_mono(audio_path, workdir / "fallback_16k_mono.wav")
-        except Exception:  # noqa: BLE001 - best effort; the original still transcribes
-            logger.exception("Resample to 16kHz mono failed; sending the original audio as-is")
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+        converted = workdir / "stt_16k_mono.wav"
+        await extract_audio_16k_mono_wav(ffmpeg_path, audio_path, converted)
+        target = converted
+    except Exception:  # noqa: BLE001 - best effort; the original still transcribes
+        logger.exception("Conversion to 16kHz mono failed; sending the original audio as-is")
     if on_progress:
         await on_progress(0.5)
     return await client.transcribe(target)
@@ -133,7 +145,7 @@ async def transcribe_audio(
 
     if not vad_available():
         logger.info("Silero VAD unavailable; using the provider's pause-based chunking")
-        return await _provider_chunking(client, audio_path, workdir, on_progress)
+        return await _provider_chunking(client, audio_path, workdir, on_progress, ffmpeg_path)
 
     # Only replaces the file when the audio really was too quiet; loud-enough
     # speech passes through untouched.
@@ -149,7 +161,7 @@ async def transcribe_audio(
         )
     except VadError:
         logger.exception("VAD failed; falling back to the provider's pause-based chunking")
-        return await _provider_chunking(client, audio_path, workdir, on_progress)
+        return await _provider_chunking(client, audio_path, workdir, on_progress, ffmpeg_path)
 
     if on_progress:
         await on_progress(0.4)

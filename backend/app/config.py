@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     # succeeded. The client now halves a refused chunk, so this is a
     # round-trip optimisation rather than the thing keeping jobs alive.
     duudlaga_max_audio_sec: int = 30
+    # Opus bitrate each chunk is re-encoded to before upload; empty sends the
+    # 16 kHz mono PCM as-is. The provider bills by duration, so this buys no
+    # money back — it buys the bytes, and size is what the API kept refusing.
+    duudlaga_upload_bitrate: str = "32k"
 
     # ---- TTS: ElevenLabs ---------------------------------------------
     # Stored, not yet used. Nothing in the pipeline synthesises speech; the

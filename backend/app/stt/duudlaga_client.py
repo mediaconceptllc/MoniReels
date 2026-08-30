@@ -37,8 +37,10 @@ from app.models import Transcript
 from app.stt.base import SttProvider
 from app.stt.chunking import (
     TARGET_CHUNK_MIN_SEC,
+    ChunkingError,
     compute_pause_boundaries,
     detect_silences,
+    encode_for_upload,
     extract_chunk,
     merge_transcripts,
     text_to_transcript,
@@ -137,6 +139,17 @@ class DuudlagaError(Exception):
         """
         return self.status == 413 or (self.status is not None and self.status >= 500)
 
+    @property
+    def rejects_the_format(self) -> bool:
+        """Whether the API is refusing the container, not the audio.
+
+        The documented request shows a `.wav` and the accepted formats are
+        written down nowhere, so a compressed upload is a guess. This is how
+        the guess is taken back — without it, one 400 would fail a job that
+        the original bytes would have transcribed.
+        """
+        return self.status in (400, 415) or self.code == "invalid_request"
+
 
 @dataclass
 class DuudlagaConfig:
@@ -145,6 +158,9 @@ class DuudlagaConfig:
     max_audio_sec: float
     model: str = ""
     language: str = "mn"
+    # Empty sends the WAV as-is. Anything else is an Opus bitrate to
+    # re-encode each chunk to before uploading.
+    upload_bitrate: str = "32k"
 
 
 class DuudlagaClient(SttProvider):
@@ -152,6 +168,10 @@ class DuudlagaClient(SttProvider):
         self._config = config
         self._client = http_client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SEC)
         self._owns_client = http_client is None
+        # Latched, not re-probed: once the API has rejected a compressed
+        # upload there is no reason to spend an encode and a round trip on
+        # every remaining chunk to be told the same thing 54 more times.
+        self._send_compressed = bool(config.upload_bitrate)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -214,7 +234,7 @@ class DuudlagaClient(SttProvider):
                 logger.info("%d/%d chunk(s) contained no speech", silent, len(boundaries))
             return merge_transcripts(results)
         finally:
-            for f in workdir.glob("*.wav"):
+            for f in workdir.glob("*"):
                 f.unlink(missing_ok=True)
             workdir.rmdir()
 
@@ -290,8 +310,43 @@ class DuudlagaClient(SttProvider):
         return {"Authorization": f"Bearer {self._config.api_key}"}
 
     async def _post_chunk(self, wav_path: Path) -> str:
+        """Send one chunk, compressed if the API will take it.
+
+        16 kHz mono PCM is 32 kB per second on the wire, and the API refused
+        every chunk that got large while accepting every small one. Opus at
+        32 kbps is roughly a ninth of that for speech, which puts even a
+        60-second chunk well inside the range that has always worked.
+
+        The compression is a guess — the documented request shows a `.wav`
+        and the accepted formats are written down nowhere — so a rejection
+        falls back to the original bytes and stops guessing for the rest of
+        the job, rather than failing a chunk that WAV would have transcribed.
+        """
+        if self._send_compressed:
+            compressed = wav_path.with_suffix(".opus")
+            try:
+                await encode_for_upload(
+                    _require_ffmpeg(), wav_path, compressed, self._config.upload_bitrate
+                )
+                return await self._post_file(compressed, "audio/ogg")
+            except DuudlagaError as e:
+                if not e.rejects_the_format:
+                    raise
+                logger.warning(
+                    "duudlaga.dev rejected a compressed upload (%s); sending WAV from here on", e
+                )
+                self._send_compressed = False
+            except ChunkingError:
+                logger.exception("Opus encode failed; sending WAV from here on")
+                self._send_compressed = False
+            finally:
+                compressed.unlink(missing_ok=True)
+
+        return await self._post_file(wav_path, "audio/wav")
+
+    async def _post_file(self, path: Path, content_type: str) -> str:
         url = f"{self._config.base_url.rstrip('/')}{TRANSCRIBE_PATH}"
-        files = {"file": (wav_path.name, wav_path.read_bytes(), "audio/wav")}
+        files = {"file": (path.name, path.read_bytes(), content_type)}
         # The documented request carries only the file. `model` is sent only
         # when explicitly configured — an unexpected field risks a 400
         # invalid_request for no gain.
@@ -305,7 +360,7 @@ class DuudlagaClient(SttProvider):
             # transient. One empty two-second window must not end an
             # hour-long transcription.
             if error.code == "no_speech":
-                logger.info("No speech in %s; skipping the chunk", wav_path.name)
+                logger.info("No speech in %s; skipping the chunk", path.name)
                 return ""
             raise error
 
@@ -390,6 +445,7 @@ def build_client(settings) -> DuudlagaClient:
             api_key=settings.duudlaga_api_key,
             max_audio_sec=settings.duudlaga_max_audio_sec,
             model=settings.duudlaga_model,
+            upload_bitrate=settings.duudlaga_upload_bitrate,
         )
     )
 

@@ -35,6 +35,11 @@ class VideoMeta(BaseModel):
     has_audio: bool
     codec: str
     thumbnail_key: str = ""
+    # The speech track, extracted once at import in the 16 kHz mono the STT
+    # contract names. Empty on projects imported before this existed, and on
+    # sources with no audio at all — transcribe falls back to pulling the
+    # video down and extracting it again.
+    audio_key: str = ""
 
 
 class Word(BaseModel):
