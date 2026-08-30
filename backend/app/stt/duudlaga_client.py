@@ -113,20 +113,29 @@ class DuudlagaError(Exception):
         # An unrecognised code is retried only when the status itself says
         # "transient". A new code the API adds later must not be assumed
         # billable-and-safe to repeat.
-        return self.status in (408, 425, 500, 502, 503, 504)
+        #
+        # Any 5xx counts, not a list of them. The API sits behind Cloudflare,
+        # which answers for an origin that fails or times out with 520-527 and
+        # an empty body — production hit a bodiless 520 on a 50s chunk, one
+        # request after a 500 on the same chunk. Enumerating the numbers is
+        # what let that through: the condition was identical and only the
+        # digits were new.
+        return self.status in (408, 425) or (self.status is not None and self.status >= 500)
 
     @property
     def blames_the_payload(self) -> bool:
         """Whether a smaller chunk is worth trying.
 
-        413 says so outright. A 500 does not, but the API documents no size
-        limit at all and in production returned one, three times over, for
-        the same 59s chunk while every chunk under 22s in the same job
-        succeeded — so an oversized payload is the reading that fits. Rate,
-        concurrency and spend limits are deliberately excluded: splitting
-        makes *more* requests, which is the opposite of what they ask for.
+        413 says so outright. A 5xx does not, but the API documents no size
+        limit at all and in production answered a 59.4s chunk with 500 three
+        times over and a 50.5s chunk with a bodiless Cloudflare 520, while
+        every chunk under 22s in the same jobs succeeded — so an oversized
+        payload is the reading that fits, whichever number the edge picks.
+        Rate, concurrency and spend limits are deliberately excluded:
+        splitting makes *more* requests, which is the opposite of what they
+        ask for.
         """
-        return self.status == 413 or self.code == "internal_error" or self.status == 500
+        return self.status == 413 or (self.status is not None and self.status >= 500)
 
 
 @dataclass

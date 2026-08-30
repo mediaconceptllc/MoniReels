@@ -500,3 +500,50 @@ async def test_a_spent_balance_is_not_split_either(tmp_path, monkeypatch, _fast_
 
     # Fatal: not retried, not split.
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cloudflare_origin_error_is_treated_like_the_500_it_stands_for(
+    tmp_path, monkeypatch, _fast_backoff
+):
+    """duudlaga.dev sits behind Cloudflare, which answers for a failing origin
+    with a bodiless 520-527. Production sent a 50.5s chunk, got 500, then 520
+    — and 520 was in neither the retry list nor the split list, so the job
+    died one request after a condition the 500 path already handled."""
+    audio = _split_fixture(tmp_path, monkeypatch, seconds=40.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        # The whole chunk and its retries are refused by the edge; the halves
+        # reach the origin.
+        if calls <= 3:
+            return httpx.Response(520)
+        return httpx.Response(200, json={"text": "тал."})
+
+    result = await _client(handler, max_audio_sec=60).transcribe(audio)
+
+    assert result.full_text == "тал. тал."
+    # Retried like a 500 rather than raised on the first response.
+    assert calls == 5
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 520, 521, 524])
+def test_every_server_side_status_is_retried_and_splittable(status):
+    """The lesson of the 520: the condition was identical to the 500 and only
+    the digits were new, so the rule is the class, not a list of numbers."""
+    from app.stt.duudlaga_client import DuudlagaError
+
+    error = DuudlagaError("boom", status=status)
+    assert error.retryable is True
+    assert error.blames_the_payload is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 404, 422])
+def test_a_client_side_status_is_neither_retried_nor_split(status):
+    from app.stt.duudlaga_client import DuudlagaError
+
+    error = DuudlagaError("boom", status=status)
+    assert error.retryable is False
+    assert error.blames_the_payload is False
