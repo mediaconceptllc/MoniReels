@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from app.models import Segment, SubtitleStyle
+from app.subtitle.cues import to_cues
 from app.utils.timecode import seconds_to_ass
 
 _HEX_COLOR_RE = re.compile(r"^#?([0-9A-Fa-f]{6})$")
@@ -33,6 +34,13 @@ def _escape_ass_text(text: str) -> str:
 
 
 def build_ass_document(segments: list[Segment], style: SubtitleStyle) -> str:
+    """Transcript segments in, burned-in subtitle script out.
+
+    Splits to cue-sized blocks here for the same reason segments_to_srt does:
+    these two are every subtitle this system emits, and burned text is the
+    half that cannot be turned off — an untouched 30s segment covers a third
+    of a vertical frame for half a minute of the finished video.
+    """
     width, height = ASS_PLAY_RES
     alignment = _ALIGNMENT_BY_POSITION.get(style.position, 2)
     primary = hex_to_ass_color(style.primary_color)
@@ -58,6 +66,6 @@ def build_ass_document(segments: list[Segment], style: SubtitleStyle) -> str:
     lines = [
         f"Dialogue: 0,{seconds_to_ass(seg.start)},{seconds_to_ass(seg.end)},Default,,0,0,0,,"
         f"{_escape_ass_text(seg.text)}"
-        for seg in sorted(segments, key=lambda s: s.start)
+        for seg in sorted(to_cues(segments), key=lambda s: s.start)
     ]
     return header + "\n".join(lines) + ("\n" if lines else "")

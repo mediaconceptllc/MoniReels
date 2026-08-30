@@ -8,10 +8,10 @@ guarantees every cut lands on a real segment boundary.
 from __future__ import annotations
 
 import re
-from math import ceil
 
 from app.ai.schema import CUT_PAD_SEC, MAX_SHORT_DURATION, MIN_SHORT_DURATION
 from app.models import Transcript
+from app.utils.text import split_span
 from app.utils.timecode import seconds_to_mmss
 
 # Raised from 12k. Current-generation models handle a full 60-90 min transcript in
@@ -186,16 +186,12 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 def _split_on_words(
     start: float, end: float, text: str, max_sec: float
 ) -> list[tuple[float, float, str]]:
-    """Splits a span with no usable sentence boundaries into pieces of at most
-    max_sec, packing whole words and giving each word a share of the span
-    proportional to its length.
-
-    This is the case the sentence split cannot serve at all: duudlaga.dev
-    returns Mongolian ASR text with no terminal punctuation, so `_SENTENCE_END`
-    finds nothing to cut on and the chunk reached the model whole. Measured on
-    the production transcript that failed - 68 chunks over 17:44 - that left
-    32 of 68 segments above this cap and a median segment of 14.3s: half the
-    video offered only take-it-or-leave-it blocks.
+    """The case the sentence split cannot serve at all: duudlaga.dev returns
+    Mongolian ASR text with no terminal punctuation, so `_SENTENCE_END` finds
+    nothing to cut on and the chunk reached the model whole. Measured on the
+    production transcript that failed - 68 chunks over 17:44 - that left 32 of
+    68 segments above this cap and a median segment of 14.3s: half the video
+    offered only take-it-or-leave-it blocks.
 
     A 35-60s short needs 3+ cuts, so building one out of blocks that size
     overshoots as soon as the model picks anything but the shortest scraps -
@@ -206,54 +202,11 @@ def _split_on_words(
     shortest three segments summed to 14.5s), but unreachable for any sensible
     choice of content, which amounts to the same failure.
 
-    Word timing inside the piece is an estimate, exactly as the sentence split
-    above already is - good enough to choose cuts, and the editor still lets
-    the user nudge the handles afterwards.
+    Only a duration limit here. Characters are a subtitle's problem, not a
+    cut's: the model reads a segment's text, it does not have to fit it on a
+    frame.
     """
-    words = text.split()
-    span = end - start
-    if span <= max_sec or len(words) < 2:
-        return [(start, end, text)]
-
-    # Lay the words into the fewest EVEN pieces that all fit under the cap,
-    # rather than filling each piece to the cap and letting the remainder fall
-    # out as a tail: greedy filling turns a 15.4s segment into 15.0s + 0.4s,
-    # and a one-word fragment is not a cut unit anyone can use. Pieces are cut
-    # on cumulative character position, so a word lands wholly in one piece and
-    # the boundaries stay proportional to the text.
-    total_chars = sum(len(w) for w in words) or 1
-
-    def lay_out(n: int) -> list[tuple[float, float, str]]:
-        groups: list[list[str]] = [[] for _ in range(n)]
-        cum = 0
-        for word in words:
-            # The word's midpoint decides its piece, so a word straddling a
-            # boundary goes to the side holding more of it.
-            groups[min(n - 1, int((cum + len(word) / 2) * n / total_chars))].append(word)
-            cum += len(word)
-
-        out: list[tuple[float, float, str]] = []
-        cursor, chars = start, 0
-        for k, group in enumerate(groups):
-            if not group:
-                continue
-            chars += sum(len(w) for w in group)
-            # The tail ends exactly on the original end, so float drift
-            # accumulated across the shares can never leave a gap or an
-            # overhang at the boundary.
-            stop = end if k == n - 1 else start + span * (chars / total_chars)
-            out.append((cursor, stop, " ".join(group)))
-            cursor = stop
-        return out
-
-    # A word is atomic, so an even split can still overshoot the cap by part of
-    # one word; one more piece is the fix. Bounded by one piece per word, and a
-    # single word longer than the cap is emitted anyway - never lose transcript
-    # to the arithmetic.
-    pieces = lay_out(ceil(span / max_sec))
-    while len(pieces) < len(words) and any(e - s > max_sec for s, e, _ in pieces):
-        pieces = lay_out(len(pieces) + 1)
-    return pieces
+    return split_span(start, end, text, max_sec=max_sec)
 
 
 def split_long_segments(transcript: Transcript, max_sec: float = MAX_SEGMENT_SEC):
