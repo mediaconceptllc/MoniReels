@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app import r2
+from app import providers, r2
 from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output
@@ -114,7 +114,7 @@ def upload_complete(
     if not row.video_key or not r2.exists(row.video_key):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The upload has not arrived in storage yet.",
+            detail="Хуулсан файл хадгалах санд хараахан ирээгүй байна.",
         )
 
     job_id = queue.enqueue(
@@ -216,7 +216,7 @@ def update_transcript(
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     if project.transcript is None:
-        raise HTTPException(status_code=400, detail="This project has no transcript yet")
+        raise HTTPException(status_code=400, detail="Энэ төсөлд транскрипт хараахан алга.")
 
     edits = {e.id: e.text for e in body.segments}
     changed = 0
@@ -249,7 +249,7 @@ def select_ranges(
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     if project.video is None:
-        raise HTTPException(status_code=400, detail="This project has no video")
+        raise HTTPException(status_code=400, detail="Энэ төсөлд видео алга.")
 
     duration = project.video.duration_sec
     for start, end in body.ranges:
@@ -301,6 +301,21 @@ def delete_project(
 # ---------------------------------------------------------------------------
 
 
+def _require_provider(db: Session, capability: str) -> None:
+    """Refuse a job the configured providers cannot finish.
+
+    Checked HERE and not in the worker: a job queued without a key claims a
+    slot, downloads the source video and then dies, and the operator's first
+    notice is a failure with a stack trace in it. Reading the stored settings
+    is one query.
+    """
+    from app import provider_settings, providers
+
+    reason = providers.blocker(provider_settings.effective(db), capability)
+    if reason:
+        raise HTTPException(status_code=503, detail=reason)
+
+
 @router.post("/{project_id}/transcribe")
 def transcribe(
     project_id: str,
@@ -309,7 +324,8 @@ def transcribe(
 ) -> dict:
     project = _require_project(db, project_id, principal)
     if project.video is None:
-        raise HTTPException(status_code=400, detail="Upload a video before transcribing")
+        raise HTTPException(status_code=400, detail="Эхлээд видео оруулна уу.")
+    _require_provider(db, providers.STT)
     return {
         "job_id": queue.enqueue(
             "transcribe", project_id=project_id, dedupe_key=f"transcribe:{project_id}"
@@ -325,9 +341,32 @@ def suggest(
 ) -> dict:
     project = _require_project(db, project_id, principal)
     if project.transcript is None or not project.transcript.segments:
-        raise HTTPException(status_code=400, detail="Transcribe the video first")
+        raise HTTPException(status_code=400, detail="Эхлээд яриаг таниулна уу.")
+    _require_provider(db, providers.LLM)
     return {
         "job_id": queue.enqueue("suggest", project_id=project_id, dedupe_key=f"suggest:{project_id}")
+    }
+
+
+@router.get("/providers/status", include_in_schema=False)
+def provider_readiness(
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """What can and cannot run, for the page that has the paid buttons.
+
+    Deliberately thinner than the admin view: no balances, no key hints, no
+    reachability probe. Someone who cannot change a setting still has to know
+    why a button will not work, and that is all this says.
+    """
+    from app import provider_settings, providers
+
+    settings = provider_settings.effective(db)
+    return {
+        "capabilities": [
+            {"name": c.name, "label": c.label, "ready": c.ready, "blocked": c.blocked}
+            for c in providers.describe(settings)
+        ]
     }
 
 
@@ -339,7 +378,7 @@ def export_all(
 ) -> dict:
     project = _require_project(db, project_id, principal)
     if project.suggestions is None or not (project.suggestions.shorts or project.suggestions.youtube):
-        raise HTTPException(status_code=400, detail="There are no suggestions to export")
+        raise HTTPException(status_code=400, detail="Экспортлох санал алга.")
     return {
         "job_id": queue.enqueue(
             "export_all", project_id=project_id, dedupe_key=f"export_all:{project_id}"
@@ -355,7 +394,7 @@ def export_timeline(
 ) -> dict:
     project = _require_project(db, project_id, principal)
     if not project.clips:
-        raise HTTPException(status_code=400, detail="The timeline has no clips")
+        raise HTTPException(status_code=400, detail="Timeline дээр клип алга.")
     # No dedupe key: re-exporting the same timeline after changing render
     # settings is a normal thing to want, unlike re-running a paid stage.
     return {"job_id": queue.enqueue("export", project_id=project_id)}
@@ -413,7 +452,7 @@ def delete_output(
         raise _not_found(project_id) from e
     out = db.get(Output, output_id)
     if out is None or out.project_id != project_id:
-        raise HTTPException(status_code=404, detail="Output not found")
+        raise HTTPException(status_code=404, detail="Гаралт олдсонгүй.")
 
     keys = [out.r2_key] + ([out.srt_key] if out.srt_key else [])
     db.delete(out)

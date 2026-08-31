@@ -13,6 +13,8 @@
 
 import type {
   BrandAsset,
+  Capability,
+  ProviderReadiness,
   BrandSettings,
   CreateProjectResponse,
   Job,
@@ -217,7 +219,15 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  /** The admin view: what each key powers, plus reachability and balance. */
+  providers: () => request<{ capabilities: Capability[] }>("/admin/providers"),
+
   brand: () => request<BrandSettings>("/admin/brand"),
+
+  /** What can and cannot run. Readable by anyone signed in — the warning has
+   *  to appear on the page with the paid button, and that page is not
+   *  admin-only. */
+  providerReadiness: () => request<ProviderReadiness>("/projects/providers/status"),
 
   /** Presigned PUT for a brand asset. The file goes straight to storage —
    *  see lib/upload.ts — and only the key comes back here. */

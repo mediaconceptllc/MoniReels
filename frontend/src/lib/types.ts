@@ -272,3 +272,22 @@ export interface ProviderSettings {
 export type ProviderSettingsPatch = Partial<
   Record<keyof ProviderSettings, string>
 >;
+
+/** One outside service and what it powers. `ready` folds three things
+ *  together — the code exists, a key is set, nothing is blocking it — and
+ *  `blocked` says which one is missing, in the operator's language. */
+export interface Capability {
+  name: "stt" | "llm" | "tts";
+  label: string;
+  ready: boolean;
+  blocked: string | null;
+  /** Admin view only; the project page is told less on purpose. */
+  provider?: string;
+  powers?: string;
+  configured?: boolean;
+  implemented?: boolean;
+}
+
+export interface ProviderReadiness {
+  capabilities: Capability[];
+}

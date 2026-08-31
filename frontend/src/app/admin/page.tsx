@@ -4,9 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAuth, errorMessage } from "@/lib/auth";
-import type { ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
+import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
 import { Alert, Button, Card, Field, Spinner, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
+import { CapabilityTable } from "@/components/CapabilityTable";
 
 type SecretName = "openrouter_api_key" | "duudlaga_api_key" | "elevenlabs_api_key";
 
@@ -44,6 +45,7 @@ export default function AdminPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string[] | null>(null);
+  const [capabilities, setCapabilities] = useState<Capability[]>([]);
 
   // The router guard is convenience, not protection: /admin/* is closed on
   // the server, so a non-admin who types the URL gets 403s either way.
@@ -56,6 +58,13 @@ export default function AdminPage() {
       setSettings(await api.providerSettings());
     } catch (err) {
       setError(errorMessage(err));
+    }
+    try {
+      // Separate from the settings read: what each key POWERS is worth
+      // showing even when one of the two calls fails.
+      setCapabilities((await api.providers()).capabilities);
+    } catch {
+      setCapabilities([]);
     }
   }, []);
 
@@ -150,6 +159,8 @@ export default function AdminPage() {
           </div>
         </div>
       </Card>
+
+      {capabilities.length > 0 && <CapabilityTable capabilities={capabilities} />}
 
       <BrandAssetsCard />
 

@@ -31,7 +31,7 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> Tok
         # keeps this from reading as "wrong password" to a legitimate user.
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many sign-in attempts. Try again in a few minutes.",
+            detail="Нэвтрэх оролдлого хэт олон боллоо. Хэдэн минутын дараа дахин оролдоно уу.",
         )
 
     user = db.scalar(select(User).where(User.username == body.username))
@@ -42,7 +42,7 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> Tok
         hash_password(body.password, "00" * 16)
         raise _bad_credentials()
     if not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Энэ бүртгэл хаагдсан байна.")
     if not verify_password(body.password, user.pw_salt, user.pw_hash):
         raise _bad_credentials()
 

@@ -52,7 +52,7 @@ def reset_password(
 ) -> dict:
     user = db.get(User, user_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
     salt, digest = hash_password(new_password)
     user.pw_salt, user.pw_hash = salt, digest
     # Same rule as a self-service change: an admin reset must end the
@@ -71,10 +71,10 @@ def set_active(
 ) -> dict:
     user = db.get(User, user_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
     # Locking yourself out leaves nobody able to unlock anyone.
     if user.id == principal.id and not active:
-        raise HTTPException(status_code=400, detail="You cannot disable your own account")
+        raise HTTPException(status_code=400, detail="Өөрийн бүртгэлээ хаах боломжгүй.")
     user.active = active
     db.commit()
     return {"active": user.active}
@@ -92,7 +92,7 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     Never raises. A provider being unreachable is itself the answer, and a
     diagnostics page that 500s tells the operator nothing.
     """
-    from app import provider_settings
+    from app import provider_settings, providers
     from app.stt.duudlaga_client import DuudlagaError
     from app.stt.duudlaga_client import build_client as build_stt
 
@@ -115,6 +115,10 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
             await client.aclose()
 
     return {
+        # What serves what, and what an operator can do about each — the keys
+        # sat in one list with no indication of which feature they powered,
+        # and one of them powers nothing at all yet.
+        "capabilities": [c.to_dict() for c in providers.describe(settings)],
         "duudlaga": duudlaga,
         # The key itself is never echoed — only whether one is present. The
         # model is not a secret and is the thing most likely to be wrong.
@@ -201,7 +205,9 @@ def brand_upload_url(asset: str, body: BrandUploadIn) -> dict:
     from app import brand
 
     if not r2.enabled():
-        raise HTTPException(status_code=503, detail="Object storage is not configured on this server")
+        raise HTTPException(
+            status_code=503, detail="Энэ сервер дээр хадгалах сан (R2) тохируулагдаагүй байна."
+        )
     try:
         key = brand.new_key(asset, body.content_type)
     except ValueError as e:
@@ -221,12 +227,12 @@ def brand_save(asset: str, body: BrandSaveIn, db: Session = Depends(get_db)) -> 
     from app import brand
 
     if asset not in brand.ASSETS:
-        raise HTTPException(status_code=404, detail=f"Unknown brand asset {asset!r}")
+        raise HTTPException(status_code=404, detail=f"Тодорхойгүй брэнд материал: {asset}")
     if body.key is not None:
         if not body.key.startswith(f"brand/{asset}-"):
-            raise HTTPException(status_code=400, detail=f"Not a {asset} key")
+            raise HTTPException(status_code=400, detail=f"Энэ түлхүүр {asset}-ийнх биш байна.")
         if r2.enabled() and not r2.exists(body.key):
-            raise HTTPException(status_code=400, detail="That upload did not complete")
+            raise HTTPException(status_code=400, detail="Тэр хуулалт бүрэн дуусаагүй байна.")
     brand.set_asset(db, asset, body.key)
     db.commit()
     return brand_read(db)
@@ -250,7 +256,7 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> dict:  # noqa: B008
     """
     job = db.get(Job, job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     if job.state in ("queued", "running"):
         raise HTTPException(status_code=400, detail=f"Job is already {job.state}")
     job.state = "queued"
