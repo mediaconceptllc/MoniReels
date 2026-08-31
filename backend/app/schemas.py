@@ -132,6 +132,26 @@ class ExportSettingsIn(BaseModel):
 class SubtitleStyleIn(BaseModel):
     enabled: bool | None = None
     font_family: str | None = Field(default=None, max_length=80)
+
+    @field_validator("font_family")
+    @classmethod
+    def _installed(cls, value: str | None) -> str | None:
+        """Refuse a family this image cannot render.
+
+        Checked on the way IN, never on the way out: a project stored before
+        this existed carries "Arial", and failing to LOAD it over a font
+        would be far worse than rendering it in something legible. The render
+        path substitutes with a warning (app.subtitle.fonts.resolve); this
+        stops the operator from choosing a substitution in the first place.
+        """
+        from app.subtitle import fonts
+
+        if value is not None and value not in fonts.available():
+            raise ValueError(
+                f"'{value}' фонт энэ сервер дээр суулгагдаагүй байна. "
+                f"Боломжтой: {', '.join(fonts.available())}"
+            )
+        return value
     font_size: int | None = Field(default=None, ge=8, le=200)
     primary_color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
     outline_color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")

@@ -348,6 +348,23 @@ def suggest(
     }
 
 
+@router.get("/subtitle/fonts", include_in_schema=False)
+def subtitle_fonts(principal: Principal = Depends(current_user)) -> dict:  # noqa: B008
+    """Families this image can really render subtitles in.
+
+    Two path segments, not one: a single-segment `/projects/subtitle-fonts`
+    is matched by `/projects/{project_id}` first and comes back as "project
+    not found" — same reason `providers/status` is shaped this way.
+
+    Asked of the image rather than hard-coded, because libass substitutes a
+    missing family without a word: a typed-in font name is a setting that
+    looks applied and is not.
+    """
+    from app.subtitle import fonts
+
+    return {"families": list(fonts.available()), "default": fonts.DEFAULT_FAMILY}
+
+
 @router.get("/providers/status", include_in_schema=False)
 def provider_readiness(
     principal: Principal = Depends(current_user),  # noqa: B008

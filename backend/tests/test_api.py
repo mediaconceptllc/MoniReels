@@ -769,3 +769,41 @@ def test_a_stored_key_for_an_unbuilt_feature_never_reads_as_ready():
     assert tts.implemented is False
     assert tts.ready is False
     assert tts.blocked
+
+
+def test_a_font_the_image_lacks_is_refused_on_save(client, db):
+    # libass would substitute silently, so the setting would look applied and
+    # the export would use something else.
+    alice = _user(db, "alice")
+    row = _project_with_video(db, alice)
+    response = client.patch(
+        f"/projects/{row.id}",
+        headers=_auth(client, "alice"),
+        json={"subtitle_style": {"font_family": "Comic Sans MS"}},
+    )
+    assert response.status_code == 422
+
+
+def test_an_installed_font_saves(client, db):
+    from app.subtitle import fonts
+
+    alice = _user(db, "alice")
+    row = _project_with_video(db, alice)
+    response = client.patch(
+        f"/projects/{row.id}",
+        headers=_auth(client, "alice"),
+        json={"subtitle_style": {"font_family": fonts.available()[0]}},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_the_font_list_only_offers_what_is_installed(client, db):
+    from app.subtitle import fonts
+
+    _user(db, "alice")
+    body = client.get("/projects/subtitle/fonts", headers=_auth(client, "alice")).json()
+
+    assert body["families"] == list(fonts.available())
+    assert body["default"] == fonts.DEFAULT_FAMILY
+    # A single-segment path here is swallowed by /projects/{project_id}.
+    assert client.get("/projects/subtitle-fonts", headers=_auth(client, "alice")).status_code == 404

@@ -11,6 +11,7 @@ import re
 
 from app.models import Segment, SubtitleStyle
 from app.subtitle.cues import to_cues
+from app.subtitle.fonts import resolve as resolve_font
 from app.utils.timecode import seconds_to_ass
 
 _HEX_COLOR_RE = re.compile(r"^#?([0-9A-Fa-f]{6})$")
@@ -46,6 +47,11 @@ def build_ass_document(segments: list[Segment], style: SubtitleStyle) -> str:
     primary = hex_to_ass_color(style.primary_color)
     outline = hex_to_ass_color(style.outline_color)
 
+    # Resolved, not passed through: libass substitutes a missing family
+    # without a word, so the operator sees one font and the export uses
+    # another.
+    font = resolve_font(style.font_family)
+
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -57,7 +63,7 @@ def build_ass_document(segments: list[Segment], style: SubtitleStyle) -> str:
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{style.font_family},{style.font_size},{primary},&H000000FF,{outline},&H00000000,"
+        f"Style: Default,{font},{style.font_size},{primary},&H000000FF,{outline},&H00000000,"
         f"0,0,0,0,100,100,0,0,1,{style.outline_width},{style.shadow},{alignment},20,20,{style.margin_v},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"

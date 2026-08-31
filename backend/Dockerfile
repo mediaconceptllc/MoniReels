@@ -15,14 +15,22 @@ ENV PYTHONUNBUFFERED=1 \
 # default container font set has no Cyrillic coverage — Mongolian text would
 # render as empty boxes in every exported video.
 #
+# fonts-inter is the subtitle default. SF Pro is the web UI's face and Apple
+# licenses it for Apple platforms only, so it cannot be shipped in a Linux
+# render container; Inter is metrically close, openly licensed, and carries
+# the Cyrillic Mongolian needs.
+#
 # fontconfig is what libass resolves a font NAME through, and it also brings
 # `fc-list` — which is the only way to answer "does this image actually have
 # a Cyrillic face" without rendering a video and looking at it. CI asks
-# exactly that question.
+# exactly that question, and app/subtitle/fonts.py asks it at run time so the
+# settings page can only ever offer a font that is really here: libass does
+# not fail on a missing family, it silently substitutes another.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
         fonts-noto-core \
+        fonts-inter \
         fontconfig \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
