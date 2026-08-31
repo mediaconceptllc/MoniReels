@@ -367,3 +367,96 @@ async def test_a_bare_list_and_a_slug_key_are_both_read():
     is deliberately loose about shapes that mean the same thing."""
     catalog = _catalog([{"slug": "openai/gpt-5"}])
     assert (await check_model(_config(), "openai/gpt-5", catalog)).known is True
+
+
+# --- an answer that did not fit ------------------------------------------
+#
+# Production, deepseek on a 28-minute Mongolian transcript: finish_reason
+# length, and content that was real, good work cut off mid-string —
+#
+#   JSONDecodeError: Unterminated string starting at: line 77 column 23
+#   OpenRouterError: Response was not valid JSON (hit the 8000-token limit)
+#
+# The retry added for the empty case did not fire, because something HAD come
+# back. The error line said "hit the token limit" and then gave up anyway.
+
+
+def _truncated_at_length(reasoning: int | None = None) -> dict:
+    details = {"reasoning_tokens": reasoning} if reasoning is not None else {}
+    return {
+        "model": "test/model",
+        "choices": [{"message": {"content": '{"items": ["a"'}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 8000, "completion_tokens_details": details},
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_answer_cut_off_mid_string_is_retried_with_more_room():
+    """Nothing at all and a half-written object are the same failure wearing
+    different clothes: the budget ran out before a usable answer existed."""
+    caps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(json.loads(request.content)["max_tokens"])
+        if len(caps) == 1:
+            return httpx.Response(200, json=_truncated_at_length())
+        return _ok({"items": ["a"]})
+
+    result = await _client(handler).complete_json("s", "u", SCHEMA, "n")
+
+    assert result == {"items": ["a"]}
+    assert caps == [MAX_TOKENS, MAX_TOKENS * LENGTH_RETRY_MULTIPLIER]
+
+
+@pytest.mark.asyncio
+async def test_giving_up_on_a_truncated_answer_names_what_the_budget_went_on():
+    """Without it, "hit the token limit" cannot say whether the answer was too
+    long to fit or the model thought until there was no room to write one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_truncated_at_length(reasoning=6100))
+
+    with pytest.raises(OpenRouterError) as excinfo:
+        await _client(handler).complete_json("s", "u", SCHEMA, "n")
+
+    message = str(excinfo.value)
+    assert "16000-token limit" in message
+    assert "6100 of them reasoning" in message
+
+
+@pytest.mark.asyncio
+async def test_a_complete_answer_is_kept_even_if_it_ended_on_the_limit():
+    """Parsing, not finish_reason, is the test of "did the model finish".
+    Paying for a second call on an answer already in hand is pure waste."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"items": ["a"]}'}, "finish_reason": "length"}
+                ]
+            },
+        )
+
+    assert await _client(handler).complete_json("s", "u", SCHEMA, "n") == {"items": ["a"]}
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_broken_json_that_did_not_run_out_of_room_is_not_retried():
+    """Only `length` says a bigger ceiling could help. A model that simply
+    wrote something malformed will write it again, for a second bill."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "not json"}, "finish_reason": "stop"}]}
+        )
+
+    with pytest.raises(OpenRouterError, match="not valid JSON"):
+        await _client(handler).complete_json("s", "u", SCHEMA, "n")
+    assert calls["n"] == 1
