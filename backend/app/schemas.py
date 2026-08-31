@@ -161,6 +161,43 @@ class SubtitleStyleIn(BaseModel):
     margin_v: int | None = Field(default=None, ge=0, le=500)
 
 
+class SubtitleStyleFull(BaseModel):
+    """A complete style, for saving as a template.
+
+    Not SubtitleStyleIn: that one is a PATCH where every field is optional,
+    and a template with half its fields missing is not a house style. The
+    font is validated the same way, so a saved template can never carry a
+    family this image lacks.
+    """
+
+    enabled: bool = True
+    font_family: str = Field(max_length=80)
+    font_size: int = Field(ge=8, le=200)
+    primary_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    outline_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    outline_width: float = Field(ge=0, le=20)
+    shadow: float = Field(ge=0, le=20)
+    position: Literal["bottom", "top", "center"]
+    margin_v: int = Field(ge=0, le=500)
+
+    @field_validator("font_family")
+    @classmethod
+    def _installed(cls, value: str) -> str:
+        from app.subtitle import fonts
+
+        if value not in fonts.available():
+            raise ValueError(
+                f"'{value}' фонт энэ сервер дээр суулгагдаагүй байна. "
+                f"Боломжтой: {', '.join(fonts.available())}"
+            )
+        return value
+
+
+class SubtitleTemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    style: SubtitleStyleFull
+
+
 class TransitionIn(BaseModel):
     type: str | None = Field(default=None, max_length=60)
     duration: float | None = Field(default=None, ge=0.0, le=2.0)

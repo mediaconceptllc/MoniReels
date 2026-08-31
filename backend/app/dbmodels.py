@@ -199,6 +199,27 @@ class Setting(Base):
     updated_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
 
 
+class SubtitleTemplate(Base):
+    """A named subtitle style the whole studio can apply.
+
+    Studio-wide rather than per user, for the same reason the brand assets
+    are: a house style that each producer keeps their own copy of stops being
+    a house style the first time two of them drift.
+
+    The style is stored as the SubtitleStyle document rather than as columns.
+    A template is written rarely and read whole, never queried by font size,
+    and a column per field would need a migration every time that model gains
+    one — which it just did, and will again.
+    """
+
+    __tablename__ = "subtitle_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    style: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 

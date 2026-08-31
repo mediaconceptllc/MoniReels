@@ -106,8 +106,8 @@ export default function AdminPage() {
       <div>
         <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Тохиргоо</h1>
         <p className="mt-1 text-sm text-ink-3">
-          Гадаад үйлчилгээний түлхүүрүүд. Хадгалмагц дараагийн ажлаас эхлэн хүчинтэй — дахин deploy
-          хийх шаардлагагүй.
+          Гадаад үйлчилгээ ба брэндийн материал. Хадгалмагц дараагийн ажлаас эхлэн хүчинтэй —
+          дахин deploy хийх шаардлагагүй.
         </p>
       </div>
 
@@ -122,6 +122,12 @@ export default function AdminPage() {
 
       <Card>
         <div className="flex flex-col gap-5">
+          <div>
+            <h2 className="font-display text-lg font-semibold text-ink">API түлхүүрүүд</h2>
+            <p className="mt-1 text-sm text-ink-3">
+              Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана.
+            </p>
+          </div>
           {SECRETS.map(({ name, label, hint }) => (
             <Field key={name} label={label} hint={hint}>
               <TextInput
@@ -164,10 +170,6 @@ export default function AdminPage() {
 
       <BrandAssetsCard />
 
-      <p className="text-xs text-ink-3">
-        Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана. Мартвал шинээр
-        оруулна.
-      </p>
     </div>
   );
 }

@@ -299,3 +299,12 @@ export interface SubtitleFonts {
   families: string[];
   default: string;
 }
+
+export interface SubtitleTemplate {
+  id: string;
+  name: string;
+  /** Copied INTO a project when applied, never linked: deleting a template
+   *  must not restyle finished work. */
+  style: SubtitleStyle;
+  created_at: number;
+}

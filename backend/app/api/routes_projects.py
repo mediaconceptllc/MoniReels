@@ -9,16 +9,18 @@ Two things every route here obeys:
 """
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import providers, r2
+from app import providers, r2, security
 from app.config import get_settings
 from app.db import get_db
-from app.dbmodels import Output
+from app.dbmodels import Output, SubtitleTemplate
 from app.jobs import queue
 from app.models import Project
 from app.schemas import (
@@ -26,6 +28,7 @@ from app.schemas import (
     CreateProjectOut,
     OutputOut,
     SelectRangesIn,
+    SubtitleTemplateIn,
     UpdateProjectIn,
     UpdateTranscriptIn,
     UploadCompleteOut,
@@ -346,6 +349,68 @@ def suggest(
     return {
         "job_id": queue.enqueue("suggest", project_id=project_id, dedupe_key=f"suggest:{project_id}")
     }
+
+
+@router.get("/subtitle/templates", include_in_schema=False)
+def list_subtitle_templates(
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """The studio's saved subtitle styles, newest first.
+
+    Readable by anyone signed in: a template nobody can apply is not a house
+    style. Creating and deleting one is admin's, the same line the brand
+    assets draw.
+    """
+    rows = db.scalars(
+        select(SubtitleTemplate).order_by(SubtitleTemplate.created_at.desc())
+    ).all()
+    return {
+        "templates": [
+            {"id": r.id, "name": r.name, "style": r.style, "created_at": r.created_at}
+            for r in rows
+        ]
+    }
+
+
+@router.post("/subtitle/templates", include_in_schema=False, status_code=status.HTTP_201_CREATED)
+def create_subtitle_template(
+    body: SubtitleTemplateIn,
+    principal: Principal = Depends(security.require_admin),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Save a style under a name.
+
+    The style is validated through SubtitleStyle on the way in, so a template
+    cannot carry a font this image lacks — a saved house style that silently
+    renders in something else is worse than no template at all.
+    """
+    if db.scalar(select(SubtitleTemplate).where(SubtitleTemplate.name == body.name)):
+        raise HTTPException(status_code=409, detail="Ийм нэртэй загвар аль хэдийн бий.")
+
+    row = SubtitleTemplate(
+        id=uuid.uuid4().hex, name=body.name, style=body.style.model_dump(), created_at=time.time()
+    )
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "name": row.name, "style": row.style, "created_at": row.created_at}
+
+
+@router.delete("/subtitle/templates/{template_id}", include_in_schema=False)
+def delete_subtitle_template(
+    template_id: str,
+    principal: Principal = Depends(security.require_admin),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    row = db.get(SubtitleTemplate, template_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Загвар олдсонгүй.")
+    db.delete(row)
+    db.commit()
+    # Projects already using it keep their own copy: a template is a starting
+    # point that was COPIED into the project, not a live link. Deleting one
+    # must not restyle finished work.
+    return {"deleted": template_id}
 
 
 @router.get("/subtitle/fonts", include_in_schema=False)

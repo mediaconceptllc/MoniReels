@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
-import type { SubtitleStyle } from "@/lib/types";
+import type { SubtitleStyle, SubtitleTemplate } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
 import { Alert, Badge, Button, Field } from "@/components/ui";
 
 const SELECT = "rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink";
@@ -23,8 +24,11 @@ export function SubtitleStylePanel({
   style: SubtitleStyle;
   onSaved: () => void;
 }) {
+  const { user } = useAuth();
   const [draft, setDraft] = useState<SubtitleStyle>(style);
   const [families, setFamilies] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<SubtitleTemplate[]>([]);
+  const [newName, setNewName] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,8 +45,39 @@ export function SubtitleStylePanel({
       } catch {
         setFamilies([]);
       }
+      try {
+        setTemplates((await api.subtitleTemplates()).templates);
+      } catch {
+        setTemplates([]);
+      }
     })();
   }, []);
+
+  async function saveTemplate() {
+    const name = newName.trim();
+    if (!name) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await api.saveSubtitleTemplate(name, draft);
+      setTemplates((prev) => [created, ...prev]);
+      setNewName("");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeTemplate(id: string) {
+    setError(null);
+    try {
+      await api.deleteSubtitleTemplate(id);
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
 
   function update<K extends keyof SubtitleStyle>(key: K, value: SubtitleStyle[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -66,6 +101,22 @@ export function SubtitleStylePanel({
   return (
     <div className="flex flex-col gap-4">
       <Preview style={draft} />
+
+      <Templates
+        templates={templates}
+        canManage={user?.role === "admin"}
+        name={newName}
+        onName={setNewName}
+        onApply={(t) => {
+          // Copied in, not linked: deleting the template later must not
+          // restyle work that was already finished with it.
+          setDraft(t.style);
+          setSaved(false);
+        }}
+        onSave={() => void saveTemplate()}
+        onDelete={(id) => void removeTemplate(id)}
+        busy={saving}
+      />
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
@@ -198,6 +249,85 @@ function Preview({ style }: { style: SubtitleStyle }) {
       <p className="mt-1 text-xs text-ink-3">
         Ойролцоо харагдац. Жинхэнэ хадмалыг сервер дээрх фонтоор кадарт шатаана.
       </p>
+    </div>
+  );
+}
+
+
+/**
+ * Saved house styles.
+ *
+ * Studio-wide, not per user: a house style each producer keeps their own
+ * copy of stops being one the first time two of them drift. Applying is open
+ * to anyone — a template nobody can use is not a house style — while saving
+ * and deleting are admin's, the same line the brand assets draw.
+ */
+function Templates({
+  templates,
+  canManage,
+  name,
+  onName,
+  onApply,
+  onSave,
+  onDelete,
+  busy,
+}: {
+  templates: SubtitleTemplate[];
+  canManage: boolean;
+  name: string;
+  onName: (value: string) => void;
+  onApply: (template: SubtitleTemplate) => void;
+  onSave: () => void;
+  onDelete: (id: string) => void;
+  busy: boolean;
+}) {
+  if (templates.length === 0 && !canManage) return null;
+
+  return (
+    <div className="rounded-md border border-rule bg-surface-2 p-3">
+      <p className="text-xs font-medium text-ink-2">Хадгалсан загвар</p>
+
+      {templates.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {templates.map((t) => (
+            <span
+              key={t.id}
+              className="inline-flex items-center gap-1 rounded-full border border-rule bg-surface pl-3 pr-1 py-1 text-xs"
+            >
+              <button type="button" className="text-ink hover:text-accent" onClick={() => onApply(t)}>
+                {t.name}
+              </button>
+              {canManage && (
+                <button
+                  type="button"
+                  aria-label={`${t.name} загварыг устгах`}
+                  className="rounded-full px-1.5 text-ink-3 hover:text-tally"
+                  onClick={() => onDelete(t.id)}
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-1 text-xs text-ink-3">Одоогоор алга.</p>
+      )}
+
+      {canManage && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
+            value={name}
+            onChange={(e) => onName(e.target.value)}
+            placeholder="Загварын нэр"
+            maxLength={80}
+            className="rounded-md border border-rule bg-surface px-3 py-1.5 text-sm text-ink"
+          />
+          <Button tone="quiet" onClick={onSave} disabled={busy || !name.trim()}>
+            Одоогийн тохиргоог хадгалах
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

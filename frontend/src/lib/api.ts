@@ -16,6 +16,8 @@ import type {
   Capability,
   ProviderReadiness,
   SubtitleFonts,
+  SubtitleStyle,
+  SubtitleTemplate,
   BrandSettings,
   CreateProjectResponse,
   Job,
@@ -231,6 +233,19 @@ export const api = {
   providerReadiness: () => request<ProviderReadiness>("/projects/providers/status"),
 
   subtitleFonts: () => request<SubtitleFonts>("/projects/subtitle/fonts"),
+
+  subtitleTemplates: () =>
+    request<{ templates: SubtitleTemplate[] }>("/projects/subtitle/templates"),
+
+  /** Admin only on the server; the button is simply not drawn otherwise. */
+  saveSubtitleTemplate: (name: string, style: SubtitleStyle) =>
+    request<SubtitleTemplate>("/projects/subtitle/templates", {
+      method: "POST",
+      body: JSON.stringify({ name, style }),
+    }),
+
+  deleteSubtitleTemplate: (id: string) =>
+    request<{ deleted: string }>(`/projects/subtitle/templates/${id}`, { method: "DELETE" }),
 
   /** Presigned PUT for a brand asset. The file goes straight to storage —
    *  see lib/upload.ts — and only the key comes back here. */
