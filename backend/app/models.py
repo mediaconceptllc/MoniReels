@@ -62,6 +62,14 @@ class Transcript(BaseModel):
     segments: list[Segment]
     full_text: str
     timings_estimated: bool = False
+    #: Starts of detected silences, in source seconds. Measured during
+    #: transcription to decide where to chunk the audio and then thrown
+    #: away; kept now because a speaker stopping is the one signal about
+    #: where a thought ended that costs nothing and is available even when
+    #: the LLM pass is off (app.ai.boundaries).
+    pauses: list[float] = Field(default_factory=list)
+    #: How many people the LLM pass heard. 0 means nobody has looked.
+    speakers: int = 0
 
 
 class Cut(BaseModel):

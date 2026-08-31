@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from app.ai.boundaries import snap_cut
 from app.ai.schema import CUT_PAD_SEC, MAX_SHORT_DURATION, MIN_SHORT_DURATION
 from app.models import Transcript
 from app.utils.text import split_span
@@ -290,11 +291,36 @@ def _audience_block(audience: str | None) -> str:
     return f"Target audience: {audience}\n"
 
 
+def _speaker_block(speakers: int) -> str:
+    """Tells the model how many people are talking.
+
+    It changes what a good cut IS. In a two-person interview a cut that
+    carries a question without its answer is half an exchange, and one that
+    starts mid-answer is a reply to a question nobody heard; in a monologue
+    neither risk exists. The count comes from app.ai.punctuate, which reads
+    the same text — 0 means nobody has looked, and then nothing is claimed.
+    """
+    if speakers <= 0:
+        return ""
+    if speakers == 1:
+        return (
+            "One speaker throughout. Cuts may be joined freely as long as each "
+            "one is a complete thought.\n"
+        )
+    return (
+        f"{speakers} speakers, so this is a conversation. Segments are labelled with "
+        f"who is talking. Never end a cut on a question whose answer is not in the "
+        f"same cut, and never begin one part-way through an answer — a viewer who "
+        f"did not hear the question cannot follow the reply.\n"
+    )
+
+
 def build_suggestions_prompt(
     lines: list[str],
     duration_sec: float,
     want_youtube: bool,
     audience: str | None = None,
+    speakers: int = 0,
 ) -> str:
     youtube_instruction = (
         "Also produce exactly 3 independent YouTube long-form highlight plans (`youtube`), "
@@ -306,6 +332,7 @@ def build_suggestions_prompt(
     return (
         f"Video duration: {duration_sec:.1f} seconds.\n"
         f"{_audience_block(audience)}"
+        f"{_speaker_block(speakers)}"
         f"{youtube_instruction}\n\n"
         f"Transcript segments:\n{transcript_block}"
     )
@@ -603,15 +630,58 @@ def _narrow_cuts_to_fit(short: dict, segments: list[tuple[float, float, str]]) -
     return {**short, "cuts": cuts}
 
 
-def repair_short_dict(short: dict, segments: list[tuple[float, float, str]]) -> dict:
+def _snap_to_sentences(
+    short: dict,
+    segments: list[tuple[float, float, str]],
+    sentence_ends: set[int],
+    pause_ends: set[int],
+) -> dict:
+    """Moves each cut's edges onto a sentence (or a pause) boundary.
+
+    Code, not another prompt. Where a sentence ends is a FACT about text we
+    already hold, and the model has been asked to respect it since the system
+    prompt was written — with no punctuation in the transcript, nothing could
+    ever check that it had.
+
+    A no-op when neither signal exists, which is what every transcript looked
+    like before app.ai.punctuate.
+    """
+    if not sentence_ends and not pause_ends:
+        return short
+
+    cuts = []
+    for cut in short.get("cuts", []):
+        s, e = cut.get("start_index"), cut.get("end_index")
+        if not isinstance(s, int) or not isinstance(e, int):
+            cuts.append(cut)
+            continue
+        new_s, new_e = snap_cut(
+            s, e, segments, sentence_ends=sentence_ends, pause_ends=pause_ends
+        )
+        cuts.append({**cut, "start_index": new_s, "end_index": new_e})
+    return {**short, "cuts": cuts}
+
+
+def repair_short_dict(
+    short: dict,
+    segments: list[tuple[float, float, str]],
+    sentence_ends: set[int] | None = None,
+    pause_ends: set[int] | None = None,
+) -> dict:
     """Best-effort code-side fixes for a candidate short, applied before
     validate_shorts makes the final call. Doesn't guarantee validity (an
     under-length short, or one broken in some other way, passes through
     unchanged) - just improves the odds without spending another API call.
     """
+    # Boundaries first, duration second. Snapping moves an edge by at most
+    # two segments and can push the total either way, so the duration repairs
+    # have to see the final indices — the reverse order would fix the length
+    # and then break it again.
+    #
     # Cuts settle before the quote does: narrowing can move the hook cut's
     # boundaries, and a quote sourced from the cut it no longer covers reads
     # as a quote from somewhere else in the video.
+    short = _snap_to_sentences(short, segments, sentence_ends or set(), pause_ends or set())
     short = _shrink_short_to_fit(short, segments)
     short = _narrow_cuts_to_fit(short, segments)
     short = _fix_hook_quote_if_invalid(short, segments)

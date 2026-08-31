@@ -82,11 +82,35 @@ def _llm_response(payload: dict) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(payload)}}]})
 
 
+def _punctuation_response(request: httpx.Request) -> httpx.Response:
+    """Answers the punctuation pass with the SAME words.
+
+    punctuate.apply rejects any line whose words changed, so a fake that
+    "improved" the text would quietly exercise the rejection path instead of
+    the one these tests are about. Echoing the input is the only answer that
+    reaches the code under test.
+    """
+    body = json.loads(request.content)
+    user = body["messages"][-1]["content"]
+    lines = []
+    for raw in user.splitlines():
+        if raw.startswith("["):
+            close = raw.index("]")
+            lines.append({"i": int(raw[1:close]), "speaker": 1, "text": raw[close + 2 :]})
+    return _llm_response({"speakers": 1, "lines": lines})
+
+
+def _is_punctuation(request: httpx.Request) -> bool:
+    return _schema_name(request) == "punctuated_transcript"
+
+
 @pytest.mark.asyncio
 async def test_generate_suggestions_single_pass_short_transcript():
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         calls["n"] += 1
         assert _schema_name(request) == "suggestions"
         return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
@@ -106,6 +130,8 @@ async def test_generate_suggestions_retries_once_on_wrong_short_count():
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         calls["n"] += 1
         two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
         if calls["n"] == 1:
@@ -126,6 +152,8 @@ async def test_generate_suggestions_fails_after_retry_still_wrong_count():
     two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         return _llm_response(two_shorts)
 
     transcript = _transcript(150)
@@ -149,6 +177,8 @@ async def test_generate_suggestions_retries_once_on_invalid_cut_structure():
     bad_response = {"shorts": [bad_short, _short_dict("B", 50), _short_dict("C", 100)], "youtube": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         calls["n"] += 1
         if calls["n"] == 1:
             return _llm_response(bad_response)
@@ -170,6 +200,8 @@ async def test_generate_suggestions_chunks_long_transcript_and_picks_best():
     calls = {"candidates": 0, "pick_best": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         name = _schema_name(request)
         if name == "candidates":
             calls["candidates"] += 1
@@ -206,6 +238,8 @@ async def test_generate_suggestions_candidates_retry_rescues_over_duration_short
     ]  # 80s total - over the 60s max
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         name = _schema_name(request)
         if name == "candidates":
             candidate_attempts["n"] += 1
@@ -227,6 +261,8 @@ async def test_generate_suggestions_candidates_retry_rescues_over_duration_short
 @pytest.mark.asyncio
 async def test_generate_suggestions_single_pass_long_video_returns_three_youtube_plans():
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         return _llm_response({"shorts": _three_shorts_dicts(), "youtube": _three_youtube_dicts()})
 
     transcript = _transcript(500)
@@ -249,6 +285,8 @@ async def test_generate_suggestions_chunks_flatten_multiple_youtube_plans_from_c
     pick_bodies: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
         name = _schema_name(request)
         if name == "candidates":
             cands = [_short_dict(f"cand-{len(pick_bodies)}-{j}", j * 50) for j in range(2)]

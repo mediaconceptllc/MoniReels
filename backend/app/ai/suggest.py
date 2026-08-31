@@ -9,6 +9,7 @@ account's tokens-per-minute cap. See build_pick_indices_prompt for detail.
 """
 from __future__ import annotations
 
+from app.ai import boundaries, punctuate
 from app.ai.llm_client import LLMClient
 from app.ai.prompts import (
     PICK_SCHEMA,
@@ -46,24 +47,40 @@ async def _complete(client: LLMClient, system: str, user: str, schema_name: str)
     return await client.complete_json(system, user, SUGGESTIONS_SCHEMA["schema"], schema_name)
 
 
-def _repair_shorts_json(raw_json: dict, segments: Segments) -> dict:
-    """Applies repair_short_dict to every short in a raw response - a
-    too-long duration or a hook_quote that drifted from a true verbatim
-    substring gets fixed outright, before validate_shorts makes the final
-    call on what's left.
+def _repair_shorts_json(
+    raw_json: dict,
+    segments: Segments,
+    sentence_ends: set[int] | None = None,
+    pause_ends: set[int] | None = None,
+) -> dict:
+    """Applies repair_short_dict to every short in a raw response - a cut
+    edge landing mid-sentence, a too-long duration, or a hook_quote that
+    drifted from a true verbatim substring gets fixed outright, before
+    validate_shorts makes the final call on what's left.
     """
-    shorts = [repair_short_dict(s, segments) for s in raw_json.get("shorts", [])]
+    shorts = [
+        repair_short_dict(s, segments, sentence_ends, pause_ends)
+        for s in raw_json.get("shorts", [])
+    ]
     return {**raw_json, "shorts": shorts}
 
 
 async def _request_validated(
-    client: LLMClient, system: str, user: str, segments: Segments, schema_name: str = "suggestions"
+    client: LLMClient,
+    system: str,
+    user: str,
+    segments: Segments,
+    schema_name: str = "suggestions",
+    sentence_ends: set[int] | None = None,
+    pause_ends: set[int] | None = None,
 ) -> RawSuggestions:
     """One call + validate; on schema OR business-rule failure (validate_shorts,
     "exactly 3 shorts"), retry once with the problems appended as a repair
     prompt, then let the error propagate (job fails).
     """
-    raw_json = _repair_shorts_json(await _complete(client, system, user, schema_name), segments)
+    raw_json = _repair_shorts_json(
+        await _complete(client, system, user, schema_name), segments, sentence_ends, pause_ends
+    )
     problems = validate_shorts(raw_json.get("shorts", []), segments)
     if not problems:
         try:
@@ -76,7 +93,9 @@ async def _request_validated(
 
     logger.warning("Suggestion validation failed, retrying once: %s", problems)
     retry_user = f"{user}\n\n{build_repair_prompt(problems)}"
-    raw_json = _repair_shorts_json(await _complete(client, system, retry_user, schema_name), segments)
+    raw_json = _repair_shorts_json(
+        await _complete(client, system, retry_user, schema_name), segments, sentence_ends, pause_ends
+    )
     raw = validate_llm_output(raw_json)
     if len(raw.shorts) != 3:
         raise SuggestionValidationError(f"Expected exactly 3 shorts, got {len(raw.shorts)}")
@@ -91,7 +110,13 @@ def _cut_summary(cuts: list[RawCut]) -> str:
 
 
 async def _fetch_candidates(
-    client: LLMClient, chunk_lines: list[str], duration_sec: float, want_youtube: bool, segments: Segments
+    client: LLMClient,
+    chunk_lines: list[str],
+    duration_sec: float,
+    want_youtube: bool,
+    segments: Segments,
+    sentence_ends: set[int] | None = None,
+    pause_ends: set[int] | None = None,
 ) -> dict:
     """One candidates call for a chunk, with the same one-retry-via-repair-
     prompt shape as _request_validated. Without this, a candidate that's a
@@ -104,7 +129,7 @@ async def _fetch_candidates(
     """
     user = build_candidates_prompt(chunk_lines, duration_sec, want_youtube)
     candidates_json = await _complete(client, SYSTEM_PROMPT, user, "candidates")
-    candidates_json = _repair_shorts_json(candidates_json, segments)
+    candidates_json = _repair_shorts_json(candidates_json, segments, sentence_ends, pause_ends)
     problems = validate_shorts(candidates_json.get("shorts", []), segments)
     if not problems:
         return candidates_json
@@ -112,7 +137,7 @@ async def _fetch_candidates(
     logger.warning("Candidate shorts failed validation, retrying once: %s", problems)
     retry_user = f"{user}\n\n{build_repair_prompt(problems)}"
     retry_json = await _complete(client, SYSTEM_PROMPT, retry_user, "candidates")
-    return _repair_shorts_json(retry_json, segments)
+    return _repair_shorts_json(retry_json, segments, sentence_ends, pause_ends)
 
 
 async def _pick_indices(
@@ -155,13 +180,64 @@ async def _pick_indices(
     raise SuggestionValidationError("; ".join(problems))
 
 
+async def restore_sentences(client: LLMClient, transcript: Transcript) -> tuple[Transcript, int]:
+    """One paid call that gives the transcript sentences and speaker turns.
+
+    Runs before the cuts are chosen, because everything downstream is better
+    for it: `split_long_segments` finds sentence boundaries instead of
+    packing words, subtitles break where a thought breaks, and
+    app.ai.boundaries can finally CHECK the prompt's oldest rule — "start on
+    the first word of a real sentence".
+
+    Never fatal. A transcript that could not be punctuated is exactly the
+    transcript this pipeline has always worked with, so a failure here costs
+    quality and nothing else.
+    """
+    if not transcript.segments:
+        return transcript, 0
+
+    try:
+        answer = await client.complete_json(
+            punctuate.SYSTEM_PROMPT,
+            punctuate.build_prompt(transcript.segments),
+            punctuate.SCHEMA["schema"],
+            punctuate.SCHEMA["name"],
+        )
+    except Exception:  # noqa: BLE001 - quality step; the pipeline works without it
+        logger.exception("Could not restore punctuation; continuing with the raw transcript")
+        return transcript, 0
+
+    restored, speakers, rejected = punctuate.apply(transcript, answer)
+    logger.info(
+        "Punctuation restored on %d/%d line(s); %d speaker(s) heard",
+        len(transcript.segments) - len(rejected), len(transcript.segments), speakers,
+    )
+    return restored.model_copy(update={"speakers": speakers}), speakers
+
+
 async def generate_suggestions(
     client: LLMClient, transcript: Transcript, duration_sec: float
 ) -> Suggestions:
     want_youtube = duration_sec > YOUTUBE_MIN_VIDEO_DURATION_SEC
+
+    # Before anything is chosen: the cuts, the subtitles and the boundary
+    # check all read this text, and until it has sentences none of them can
+    # do their job properly.
+    transcript, speakers = await restore_sentences(client, transcript)
+
     segments = split_long_segments(transcript)
     lines = build_segment_lines(transcript)
     chunks = chunk_segment_lines(lines)
+
+    # Two independent signals about where a thought ends. Punctuation is the
+    # strong one and exists only if the call above worked; pauses were
+    # measured during transcription and cost nothing. See app.ai.boundaries.
+    sentence_ends = boundaries.sentence_end_indices(segments)
+    pause_ends = boundaries.pause_end_indices(segments, transcript.pauses)
+    logger.info(
+        "Cut boundaries available: %d sentence end(s), %d pause-backed, %d speaker(s)",
+        len(sentence_ends), len(pause_ends), speakers,
+    )
 
     # The cut unit's size is what decides whether the 35-60s rule is reachable
     # at all: a short needs at least 3 cuts, so 3x the shortest segment is the
@@ -181,8 +257,20 @@ async def generate_suggestions(
         )
 
     if len(chunks) <= 1:
-        user = build_suggestions_prompt(lines, duration_sec, want_youtube)
-        raw = await _request_validated(client, SYSTEM_PROMPT, user, segments)
+        user = build_suggestions_prompt(lines, duration_sec, want_youtube, speakers=speakers)
+        raw = await _request_validated(
+            client, SYSTEM_PROMPT, user, segments,
+            sentence_ends=sentence_ends, pause_ends=pause_ends,
+        )
+        # Snapping fixes what it can reach; anything left is worth seeing.
+        # It is NOT a validation failure: with punctuation restored on only
+        # part of a transcript, hard-failing here would reject shorts that
+        # are otherwise sound.
+        for i, short in enumerate(raw.shorts, 1):
+            for problem in boundaries.unfinished_cuts(
+                short.model_dump(), segments, sentence_ends
+            ):
+                logger.info("Short %d: %s", i, problem)
     else:
         logger.info("Transcript exceeds single-request budget; chunking into %d parts", len(chunks))
         all_shorts: list[RawShort] = []
@@ -192,7 +280,8 @@ async def generate_suggestions(
 
         for chunk_lines in chunks:
             candidates_json = await _fetch_candidates(
-                client, chunk_lines, duration_sec, want_youtube, segments
+                client, chunk_lines, duration_sec, want_youtube, segments,
+                sentence_ends=sentence_ends, pause_ends=pause_ends,
             )
             candidates = validate_llm_output(candidates_json)
             for i, short_dict in enumerate(candidates_json.get("shorts", [])):
