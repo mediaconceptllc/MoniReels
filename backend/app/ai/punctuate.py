@@ -111,6 +111,11 @@ CONTEXT_LINES = 4
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 
+#: app.ai.boundaries' marks as a set — the same characters, asked a different
+#: question ("how many are in this text" rather than "does this text end on
+#: one"), which is why they are defined once over there.
+_TERMINALS = frozenset(boundaries.TERMINALS)
+
 
 def words_of(text: str) -> list[str]:
     """The words, lowercased and stripped of everything else.
@@ -122,20 +127,31 @@ def words_of(text: str) -> list[str]:
     return [w.lower() for w in _WORD.findall(text or "")]
 
 
-#: Above this share of lines ending in . ? ! the transcript came punctuated.
-#: Not a quality bar — a discriminator between two recogniser behaviours.
-#: ElevenLabs Scribe punctuates every sentence it hears; duudlaga.dev emits
-#: no terminal marks at all. Anything between the two separates them, and
-#: reading the TEXT rather than the provider's name keeps that true when a
-#: third recogniser arrives.
-PUNCTUATED_SHARE = 0.5
+#: At most this many words per sentence-ending mark for the transcript to
+#: count as punctuated. Not a quality bar — a discriminator between two
+#: recogniser behaviours. ElevenLabs Scribe punctuates what it hears;
+#: duudlaga.dev emits no terminal marks at all, so its density is exactly
+#: zero and no threshold in a sane range confuses the two. Mongolian speech
+#: runs 8-20 words to a sentence, so 40 leaves wide margin on both sides.
+#:
+#: Measured over the WHOLE text rather than per segment end. Counting how
+#: many segments finish on a mark sounds equivalent and is not: a segment
+#: closed by app.stt.elevenlabs_client's duration cap ends mid-sentence by
+#: construction, so a speaker with long sentences drives that share down
+#: while their text stays fully punctuated. MEASURED — 46-second run-ons put
+#: it at 33%, below any workable threshold, and the pass would have run
+#: against text that needed nothing. It also tied this answer to
+#: MAX_SEGMENT_SEC: lowering the cap would have quietly started paying for
+#: the pass again, with nothing naming the connection.
+WORDS_PER_SENTENCE_MAX = 40
 
 
 def is_punctuated(segments: list[Segment]) -> bool:
-    if not segments:
+    marks = sum(1 for seg in segments for ch in (seg.text or "") if ch in _TERMINALS)
+    if not marks:
         return False
-    ends = sum(1 for seg in segments if boundaries.ends_sentence(seg.text))
-    return ends >= len(segments) * PUNCTUATED_SHARE
+    words = sum(len(words_of(seg.text)) for seg in segments)
+    return words <= marks * WORDS_PER_SENTENCE_MAX
 
 
 def answer_tokens(segments: list[Segment], indices: list[int]) -> int:
