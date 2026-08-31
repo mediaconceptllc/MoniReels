@@ -89,3 +89,37 @@ def _reset_ratelimit():
     ratelimit.reset()
     yield
     ratelimit.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_model_catalog_calls():
+    """No test may ask OpenRouter what models exist.
+
+    PUT /admin/settings verifies a new model name against the live catalogue.
+    Left alone that makes the suite depend on a third party's inventory: the
+    settings tests would wait out a real timeout on a sandboxed runner, and on
+    a connected one they would start failing the day OpenRouter retires the
+    model a fixture happens to name.
+
+    The default answer is "that model exists", which is what every test that
+    is not ABOUT this check needs. Tests that are about it set
+    `check_model` themselves and shadow this.
+
+    Patched by hand rather than through `monkeypatch`: an autouse fixture in
+    THIS file that requests monkeypatch pulls it earlier in the setup order
+    for the whole suite, which moves its undo later than the per-module
+    fixtures that were relying on running after it. That is not a
+    hypothetical — it broke four teardowns in test_subtitle_fonts.py, whose
+    cache-clear then ran against a still-patched function.
+    """
+    from app.ai import openrouter_client
+
+    async def _known(config, model, http_client=None):
+        return openrouter_client.ModelCheck(known=True)
+
+    original = openrouter_client.check_model
+    openrouter_client.check_model = _known
+    try:
+        yield
+    finally:
+        openrouter_client.check_model = original
