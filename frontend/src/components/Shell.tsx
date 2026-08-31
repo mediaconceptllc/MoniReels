@@ -23,7 +23,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
                   Тохиргоо
                 </Link>
               )}
-              <span className="text-ink-3">{user.username}</span>
+              {/* The name was plain text, which left the password-change
+                  endpoint with no way in at all. */}
+              <Link href="/profile" className="text-ink-3 hover:text-ink">
+                {user.username}
+              </Link>
               <Button tone="quiet" onClick={signOut}>
                 Гарах
               </Button>

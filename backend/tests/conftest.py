@@ -62,9 +62,15 @@ def db():
 def _clean_tables(request):
     """Every DB test starts from empty tables.
 
-    Order matters: `jobs` and `outputs` reference `projects`, which
-    references `users`. TRUNCATE ... CASCADE would work but also silently
-    empties tables a test did not expect to lose.
+    The list comes from the metadata, not from a literal here. A hand-written
+    one has to be remembered every time a table is added, and forgetting it
+    does not fail loudly — rows leak into the next test and it passes or
+    fails depending on the ORDER the suite happened to run in.
+
+    `sorted_tables` is in dependency order (parents first), so reversed puts
+    children first and the deletes never trip a foreign key. TRUNCATE
+    ... CASCADE would also work, and would also silently empty tables a test
+    did not expect to lose.
     """
     if not DB_CONFIGURED or "db" not in request.fixturenames:
         yield
@@ -72,8 +78,8 @@ def _clean_tables(request):
     yield
     engine = get_engine()
     with engine.begin() as conn:
-        for table in ("jobs", "outputs", "projects", "users", "audit_log", "settings"):
-            conn.execute(text(f"DELETE FROM {table}"))
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(text(f'DELETE FROM "{table.name}"'))
 
 
 @pytest.fixture(autouse=True)

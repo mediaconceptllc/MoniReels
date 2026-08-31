@@ -807,3 +807,116 @@ def test_the_font_list_only_offers_what_is_installed(client, db):
     assert body["default"] == fonts.DEFAULT_FAMILY
     # A single-segment path here is swallowed by /projects/{project_id}.
     assert client.get("/projects/subtitle-fonts", headers=_auth(client, "alice")).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Subtitle templates. A studio-wide house style, applied by anyone, changed
+# by admin — the same line the brand assets draw.
+# ---------------------------------------------------------------------------
+
+
+def _style(**overrides) -> dict:
+    from app.subtitle import fonts
+
+    return {
+        "enabled": True,
+        "font_family": fonts.available()[0],
+        "font_size": 48,
+        "primary_color": "#FFFFFF",
+        "outline_color": "#000000",
+        "outline_width": 2.0,
+        "shadow": 0.0,
+        "position": "bottom",
+        "margin_v": 40,
+        **overrides,
+    }
+
+
+def test_anyone_signed_in_can_read_the_templates(client, db):
+    # A house style nobody can apply is not a house style.
+    _user(db, "alice")
+    response = client.get("/projects/subtitle/templates", headers=_auth(client, "alice"))
+    assert response.status_code == 200
+    assert response.json()["templates"] == []
+
+
+def test_only_an_admin_can_save_or_delete_one(client, db):
+    _user(db, "alice")
+    _user(db, "root", role="admin")
+    body = {"name": "Үндсэн", "style": _style()}
+
+    assert client.post(
+        "/projects/subtitle/templates", headers=_auth(client, "alice"), json=body
+    ).status_code == 403
+
+    created = client.post("/projects/subtitle/templates", headers=_auth(client, "root"), json=body)
+    assert created.status_code == 201, created.text
+
+    template_id = created.json()["id"]
+    assert client.delete(
+        f"/projects/subtitle/templates/{template_id}", headers=_auth(client, "alice")
+    ).status_code == 403
+    assert client.delete(
+        f"/projects/subtitle/templates/{template_id}", headers=_auth(client, "root")
+    ).status_code == 200
+
+
+def test_a_template_cannot_carry_a_font_the_image_lacks(client, db):
+    # A saved house style that silently renders in something else is worse
+    # than no template at all.
+    _user(db, "root", role="admin")
+    response = client.post(
+        "/projects/subtitle/templates",
+        headers=_auth(client, "root"),
+        json={"name": "Муу", "style": _style(font_family="Comic Sans MS")},
+    )
+    assert response.status_code == 422
+
+
+def test_two_templates_cannot_share_a_name(client, db):
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    body = {"name": "Үндсэн", "style": _style()}
+
+    assert client.post("/projects/subtitle/templates", headers=headers, json=body).status_code == 201
+    assert client.post("/projects/subtitle/templates", headers=headers, json=body).status_code == 409
+
+
+def test_a_partial_style_is_refused(client, db):
+    # SubtitleStyleIn is a PATCH where everything is optional; a template
+    # with half its fields missing is not a house style.
+    _user(db, "root", role="admin")
+    response = client.post(
+        "/projects/subtitle/templates",
+        headers=_auth(client, "root"),
+        json={"name": "Дутуу", "style": {"font_size": 48}},
+    )
+    assert response.status_code == 422
+
+
+def test_deleting_a_template_does_not_restyle_a_project(client, db):
+    # A template is a starting point that was COPIED in, not a live link.
+    from app.subtitle import fonts
+
+    _user(db, "root", role="admin")
+    alice = _user(db, "alice")
+    admin = _auth(client, "root")
+
+    created = client.post(
+        "/projects/subtitle/templates",
+        headers=admin,
+        json={"name": "Үндсэн", "style": _style(font_size=72)},
+    )
+    assert created.status_code == 201, created.text
+    created = created.json()
+
+    row = _project_with_video(db, alice)
+    client.patch(
+        f"/projects/{row.id}",
+        headers=_auth(client, "alice"),
+        json={"subtitle_style": {"font_size": 72, "font_family": fonts.available()[0]}},
+    )
+    client.delete(f"/projects/subtitle/templates/{created['id']}", headers=admin)
+
+    body = client.get(f"/projects/{row.id}", headers=_auth(client, "alice")).json()
+    assert body["subtitle_style"]["font_size"] == 72
