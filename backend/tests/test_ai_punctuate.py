@@ -6,6 +6,7 @@ split by length when the answer will not fit one call, never by question.
 """
 from __future__ import annotations
 
+from app.ai import boundaries
 from app.ai.punctuate import (
     CHARS_PER_TOKEN,
     MAX_ANSWER_TOKENS,
@@ -18,6 +19,7 @@ from app.ai.punctuate import (
     words_of,
 )
 from app.models import Segment, Transcript
+from app.stt.elevenlabs_client import segments_from_words
 
 
 def _transcript(*texts: str) -> Transcript:
@@ -199,3 +201,41 @@ def test_unpunctuated_asr_text_is_not():
 
 def test_no_segments_is_not_punctuated():
     assert is_punctuated([]) is False
+
+
+def test_text_far_too_sparse_to_be_punctuated_prose_is_not():
+    """One mark in eighty words is a transcript the pass can still help."""
+    t = _transcript(" ".join(["үг"] * 80) + ".")
+    assert is_punctuated(t.segments) is False
+
+
+def test_the_answer_does_not_depend_on_how_the_text_was_cut_into_segments():
+    """The same words, cut four ways.
+
+    Counting how many SEGMENTS end on a mark sounds equivalent to reading the
+    text and is not: app.stt.elevenlabs_client closes a segment on a duration
+    cap, and such a segment ends mid-sentence by construction. Under that
+    measure this one text reads as 100% punctuated at a 15s cap and 25% at a
+    3s one — so lowering MAX_SEGMENT_SEC would quietly start paying for a pass
+    the transcript does not need, with nothing naming the connection.
+    """
+    words, t = [], 0.0
+    for _ in range(15):
+        for j in range(30):
+            words.append(
+                {"text": ("үг." if j == 29 else "үг"), "start": t, "end": t + 0.34,
+                 "type": "word", "speaker_id": "speaker_1"}
+            )
+            t += 0.38
+
+    verdicts = {}
+    end_shares = set()
+    for cap in (3.0, 6.0, 15.0, 60.0):
+        segments = segments_from_words(words, max_sec=cap)
+        verdicts[cap] = is_punctuated(segments)
+        end_shares.add(
+            round(sum(boundaries.ends_sentence(s.text) for s in segments) / len(segments), 2)
+        )
+
+    assert len(end_shares) > 1, "the caps must actually cut this text differently"
+    assert set(verdicts.values()) == {True}, verdicts

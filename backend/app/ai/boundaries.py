@@ -41,7 +41,13 @@ MAX_SNAP_SEGMENTS = 2
 #: an exact match would almost never happen.
 PAUSE_TOLERANCE_S = 0.6
 
-_ENDS_SENTENCE = re.compile(r"[.!?…]['\"»)\]]*\s*$")
+#: The marks that end a sentence. One definition, because two modules ask
+#: two different questions of it — app.ai.punctuate counts how many are in a
+#: text, this module asks whether one is at the end — and a mark added to
+#: only one of two lists would answer them inconsistently.
+TERMINALS = ".!?…"
+
+_ENDS_SENTENCE = re.compile(rf"[{re.escape(TERMINALS)}]['\"»)\]]*\s*$")
 
 
 def ends_sentence(text: str) -> bool:
