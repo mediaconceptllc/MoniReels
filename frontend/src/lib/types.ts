@@ -291,3 +291,11 @@ export interface Capability {
 export interface ProviderReadiness {
   capabilities: Capability[];
 }
+
+export interface SubtitleFonts {
+  /** Families the RENDER image can actually use. Asked of the image, not
+   *  hard-coded: libass substitutes a missing family without failing, so a
+   *  free-text font name is a setting that looks applied and is not. */
+  families: string[];
+  default: string;
+}

@@ -15,6 +15,7 @@ import type {
   BrandAsset,
   Capability,
   ProviderReadiness,
+  SubtitleFonts,
   BrandSettings,
   CreateProjectResponse,
   Job,
@@ -228,6 +229,8 @@ export const api = {
    *  to appear on the page with the paid button, and that page is not
    *  admin-only. */
   providerReadiness: () => request<ProviderReadiness>("/projects/providers/status"),
+
+  subtitleFonts: () => request<SubtitleFonts>("/projects/subtitle/fonts"),
 
   /** Presigned PUT for a brand asset. The file goes straight to storage —
    *  see lib/upload.ts — and only the key comes back here. */

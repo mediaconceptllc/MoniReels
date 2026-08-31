@@ -94,8 +94,18 @@
   --color-tally: var(--tally);
   --color-tally-soft: var(--tally-soft);
 
-  --font-display: var(--font-display-loaded), "Golos Text", system-ui, sans-serif;
-  --font-sans: var(--font-sans-loaded), system-ui, -apple-system, sans-serif;
+  /* SF Pro leads the body stack. Apple licenses it for Apple platforms only,
+     so it cannot be downloaded or shipped — `-apple-system` is how a browser
+     hands it over on a Mac or an iPhone, which is where it is licensed to be
+     used. Everywhere else the stack falls through to the self-hosted Golos
+     Text behind it, which carries the same Cyrillic coverage.
+
+     Burned-in subtitles are a different question entirely and cannot use it:
+     that render happens on a Linux container. Inter is the face there —
+     metrically close, openly licensed. See app/subtitle/fonts.py. */
+  --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display";
+  --font-display: var(--font-system), var(--font-display-loaded), "Golos Text", system-ui, sans-serif;
+  --font-sans: var(--font-system), var(--font-sans-loaded), system-ui, sans-serif;
   --font-mono: var(--font-mono-loaded), ui-monospace, monospace;
 }
 

@@ -19,6 +19,7 @@ import type { Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Spinner } from "@/components/ui";
 import { ProviderWarnings } from "@/components/ProviderWarnings";
 import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
+import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
 import { JobProgress } from "@/components/JobProgress";
 import { OutputList } from "@/components/OutputList";
 import { Shell } from "@/components/Shell";
@@ -236,6 +237,17 @@ export default function ProjectPage() {
               <ExportSettingsPanel
                 projectId={projectId}
                 settings={project.export}
+                onSaved={() => void refresh()}
+              />
+            </Card>
+            <Card className="p-5">
+              <h3 className="font-display text-base font-semibold">Хадмалын загвар</h3>
+              <p className="mt-1 mb-4 text-sm text-ink-3">
+                Шатаасан хадмал болон .srt файлд хэрэглэгдэнэ.
+              </p>
+              <SubtitleStylePanel
+                projectId={projectId}
+                style={project.subtitle_style}
                 onSaved={() => void refresh()}
               />
             </Card>

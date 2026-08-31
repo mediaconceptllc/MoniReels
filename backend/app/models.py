@@ -110,7 +110,11 @@ class Suggestions(BaseModel):
 
 class SubtitleStyle(BaseModel):
     enabled: bool = True
-    font_family: str = "Arial"
+    # Must be a family the render image installs. libass does not fail on a
+    # missing one, it silently substitutes — which is how this shipped as
+    # "Arial", a font in no container here, for as long as it has existed.
+    # app.subtitle.fonts owns the list and the fallback.
+    font_family: str = "Inter"
     font_size: int = 42
     primary_color: str = "#FFFFFF"  # "#RRGGBB"
     outline_color: str = "#000000"
