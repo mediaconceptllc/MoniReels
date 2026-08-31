@@ -19,7 +19,13 @@ class LLMError(Exception):
 
 class LLMClient(Protocol):
     async def complete_json(
-        self, system: str, user: str, json_schema: dict, schema_name: str, temperature: float = 0.4
+        self,
+        system: str,
+        user: str,
+        json_schema: dict,
+        schema_name: str,
+        temperature: float = 0.4,
+        max_tokens: int | None = None,
     ) -> dict: ...
 
     async def aclose(self) -> None: ...

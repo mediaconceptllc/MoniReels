@@ -1,4 +1,4 @@
-"""One pass that gives the transcript sentences and speakers.
+"""Giving a transcript sentences and speakers, when it arrived without them.
 
 duudlaga.dev returns Mongolian ASR text with no terminal punctuation and no
 idea who is talking. Two consequences the rest of the pipeline has been
@@ -10,10 +10,19 @@ living with:
 - There is no notion of a turn, so a cut can begin with an interviewer's
   question and end in the middle of the guest's answer to a different one.
 
-Both come from the same missing information, so both are restored in ONE
-call. Splitting them would double the bill for a single read of the same
-text — and the second reader would disagree with the first about where a
+Both come from the same missing information, so both are restored in one
+read of the text. Asking for them separately would double the bill for that
+read — and the second reader would disagree with the first about where a
 sentence ended, which is worse than either answer alone.
+
+That read is split by LENGTH, never by question: the answer is the transcript
+again, so a long one does not fit a single call's output budget and the whole
+pass returns nothing (`plan_chunks`). Each piece is shown what the last one
+decided, so one numbering of the speakers runs through all of them.
+
+A recogniser that already punctuates and diarises — ElevenLabs Scribe does
+both — makes the whole pass unnecessary, which `is_punctuated` reads off the
+text rather than off the provider's name.
 
 What comes back is applied ONLY as punctuation and speaker labels. The words
 themselves are the transcript and are checked to be unchanged: a model asked
@@ -25,6 +34,7 @@ from __future__ import annotations
 
 import re
 
+from app.ai import boundaries
 from app.models import Segment, Transcript
 from app.utils.logging import get_logger
 
@@ -73,6 +83,32 @@ SCHEMA: dict = {
     },
 }
 
+#: The answer is the transcript again, so the OUTPUT is what bounds a call —
+#: not the prompt. Kept under app.ai.openrouter_client.MAX_TOKENS so a chunk
+#: never needs that client's emergency escalation.
+#:
+#: This is the arithmetic that was missing. One call was asked to re-emit a
+#: whole 28-minute Mongolian transcript inside a fixed 8000-token ceiling; it
+#: generated for four and a half minutes and returned nothing, every time,
+#: because no answer that size has ever fitted. Splitting the ask is the only
+#: thing that makes it answerable.
+MAX_ANSWER_TOKENS = 6000
+
+#: Mongolian Cyrillic compresses badly — roughly two characters to a token on
+#: the tokenisers behind the models this app uses. Deliberately pessimistic:
+#: under-estimating costs a truncated chunk, over-estimating costs one extra
+#: cheap round trip.
+CHARS_PER_TOKEN = 2.0
+
+#: `{"i": 123, "speaker": 1, "text": ""},` before a single word of transcript.
+PER_LINE_TOKENS = 20
+
+#: Lines carried into the next chunk WITH the speaker numbers already given to
+#: them. Without this each chunk numbers its speakers from 1 independently and
+#: "speaker 1" means a different person in every chunk — the labels would look
+#: complete and be wrong, which is worse than having none.
+CONTEXT_LINES = 4
+
 _WORD = re.compile(r"\w+", re.UNICODE)
 
 
@@ -86,12 +122,87 @@ def words_of(text: str) -> list[str]:
     return [w.lower() for w in _WORD.findall(text or "")]
 
 
-def build_prompt(segments: list[Segment]) -> str:
-    lines = "\n".join(f"[{i}] {seg.text}" for i, seg in enumerate(segments))
-    return f"Punctuate these {len(segments)} lines and label the speakers:\n\n{lines}"
+#: Above this share of lines ending in . ? ! the transcript came punctuated.
+#: Not a quality bar — a discriminator between two recogniser behaviours.
+#: ElevenLabs Scribe punctuates every sentence it hears; duudlaga.dev emits
+#: no terminal marks at all. Anything between the two separates them, and
+#: reading the TEXT rather than the provider's name keeps that true when a
+#: third recogniser arrives.
+PUNCTUATED_SHARE = 0.5
 
 
-def apply(transcript: Transcript, answer: dict) -> tuple[Transcript, int, list[str]]:
+def is_punctuated(segments: list[Segment]) -> bool:
+    if not segments:
+        return False
+    ends = sum(1 for seg in segments if boundaries.ends_sentence(seg.text))
+    return ends >= len(segments) * PUNCTUATED_SHARE
+
+
+def answer_tokens(segments: list[Segment], indices: list[int]) -> int:
+    """How big the answer to this chunk would be."""
+    return sum(PER_LINE_TOKENS + len(segments[i].text or "") / CHARS_PER_TOKEN for i in indices)
+
+
+def call_budget(segments: list[Segment], indices: list[int]) -> int:
+    """The output ceiling to ask for when sending this chunk.
+
+    Sized from the chunk rather than left at the client's default, so a single
+    over-long line — the one case `plan_chunks` cannot split — still gets room
+    for its own answer instead of being cut off at a constant.
+    """
+    return max(MAX_ANSWER_TOKENS, int(answer_tokens(segments, indices) * 1.25))
+
+
+def plan_chunks(segments: list[Segment]) -> list[list[int]]:
+    """Index groups whose answers each fit one call.
+
+    A line longer than the whole budget still gets a chunk of its own: it is
+    the transcript, it cannot be dropped, and the alternative is a loop that
+    never places it.
+    """
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    used = 0.0
+    for i, seg in enumerate(segments):
+        cost = PER_LINE_TOKENS + len(seg.text or "") / CHARS_PER_TOKEN
+        if current and used + cost > MAX_ANSWER_TOKENS:
+            chunks.append(current)
+            current, used = [], 0.0
+        current.append(i)
+        used += cost
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def build_prompt(
+    segments: list[Segment],
+    indices: list[int] | None = None,
+    context: list[tuple[int, str]] | None = None,
+) -> str:
+    """The ask for one chunk.
+
+    `context` is the tail of what has already been punctuated, each line with
+    the speaker number it was given. It is shown, not asked for, so the model
+    continues one numbering across the whole transcript instead of restarting
+    at 1 in every chunk.
+    """
+    indices = list(range(len(segments))) if indices is None else indices
+    lines = "\n".join(f"[{i}] {segments[i].text}" for i in indices)
+    head = ""
+    if context:
+        shown = "\n".join(f"[{i}] {text}" for i, text in context)
+        head = (
+            "These lines came just before and are already labelled. Keep the "
+            "same speaker numbers for the same people; do not return these "
+            f"lines.\n\n{shown}\n\n"
+        )
+    return f"{head}Punctuate these {len(indices)} lines and label the speakers:\n\n{lines}"
+
+
+def apply(
+    transcript: Transcript, answer: dict, indices: list[int] | None = None
+) -> tuple[Transcript, int, list[str]]:
     """Folds the model's answer back onto the transcript.
 
     Returns the transcript, the speaker count, and the lines that were
@@ -99,11 +210,21 @@ def apply(transcript: Transcript, answer: dict) -> tuple[Transcript, int, list[s
     line must not cost the whole pass, and it must not silently rewrite what
     somebody said either.
 
+    `indices` is the chunk this answer was asked for. A model given context
+    lines will sometimes helpfully return them too; accepting those would let
+    a later chunk overwrite a line an earlier one already settled, so anything
+    outside the ask is ignored rather than trusted.
+
     Timing is untouched throughout. Punctuation does not move when a word was
     spoken, and the segment boundaries are what every cut, subtitle and
     export in this system is built on.
     """
-    by_index = {line.get("i"): line for line in answer.get("lines", []) if isinstance(line.get("i"), int)}
+    asked = set(range(len(transcript.segments)) if indices is None else indices)
+    by_index = {
+        line.get("i"): line
+        for line in answer.get("lines", [])
+        if isinstance(line.get("i"), int) and line.get("i") in asked
+    }
     rejected: list[str] = []
     segments: list[Segment] = []
 
@@ -132,7 +253,7 @@ def apply(transcript: Transcript, answer: dict) -> tuple[Transcript, int, list[s
     if rejected:
         logger.warning(
             "%d/%d line(s) came back with different words and were left as transcribed: %s",
-            len(rejected), len(transcript.segments), " ".join(rejected[:20]),
+            len(rejected), len(asked), " ".join(rejected[:20]),
         )
 
     speakers = answer.get("speakers")

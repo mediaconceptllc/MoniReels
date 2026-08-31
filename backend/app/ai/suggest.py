@@ -181,7 +181,7 @@ async def _pick_indices(
 
 
 async def restore_sentences(client: LLMClient, transcript: Transcript) -> tuple[Transcript, int]:
-    """One paid call that gives the transcript sentences and speaker turns.
+    """Gives the transcript sentences and speaker turns, if it hasn't got them.
 
     Runs before the cuts are chosen, because everything downstream is better
     for it: `split_long_segments` finds sentence boundaries instead of
@@ -189,28 +189,66 @@ async def restore_sentences(client: LLMClient, transcript: Transcript) -> tuple[
     app.ai.boundaries can finally CHECK the prompt's oldest rule — "start on
     the first word of a real sentence".
 
-    Never fatal. A transcript that could not be punctuated is exactly the
-    transcript this pipeline has always worked with, so a failure here costs
-    quality and nothing else.
+    Skipped outright when the recogniser already did it. ElevenLabs Scribe
+    returns punctuated text and measures who spoke each word, so re-deriving
+    both from the words alone is a paid call that can only agree or be wrong —
+    and it is the most expensive call in the job, because its answer is the
+    whole transcript again.
+
+    Never fatal, and never destructive. A transcript that could not be
+    punctuated is exactly the transcript this pipeline has always worked with,
+    so a failure here costs quality and nothing else — but it must not cost
+    what was already known: a failed chunk keeps its lines as transcribed and
+    a failed pass keeps the speaker count the recogniser measured.
     """
+    measured = transcript.speakers
     if not transcript.segments:
-        return transcript, 0
+        return transcript, measured
 
-    try:
-        answer = await client.complete_json(
-            punctuate.SYSTEM_PROMPT,
-            punctuate.build_prompt(transcript.segments),
-            punctuate.SCHEMA["schema"],
-            punctuate.SCHEMA["name"],
+    if punctuate.is_punctuated(transcript.segments) and measured:
+        logger.info(
+            "Transcript arrived punctuated with %d speaker(s); skipping the punctuation pass",
+            measured,
         )
-    except Exception:  # noqa: BLE001 - quality step; the pipeline works without it
-        logger.exception("Could not restore punctuation; continuing with the raw transcript")
-        return transcript, 0
+        return transcript, measured
 
-    restored, speakers, rejected = punctuate.apply(transcript, answer)
+    chunks = punctuate.plan_chunks(transcript.segments)
+    if len(chunks) > 1:
+        logger.info(
+            "Punctuating %d line(s) in %d chunks; one answer would not fit a single call",
+            len(transcript.segments), len(chunks),
+        )
+
+    restored = transcript
+    done = 0
+    context: list[tuple[int, str]] = []
+    for chunk in chunks:
+        try:
+            answer = await client.complete_json(
+                punctuate.SYSTEM_PROMPT,
+                punctuate.build_prompt(restored.segments, chunk, context),
+                punctuate.SCHEMA["schema"],
+                punctuate.SCHEMA["name"],
+                max_tokens=punctuate.call_budget(restored.segments, chunk),
+            )
+        except Exception:  # noqa: BLE001 - quality step; the pipeline works without it
+            logger.exception(
+                "Could not punctuate lines %d-%d; keeping them as transcribed", chunk[0], chunk[-1]
+            )
+            continue
+
+        restored, _, rejected = punctuate.apply(restored, answer, chunk)
+        done += len(chunk) - len(rejected)
+        # What the next chunk is shown, with the numbers this one gave out.
+        context = [
+            (i, f"{restored.segments[i].speaker or '?'}: {restored.segments[i].text}")
+            for i in chunk[-punctuate.CONTEXT_LINES :]
+        ]
+
+    speakers = len({s.speaker for s in restored.segments if s.speaker}) or measured
     logger.info(
         "Punctuation restored on %d/%d line(s); %d speaker(s) heard",
-        len(transcript.segments) - len(rejected), len(transcript.segments), speakers,
+        done, len(transcript.segments), speakers,
     )
     return restored.model_copy(update={"speakers": speakers}), speakers
 

@@ -35,7 +35,21 @@ logger = get_logger(__name__)
 # Measured worst case for 3 shorts + 3 YouTube plans of strict JSON is ~3.3k
 # tokens even in a token-dense language. 8000 leaves ~3x headroom while still
 # fitting under a 30k-TPM tier alongside the largest prompt this app sends.
+#
+# It is the DEFAULT, not the law: a caller whose answer is proportional to
+# the transcript (app.ai.punctuate returns the text again) knows its own size
+# and passes it. A single constant for every call is what let a request be
+# sent that could not fit its own answer.
 MAX_TOKENS = 8000
+
+# MEASURED, both calls of one production job: HTTP 200, finish_reason=length,
+# message content empty. The first had been generating for 4m40s. Two causes
+# produce exactly that and cannot be told apart from outside — an answer too
+# long to fit, or a budget that `max_tokens` shares with reasoning and that ran
+# out before any content was written. `_spend` reports which, when the provider
+# says; either way an identical retry buys the same silence, so the retry
+# raises the ceiling instead — once, bounded, and only when nothing came back.
+LENGTH_RETRY_MULTIPLIER = 2
 
 # A reasoning-tier model on a 45k-character transcript genuinely runs for
 # minutes with no intermediate output.
@@ -71,41 +85,83 @@ class OpenRouterClient:
             await self._client.aclose()
 
     async def complete_json(
-        self, system: str, user: str, json_schema: dict, schema_name: str, temperature: float = 0.4
+        self,
+        system: str,
+        user: str,
+        json_schema: dict,
+        schema_name: str,
+        temperature: float = 0.4,
+        max_tokens: int | None = None,
     ) -> dict:
         if not self._config.api_key:
             raise OpenRouterError("OPENROUTER_API_KEY is not configured")
         if not self._config.model:
             raise OpenRouterError("OPENROUTER_MODEL is not configured")
 
-        body = self._build_body(system, user, json_schema, schema_name, temperature)
-        data = await self._post_with_capability_fallbacks(
-            body, system, user, json_schema, schema_name, temperature
-        )
+        cap = max_tokens or MAX_TOKENS
+        content, data = await self._attempt(system, user, json_schema, schema_name, temperature, cap)
 
-        self._record_usage(data)
-
-        try:
-            choice = data["choices"][0]
-            content = choice["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise OpenRouterError(f"Unexpected OpenRouter response shape: {_truncate(data)}") from e
+        # Nothing at all, because the budget ran out first. A second identical
+        # request buys the same silence; a bigger ceiling is the one thing that
+        # can change the answer, so it is spent here rather than failing the job.
+        if not content and _finish_reason(data) == "length":
+            wider = cap * LENGTH_RETRY_MULTIPLIER
+            logger.warning(
+                "%s returned nothing within %d tokens (%s); retrying once at %d.",
+                self._config.model, cap, _spend(data), wider,
+            )
+            content, data = await self._attempt(
+                system, user, json_schema, schema_name, temperature, wider
+            )
+            cap = wider
 
         if not content:
-            reason = data["choices"][0].get("finish_reason")
-            raise OpenRouterError(f"OpenRouter returned an empty completion (finish_reason={reason})")
+            raise OpenRouterError(
+                f"{self._config.model} returned an empty completion "
+                f"(finish_reason={_finish_reason(data)}, budget={cap} tokens, {_spend(data)})"
+            )
 
         try:
             return json.loads(content)
         except json.JSONDecodeError as e:
-            truncated = data["choices"][0].get("finish_reason") == "length"
-            hint = " (hit the token limit — output is truncated)" if truncated else ""
+            truncated = _finish_reason(data) == "length"
+            hint = f" (hit the {cap}-token limit — output is truncated)" if truncated else ""
             raise OpenRouterError(f"Response was not valid JSON{hint}: {content[:500]}") from e
+
+    async def _attempt(
+        self,
+        system: str,
+        user: str,
+        json_schema: dict,
+        schema_name: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[str, dict]:
+        """One billed round trip. Returns the message content and the raw
+        response, so the caller can tell "said nothing" from "said nothing
+        because it ran out of room"."""
+        body = self._build_body(system, user, json_schema, schema_name, temperature, max_tokens)
+        data = await self._post_with_capability_fallbacks(
+            body, system, user, json_schema, schema_name, temperature, max_tokens
+        )
+        self._record_usage(data)
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            raise OpenRouterError(f"Unexpected OpenRouter response shape: {_truncate(data)}") from e
+        return content or "", data
 
     # -- capability probing ------------------------------------------------
 
     async def _post_with_capability_fallbacks(
-        self, body: dict, system: str, user: str, json_schema: dict, schema_name: str, temperature: float
+        self,
+        body: dict,
+        system: str,
+        user: str,
+        json_schema: dict,
+        schema_name: str,
+        temperature: float,
+        max_tokens: int,
     ) -> dict:
         """Send, and on a capability error strip the offending feature once
         and resend. Each fallback is remembered so the probe costs at most
@@ -118,7 +174,7 @@ class OpenRouterClient:
                 self._temperature_unsupported = True
                 body.pop("temperature", None)
                 return await self._post_with_capability_fallbacks(
-                    body, system, user, json_schema, schema_name, temperature
+                    body, system, user, json_schema, schema_name, temperature, max_tokens
                 )
             if not self._array_bounds_unsupported and _is_array_bounds_error(e):
                 # Anthropic-backed models reject minItems/maxItems above 1.
@@ -129,14 +185,20 @@ class OpenRouterClient:
                     "Model %s rejects array size constraints; stripping them.", self._config.model
                 )
                 self._array_bounds_unsupported = True
-                body = self._build_body(system, user, json_schema, schema_name, temperature)
+                body = self._build_body(system, user, json_schema, schema_name, temperature, max_tokens)
                 return await self._post_with_capability_fallbacks(
-                    body, system, user, json_schema, schema_name, temperature
+                    body, system, user, json_schema, schema_name, temperature, max_tokens
                 )
             raise
 
     def _build_body(
-        self, system: str, user: str, json_schema: dict, schema_name: str, temperature: float
+        self,
+        system: str,
+        user: str,
+        json_schema: dict,
+        schema_name: str,
+        temperature: float,
+        max_tokens: int = MAX_TOKENS,
     ) -> dict:
         schema = _strip_array_size_constraints(json_schema) if self._array_bounds_unsupported else json_schema
         body: dict = {
@@ -149,7 +211,7 @@ class OpenRouterClient:
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "schema": schema, "strict": True},
             },
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": max_tokens,
             # Ask OpenRouter for the real charge instead of keeping a price
             # table in code — a hardcoded table is stale the day a model's
             # price changes, and silently wrong rather than visibly missing.
@@ -247,6 +309,33 @@ def _strip_array_size_constraints(schema: object) -> object:
     if isinstance(schema, list):
         return [_strip_array_size_constraints(item) for item in schema]
     return schema
+
+
+def _finish_reason(data: dict) -> str | None:
+    try:
+        return data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _spend(data: dict) -> str:
+    """What the budget actually went on.
+
+    "Empty completion" on its own does not say whether the model wrote a long
+    answer that was cut off or thought until there was no room left to write
+    one — and those have different fixes. Reasoning tokens are reported by
+    providers that have them and simply absent elsewhere, so this reads them
+    if they are there and stays quiet if they are not.
+    """
+    usage = data.get("usage") or {}
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        return "no usage reported"
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = details.get("reasoning_tokens")
+    if reasoning:
+        return f"{completion} completion tokens, {reasoning} of them reasoning"
+    return f"{completion} completion tokens"
 
 
 def _truncate(data: object, limit: int = 400) -> str:

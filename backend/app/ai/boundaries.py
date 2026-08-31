@@ -44,6 +44,16 @@ PAUSE_TOLERANCE_S = 0.6
 _ENDS_SENTENCE = re.compile(r"[.!?…]['\"»)\]]*\s*$")
 
 
+def ends_sentence(text: str) -> bool:
+    """Whether this text finishes a sentence.
+
+    The single definition. app.ai.punctuate decides from it whether the
+    transcript needs punctuating at all, and this module decides from it where
+    a cut may land — two answers that must never disagree about the same line.
+    """
+    return bool(_ENDS_SENTENCE.search(text or ""))
+
+
 def sentence_end_indices(segments: Segments) -> set[int]:
     """Segments whose text finishes a sentence.
 
@@ -51,7 +61,7 @@ def sentence_end_indices(segments: Segments) -> set[int]:
     with no terminal marks in the transcript there are no sentence ends to
     find, and inventing some would be worse than admitting none.
     """
-    return {i for i, (_, _, text) in enumerate(segments) if _ENDS_SENTENCE.search(text or "")}
+    return {i for i, (_, _, text) in enumerate(segments) if ends_sentence(text)}
 
 
 def pause_end_indices(
