@@ -93,6 +93,23 @@ CODE_MESSAGES = {
 }
 
 
+class _RunAborted(Exception):
+    """Raised by a chunk that never went out because the run was already over.
+
+    A fresh instance, and never the verdict itself: re-raising ONE exception
+    object from sixty waiting tasks appends to that object's traceback sixty
+    times, and the log fills with
+
+        File "duudlaga_client.py", line 267, in one
+            raise fatal
+          [Previous line repeated 55 more times]
+
+    which is the noise the early abort exists to remove, arriving by a
+    different route. The collector below raises the real verdict; nothing
+    ever reads one of these.
+    """
+
+
 class DuudlagaError(Exception):
     def __init__(
         self,
@@ -264,7 +281,7 @@ class DuudlagaClient(SttProvider):
                     # finish; cancelling them is what the comment below is
                     # about.
                     if fatal is not None:
-                        raise fatal
+                        raise _RunAborted
                     logger.info(
                         "Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end
                     )
@@ -294,11 +311,11 @@ class DuudlagaClient(SttProvider):
 
             if fatal is not None:
                 # Raise the verdict itself, not whichever chunk happens to be
-                # first in order - the ones that merely stopped early carry
-                # the same exception object but say nothing about why. The
-                # count goes in the message because "the run died" and "the
-                # run died after 41 of 62 chunks you have already paid for"
-                # call for different next steps.
+                # first in order - the ones that merely stopped early carry a
+                # bare _RunAborted and say nothing about why. The count goes
+                # in the message because "the run died" and "the run died
+                # after 41 of 62 chunks you have already paid for" call for
+                # different next steps.
                 done = sum(1 for o in settled if not isinstance(o, BaseException))
                 raise DuudlagaError(
                     f"{fatal} ({done}/{len(boundaries)} чанхаа амжсан)",

@@ -934,3 +934,38 @@ def test_a_retryable_failure_is_not_treated_as_fatal():
     assert not DuudlagaError("boom", status=500, code="internal_error").ends_the_run
     assert DuudlagaError("broke", status=402, code="insufficient_credits").ends_the_run
     assert DuudlagaError("cap", status=403, code="daily_spend_cap_exceeded").ends_the_run
+
+
+@pytest.mark.asyncio
+async def test_the_abort_does_not_pile_up_one_exceptions_traceback(tmp_path, monkeypatch):
+    """Re-raising ONE exception object from every waiting chunk appends to
+    that object's traceback each time, and the log fills with
+
+        raise fatal
+          [Previous line repeated 55 more times]
+
+    which is the noise the early abort was added to remove, arriving by a
+    different route. Seen in production on the run after that change shipped.
+    """
+    import traceback as tb_module
+
+    import app.stt.duudlaga_client as mod
+
+    audio = tmp_path / "audio.wav"
+    _wav(audio, seconds=600.0)
+    monkeypatch.setattr(mod, "_require_ffmpeg", lambda: tmp_path / "ffmpeg")
+    monkeypatch.setattr(mod, "detect_silences", lambda *_: _silences_every_ten_long())
+    monkeypatch.setattr(mod, "extract_chunk", _write_chunk)
+
+    def handler(_request):
+        return _error(402, "insufficient_credits", "Not enough credits")
+
+    with pytest.raises(mod.DuudlagaError) as raised:
+        await _client(handler, concurrency=1).transcribe(audio)
+
+    rendered = "".join(tb_module.format_exception(raised.value))
+    assert "Previous line repeated" not in rendered, rendered[-1500:]
+
+
+async def _silences_every_ten_long():
+    return [(float(t), t + 0.5) for t in range(10, 600, 10)]
