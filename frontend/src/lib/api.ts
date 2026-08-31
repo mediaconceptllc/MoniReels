@@ -223,7 +223,10 @@ export const api = {
     }),
 
   /** The admin view: what each key powers, plus reachability and balance. */
-  providers: () => request<{ capabilities: Capability[] }>("/admin/providers"),
+  providers: () =>
+    request<{ capabilities: Capability[]; stt_providers: string[]; stt: { provider: string } }>(
+      "/admin/providers",
+    ),
 
   brand: () => request<BrandSettings>("/admin/brand"),
 

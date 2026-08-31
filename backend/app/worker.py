@@ -32,7 +32,7 @@ from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
-from app.stt.duudlaga_client import build_client as build_stt_client
+from app.stt.factory import build_client as build_stt_client
 from app.stt.pipeline import separation_available, transcribe_audio
 from app.subtitle.srt import segments_to_srt
 from app.utils.logging import get_logger, setup_logging

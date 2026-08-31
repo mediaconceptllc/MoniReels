@@ -259,11 +259,16 @@ export interface ProviderField {
   hint: string;
 }
 
+export type SttProviderName = "duudlaga" | "elevenlabs";
+
 export interface ProviderSettings {
   openrouter_api_key: ProviderField;
   duudlaga_api_key: ProviderField;
   elevenlabs_api_key: ProviderField;
   openrouter_model: ProviderField;
+  /** Which recogniser runs. A name, not a guess from which key is filled
+   *  in — two keys can be set at once. */
+  stt_provider: ProviderField;
 }
 
 /** Only the fields the operator actually edited. An omitted field is left
