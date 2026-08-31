@@ -57,19 +57,41 @@ def describe(settings: Settings) -> list[Capability]:
     see the admin providers route — and this has to answer instantly because
     it gates every paid button.
     """
-    stt_key = bool(settings.duudlaga_api_key)
+    from app.stt import factory
+
+    # The SELECTED provider's key, never "any key is set": two keys can be
+    # present at once and reading the wrong one reports ready because a
+    # different vendor is configured.
+    stt_name = (settings.stt_provider or factory.DUUDLAGA).strip().lower()
+    stt_known = stt_name in factory.PROVIDERS
+    stt_key = bool(factory.api_key_for(settings)) if stt_known else False
+    stt_label = {
+        factory.DUUDLAGA: "duudlaga.dev",
+        factory.ELEVENLABS: f"ElevenLabs {settings.elevenlabs_stt_model}",
+    }.get(stt_name, settings.stt_provider)
+
     llm_key = bool(settings.openrouter_api_key)
     tts_key = bool(settings.elevenlabs_api_key)
+
+    if not stt_known:
+        stt_blocked = (
+            f"Тодорхойгүй яриа таних систем: {settings.stt_provider!r}. "
+            f"Боломжтой: {', '.join(factory.PROVIDERS)}"
+        )
+    elif not stt_key:
+        stt_blocked = f"{stt_label}-ийн API түлхүүр тавигдаагүй байна."
+    else:
+        stt_blocked = None
 
     return [
         Capability(
             name=STT,
             label="Яриа таних",
-            provider="duudlaga.dev",
+            provider=stt_label,
             powers="Видеоны яриаг текст болгож, хадмал үүсгэнэ.",
             configured=stt_key,
-            implemented=True,
-            blocked=None if stt_key else "duudlaga.dev API түлхүүр тавигдаагүй байна.",
+            implemented=stt_known,
+            blocked=stt_blocked,
         ),
         Capability(
             name=LLM,

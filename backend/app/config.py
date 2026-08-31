@@ -113,6 +113,21 @@ class Settings(BaseSettings):
     # key exists so it can be entered and rotated in the same place as the
     # others rather than being remembered somewhere else until TTS lands.
     elevenlabs_api_key: str = ""
+    elevenlabs_base_url: str = "https://api.elevenlabs.io/v1"
+    #: Scribe, ElevenLabs' speech-to-text model.
+    elevenlabs_stt_model: str = "scribe_v1"
+    #: ISO-639-3. Left set rather than auto-detected: the material is
+    #: Mongolian, and a recogniser guessing at it is a recogniser that
+    #: sometimes guesses Russian on a noisy opening.
+    elevenlabs_stt_language: str = "mon"
+    #: Who said each word. This is the measurement app.ai.punctuate pays an
+    #: LLM to infer from the text.
+    elevenlabs_diarize: bool = True
+
+    # ---- Which STT actually runs -------------------------------------
+    #: "duudlaga" or "elevenlabs". One name, checked at startup, so "which
+    #: recogniser is running" has an answer that is not "read the code".
+    stt_provider: str = "duudlaga"
 
     # ---- audio pipeline ----------------------------------------------
     # Demucs is OFF by default. On a shared container torch does not read

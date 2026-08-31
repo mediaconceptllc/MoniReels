@@ -286,3 +286,7 @@ class ProviderSettingsIn(BaseModel):
     # Accepted and stored before anything reads it — see config.Settings.
     elevenlabs_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
     openrouter_model: str | None = Field(default=None, max_length=MODEL_MAX)
+    #: Which recogniser runs. A closed set, checked here rather than at the
+    #: first transcribe: a typo would otherwise be stored, look saved, and
+    #: fail a job an hour later.
+    stt_provider: Literal["duudlaga", "elevenlabs"] | None = None

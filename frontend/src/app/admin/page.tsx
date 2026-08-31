@@ -25,9 +25,10 @@ const SECRETS: { name: SecretName; label: string; hint: string }[] = [
   {
     name: "elevenlabs_api_key",
     label: "ElevenLabs API түлхүүр",
-    // Said plainly: a stored key that nothing reads must not look like a
-    // working feature, or the first TTS attempt becomes a bug report.
-    hint: "Хадгалагдана — гэхдээ дуу оруулах (TTS) хэсэг хараахан хэрэгжээгүй тул одоогоор ашиглагдахгүй.",
+    // One key, two features, and only one of them is built. Said plainly,
+    // because a stored key that half the page reads must not look like it
+    // powers the other half too.
+    hint: "Яриа таних (Scribe) хэсэгт ашиглагдана. Дуу оруулах (TTS) хараахан хэрэгжээгүй.",
   },
 ];
 
@@ -46,6 +47,8 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string[] | null>(null);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [sttProviders, setSttProviders] = useState<string[]>([]);
+  const [sttProvider, setSttProvider] = useState<string>("");
 
   // The router guard is convenience, not protection: /admin/* is closed on
   // the server, so a non-admin who types the URL gets 403s either way.
@@ -62,7 +65,10 @@ export default function AdminPage() {
     try {
       // Separate from the settings read: what each key POWERS is worth
       // showing even when one of the two calls fails.
-      setCapabilities((await api.providers()).capabilities);
+      const status = await api.providers();
+      setCapabilities(status.capabilities);
+      setSttProviders(status.stt_providers ?? []);
+      setSttProvider(status.stt?.provider ?? "");
     } catch {
       setCapabilities([]);
     }
@@ -166,7 +172,27 @@ export default function AdminPage() {
         </div>
       </Card>
 
-      {capabilities.length > 0 && <CapabilityTable capabilities={capabilities} />}
+      {capabilities.length > 0 && (
+        <CapabilityTable
+          capabilities={capabilities}
+          sttProvider={sttProvider}
+          sttProviders={sttProviders}
+          onSttProvider={(name) => {
+            // Applied immediately rather than left in the draft with the
+            // keys: this is one click, and a recogniser that looks selected
+            // but is not saved is how a job runs on the wrong vendor.
+            setSttProvider(name);
+            void (async () => {
+              try {
+                await api.saveProviderSettings({ stt_provider: name });
+                await load();
+              } catch (err) {
+                setError(errorMessage(err));
+              }
+            })();
+          }}
+        />
+      )}
 
       <BrandAssetsCard />
 

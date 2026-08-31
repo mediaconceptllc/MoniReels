@@ -93,33 +93,43 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     diagnostics page that 500s tells the operator nothing.
     """
     from app import provider_settings, providers
-    from app.stt.duudlaga_client import DuudlagaError
-    from app.stt.duudlaga_client import build_client as build_stt
+    from app.stt import factory
 
     # Stored overrides included: a page that reports the environment while
     # the jobs use something else answers the wrong question.
     settings = provider_settings.effective(db)
-    duudlaga: dict = {"configured": bool(settings.duudlaga_api_key)}
-    if duudlaga["configured"]:
-        client = build_stt(settings)
+
+    # The SELECTED recogniser, not duudlaga by name: probing the one that is
+    # not running answers a question nobody asked and leaves the one that is
+    # running unchecked.
+    stt: dict = {
+        "provider": settings.stt_provider,
+        "configured": bool(factory.api_key_for(settings)),
+    }
+    if stt["configured"]:
         try:
-            duudlaga["account"] = await client.account_info()
-            duudlaga["ok"] = True
-        except DuudlagaError as e:
-            duudlaga["ok"] = False
-            duudlaga["error"] = str(e)
-        except Exception as e:  # noqa: BLE001 - reachability is part of the answer
-            duudlaga["ok"] = False
-            duudlaga["error"] = f"{type(e).__name__}: {e}"
-        finally:
-            await client.aclose()
+            client = factory.build_client(settings)
+        except factory.UnknownSttProvider as e:
+            stt["ok"] = False
+            stt["error"] = str(e)
+            client = None
+        if client is not None:
+            try:
+                stt["account"] = await client.account_info()
+                stt["ok"] = True
+            except Exception as e:  # noqa: BLE001 - reachability is part of the answer
+                stt["ok"] = False
+                stt["error"] = str(e) or f"{type(e).__name__}"
+            finally:
+                await client.aclose()
 
     return {
         # What serves what, and what an operator can do about each — the keys
         # sat in one list with no indication of which feature they powered,
         # and one of them powers nothing at all yet.
         "capabilities": [c.to_dict() for c in providers.describe(settings)],
-        "duudlaga": duudlaga,
+        "stt": stt,
+        "stt_providers": list(factory.PROVIDERS),
         # The key itself is never echoed — only whether one is present. The
         # model is not a secret and is the thing most likely to be wrong.
         "openrouter": {

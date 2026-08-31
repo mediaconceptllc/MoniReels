@@ -11,7 +11,22 @@ import { Badge, Card } from "@/components/ui";
  * for a feature no code reads looks exactly like a working feature until
  * somebody depends on it.
  */
-export function CapabilityTable({ capabilities }: { capabilities: Capability[] }) {
+const STT_LABEL: Record<string, string> = {
+  duudlaga: "duudlaga.dev",
+  elevenlabs: "ElevenLabs Scribe",
+};
+
+export function CapabilityTable({
+  capabilities,
+  sttProvider,
+  sttProviders,
+  onSttProvider,
+}: {
+  capabilities: Capability[];
+  sttProvider?: string;
+  sttProviders?: string[];
+  onSttProvider?: (name: string) => void;
+}) {
   return (
     <Card>
       <div className="flex flex-col gap-4">
@@ -33,6 +48,23 @@ export function CapabilityTable({ capabilities }: { capabilities: Capability[] }
                 <p className="mt-0.5 text-xs text-ink-3">{c.provider}</p>
                 {c.powers && <p className="mt-1 text-xs text-ink-3">{c.powers}</p>}
                 {c.blocked && <p className="mt-1 text-xs text-ink-2">{c.blocked}</p>}
+
+                {c.name === "stt" && sttProviders && sttProviders.length > 1 && (
+                  <label className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-3">
+                    Яриа таних систем:
+                    <select
+                      value={sttProvider ?? sttProviders[0]}
+                      onChange={(e) => onSttProvider?.(e.target.value)}
+                      className="rounded-md border border-rule bg-surface px-2 py-1 text-xs text-ink"
+                    >
+                      {sttProviders.map((name) => (
+                        <option key={name} value={name}>
+                          {STT_LABEL[name] ?? name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
             </div>
           ))}

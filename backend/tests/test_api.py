@@ -333,7 +333,8 @@ def test_provider_status_reports_an_unconfigured_provider(client, db):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["duudlaga"]["configured"] is False
+    assert body["stt"]["configured"] is False
+    assert body["stt_providers"] == ["duudlaga", "elevenlabs"]
     assert body["storage"]["configured"] is True
 
 
@@ -358,7 +359,10 @@ def test_provider_status_reports_low_credits_instead_of_failing(client, db, monk
     response = client.get("/admin/providers", headers=_auth(client, "root"))
 
     assert response.status_code == 200
-    assert response.json()["duudlaga"] == {
+    # Keyed on the SELECTED recogniser, not on a vendor name: probing the
+    # one that is not running leaves the one that is running unchecked.
+    assert response.json()["stt"] == {
+        "provider": "duudlaga",
         "configured": True,
         "ok": False,
         "error": "duudlaga.dev дээрх кредит дууссан байна.",
@@ -920,3 +924,48 @@ def test_deleting_a_template_does_not_restyle_a_project(client, db):
 
     body = client.get(f"/projects/{row.id}", headers=_auth(client, "alice")).json()
     assert body["subtitle_style"]["font_size"] == 72
+
+
+def test_the_selected_recogniser_is_what_gets_probed(client, db, monkeypatch):
+    # Two keys can be set at once — elevenlabs_api_key is also the TTS slot —
+    # so reading "any key" would report ready because a different vendor is
+    # configured, and would probe the recogniser that is not running.
+    from app.config import get_settings
+
+    monkeypatch.setenv("STT_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk_eleven_test")
+    monkeypatch.setenv("DUUDLAGA_API_KEY", "")
+    get_settings.cache_clear()
+
+    import app.stt.elevenlabs_client as eleven
+
+    async def _ok(self):
+        return {"tier": "creator"}
+
+    monkeypatch.setattr(eleven.ElevenLabsSttClient, "account_info", _ok)
+
+    _user(db, "root", role="admin")
+    body = client.get("/admin/providers", headers=_auth(client, "root")).json()
+
+    assert body["stt"]["provider"] == "elevenlabs"
+    assert body["stt"]["configured"] is True
+    assert body["stt"]["ok"] is True
+    get_settings.cache_clear()
+
+
+def test_an_unknown_recogniser_is_refused_at_save(client, db):
+    # Stored, a typo would look saved and fail a job an hour later.
+    _user(db, "root", role="admin")
+    response = client.put(
+        "/admin/settings", headers=_auth(client, "root"), json={"stt_provider": "whisper"}
+    )
+    assert response.status_code == 422
+
+
+def test_the_recogniser_can_be_switched(client, db):
+    _user(db, "root", role="admin")
+    response = client.put(
+        "/admin/settings", headers=_auth(client, "root"), json={"stt_provider": "elevenlabs"}
+    )
+    assert response.status_code == 200
+    assert "stt_provider" in response.json()["changed"]
