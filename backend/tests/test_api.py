@@ -969,3 +969,129 @@ def test_the_recogniser_can_be_switched(client, db):
     )
     assert response.status_code == 200
     assert "stt_provider" in response.json()["changed"]
+
+
+# --- a model name nothing checked ----------------------------------------
+#
+# `deepseek/deepseek-v4-flash-latest` was typed into the settings page, saved
+# cleanly, and turned three suggest jobs into 400s. `stt_provider` in the same
+# form has always been a closed set for exactly this reason; the model beside
+# it was free text.
+
+
+def _set_model(client, headers, model: str, checker):
+    from app.ai import openrouter_client
+
+    original = openrouter_client.check_model
+    openrouter_client.check_model = checker
+    try:
+        return client.put("/admin/settings", json={"openrouter_model": model}, headers=headers)
+    finally:
+        openrouter_client.check_model = original
+
+
+def _rejects(*suggestions):
+    from app.ai import openrouter_client
+
+    async def check(config, model, http_client=None):
+        return openrouter_client.ModelCheck(known=False, suggestions=tuple(suggestions))
+
+    return check
+
+
+def test_a_model_openrouter_does_not_serve_is_refused_at_the_box_it_was_typed_in(client, db):
+    from app import provider_settings
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+    before = provider_settings.effective(db).openrouter_model
+
+    response = _set_model(client, headers, "deepseek/deepseek-v4-flash-latest", _rejects())
+
+    assert response.status_code == 400
+    assert "deepseek/deepseek-v4-flash-latest" in response.json()["detail"]
+    assert provider_settings.effective(db).openrouter_model == before, "the bad name was stored anyway"
+
+
+def test_a_near_miss_is_answered_with_what_it_probably_meant(client, db):
+    """Turning "wrong" into "did you mean" is the difference between one
+    correction and a hunt through a third party's model list."""
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+
+    response = _set_model(
+        client, headers, "deepseek/deepseek-v4-flash-latest", _rejects("deepseek/deepseek-v4-flash")
+    )
+
+    assert response.status_code == 400
+    assert "deepseek/deepseek-v4-flash" in response.json()["detail"]
+
+
+def test_an_unreadable_catalogue_does_not_stop_the_save(client, db):
+    """Refusing here would make an OpenRouter outage a settings lockout —
+    including the outage an operator is trying to configure their way out of.
+    The save goes through and says it could not be checked."""
+    from app import provider_settings
+    from app.ai import openrouter_client
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+
+    async def unavailable(config, model, http_client=None):
+        raise openrouter_client.ModelCatalogUnavailable("connection refused")
+
+    response = _set_model(client, headers, "openai/gpt-5", unavailable)
+
+    assert response.status_code == 200
+    assert response.json()["model_check"] == {"verified": False, "reason": "connection refused"}
+    assert provider_settings.effective(db).openrouter_model == "openai/gpt-5"
+
+
+def test_a_verified_model_says_so(client, db):
+    from app.ai import openrouter_client
+
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+
+    async def known(config, model, http_client=None):
+        return openrouter_client.ModelCheck(known=True)
+
+    response = _set_model(client, headers, "openai/gpt-5", known)
+
+    assert response.json()["model_check"] == {"verified": True}
+
+
+def test_no_key_means_nothing_to_check_against(client, db):
+    """With no key the app cannot call OpenRouter for a job either, so the
+    check protects nothing — and asking anyway buys a 401 after a timeout the
+    operator waits through."""
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+
+    async def must_not_run(config, model, http_client=None):
+        raise AssertionError("asked the catalogue with no key to ask it with")
+
+    response = _set_model(client, headers, "openai/gpt-5", must_not_run)
+
+    assert response.status_code == 200
+    assert response.json()["model_check"]["verified"] is False
+
+
+def test_clearing_the_model_is_not_a_model_to_check(client, db):
+    """Empty drops the override and falls back to the environment, which this
+    route has no business vetoing."""
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+
+    async def must_not_run(config, model, http_client=None):
+        raise AssertionError("checked an empty model name")
+
+    response = _set_model(client, headers, "", must_not_run)
+
+    assert response.status_code == 200
+    assert response.json()["model_check"] is None

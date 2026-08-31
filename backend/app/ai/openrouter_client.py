@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from difflib import get_close_matches
 
 import httpx
 
@@ -54,6 +55,10 @@ LENGTH_RETRY_MULTIPLIER = 2
 # A reasoning-tier model on a 45k-character transcript genuinely runs for
 # minutes with no intermediate output.
 REQUEST_TIMEOUT_SEC = 600.0
+
+# The catalogue is a small static list behind a settings form somebody is
+# waiting on, not a generation. It gets a form's patience, not a model's.
+CATALOG_TIMEOUT_SEC = 20.0
 
 
 class OpenRouterError(LLMError):
@@ -266,6 +271,93 @@ class OpenRouterClient:
             completion=int(usage.get("completion_tokens") or 0),
             cost=float(usage.get("cost") or 0.0),
         )
+
+
+# ---------------------------------------------------------------------------
+# The model catalogue
+# ---------------------------------------------------------------------------
+#
+# A model name is one free-text string that every paid job depends on, and
+# nothing checked it. `deepseek/deepseek-v4-flash-latest` was stored, looked
+# saved, and turned three suggest jobs into 400s an hour later — the exact
+# failure app.schemas already refuses for `stt_provider`, arriving through the
+# field beside it.
+
+
+class ModelCatalogUnavailable(OpenRouterError):
+    """The catalogue could not be read.
+
+    Deliberately NOT the same as "that model does not exist". An outage must
+    not stop an operator changing settings, and an unreadable list must never
+    be reported as a missing model — the fix for one is waiting, and for the
+    other retyping.
+    """
+
+
+@dataclass(frozen=True)
+class ModelCheck:
+    """Three states, not two: known, unknown-with-suggestions, and
+    unknown-with-none. Collapsing the last two throws away the only thing
+    that turns "wrong" into "did you mean"."""
+
+    known: bool
+    suggestions: tuple[str, ...] = ()
+
+
+async def check_model(
+    config: OpenRouterConfig, model: str, http_client: httpx.AsyncClient | None = None
+) -> ModelCheck:
+    """Whether OpenRouter serves this model, and what it looks like if not.
+
+    Raises ModelCatalogUnavailable when the answer is unknown rather than no.
+    """
+    ids = await fetch_model_ids(config, http_client)
+    if model in ids:
+        return ModelCheck(known=True)
+    return ModelCheck(known=False, suggestions=tuple(get_close_matches(model, sorted(ids), n=5, cutoff=0.5)))
+
+
+async def fetch_model_ids(
+    config: OpenRouterConfig, http_client: httpx.AsyncClient | None = None
+) -> set[str]:
+    """Every model id OpenRouter will accept.
+
+    CONTRACT NOT VERIFIED against the live docs — the network this was written
+    on blocks openrouter.ai — so the parse is deliberately loose: the
+    OpenAI-compatible `{"data": [{"id": ...}]}` shape, a bare list, and an
+    id under `slug` are all read, and anything else raises
+    ModelCatalogUnavailable rather than silently yielding an empty set. An
+    empty set would mark EVERY model unknown and lock the settings page.
+
+    The key is sent if there is one and the call is not required to need it:
+    a 401 means the catalogue is unavailable, not that the model is wrong.
+    """
+    client = http_client or httpx.AsyncClient(timeout=CATALOG_TIMEOUT_SEC)
+    headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
+    try:
+        response = await client.get(f"{config.base_url.rstrip('/')}/models", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPError as e:
+        raise ModelCatalogUnavailable(f"Could not read the model list: {e or type(e).__name__}") from e
+    except ValueError as e:  # not JSON
+        raise ModelCatalogUnavailable("The model list was not JSON") from e
+    finally:
+        if http_client is None:
+            await client.aclose()
+
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise ModelCatalogUnavailable(f"Unexpected model list shape: {_truncate(payload, 200)}")
+
+    ids = {
+        str(row.get("id") or row.get("slug"))
+        for row in rows
+        if isinstance(row, dict) and (row.get("id") or row.get("slug"))
+    }
+    if not ids:
+        raise ModelCatalogUnavailable("The model list came back with no models in it")
+    return ids
 
 
 def build_client(settings) -> OpenRouterClient:

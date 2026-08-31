@@ -10,6 +10,9 @@ from app.db import get_db
 from app.dbmodels import Job, Project, User
 from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, Password, ProviderSettingsIn
 from app.security import Principal, hash_password, require_admin, stamp_password_change
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -160,7 +163,7 @@ def provider_settings_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
 
 
 @router.put("/settings")
-def provider_settings_write(
+async def provider_settings_write(
     body: ProviderSettingsIn,
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
@@ -169,16 +172,74 @@ def provider_settings_write(
     The worker reads these per job from the same table, so no restart and no
     redeploy is needed — and nothing has to be pushed to the worker, which
     could not be reached from here anyway.
+
+    A new model name is checked against OpenRouter's catalogue BEFORE it is
+    stored. `stt_provider` beside it has always been a closed set for exactly
+    this reason; the model was free text, so a typo saved cleanly and surfaced
+    as a 400 on the next paid job instead of under the box it was typed in.
     """
     from app import provider_settings
 
+    fields = body.model_dump(exclude_unset=True)
+    model_check = await _check_new_model(db, fields)
+
     try:
-        changed = provider_settings.apply(db, body.model_dump(exclude_unset=True))
+        changed = provider_settings.apply(db, fields)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     # Names only. The audit middleware records the request without its body,
     # and this response is the one other place a value could escape.
-    return {"changed": changed, "settings": provider_settings.describe(db)}
+    return {
+        "changed": changed,
+        "settings": provider_settings.describe(db),
+        "model_check": model_check,
+    }
+
+
+async def _check_new_model(db: Session, fields: dict) -> dict | None:
+    """Refuse a model OpenRouter does not serve; never refuse on an outage.
+
+    Returns None when no model was sent, so "not checked" and "checked and
+    fine" stay apart in the response.
+    """
+    from app import provider_settings
+    from app.ai import openrouter_client
+
+    model = (fields.get("openrouter_model") or "").strip()
+    if not model:
+        # Empty clears the override and falls back to the environment, which
+        # this route has no business vetoing.
+        return None
+
+    settings = provider_settings.effective(db)
+    # A key sent in the SAME request is the one to authenticate with — an
+    # operator entering a key and a model together must not be told the
+    # catalogue is unreachable because the old key was empty.
+    key = (fields.get("openrouter_api_key") or "").strip() or settings.openrouter_api_key
+    if not key:
+        # With no key the app cannot call OpenRouter for a job either, so
+        # there is nothing this check could protect — and asking anyway buys
+        # a 401 after a timeout the operator waits through.
+        return {"verified": False, "reason": "OpenRouter key is not configured"}
+
+    config = openrouter_client.OpenRouterConfig(
+        api_key=key, model=model, base_url=settings.openrouter_base_url
+    )
+
+    try:
+        check = await openrouter_client.check_model(config, model)
+    except openrouter_client.ModelCatalogUnavailable as e:
+        # Saving anyway is the lesser harm: refusing would make an OpenRouter
+        # outage a lockout. Naming it keeps that from being silent.
+        logger.warning("Could not verify model %r: %s", model, e)
+        return {"verified": False, "reason": str(e)}
+
+    if not check.known:
+        detail = f"OpenRouter does not serve a model called '{model}'."
+        if check.suggestions:
+            detail += " Did you mean: " + ", ".join(check.suggestions) + "?"
+        raise HTTPException(status_code=400, detail=detail)
+    return {"verified": True}
 
 
 @router.get("/brand")

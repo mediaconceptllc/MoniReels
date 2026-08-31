@@ -15,9 +15,11 @@ from app.ai import usage as usage_meter
 from app.ai.openrouter_client import (
     LENGTH_RETRY_MULTIPLIER,
     MAX_TOKENS,
+    ModelCatalogUnavailable,
     OpenRouterClient,
     OpenRouterConfig,
     OpenRouterError,
+    check_model,
 )
 
 SCHEMA = {
@@ -287,3 +289,81 @@ async def test_a_caller_that_knows_its_answer_size_sets_its_own_ceiling():
 
     await _client(handler).complete_json("s", "u", SCHEMA, "n", max_tokens=20000)
     assert seen["body"]["max_tokens"] == 20000
+
+
+# --- the model catalogue --------------------------------------------------
+
+
+def _catalog(payload, status_code: int = 200) -> OpenRouterClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/models")
+        return httpx.Response(status_code, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _config() -> OpenRouterConfig:
+    return OpenRouterConfig(api_key="sk-test", model="m", base_url="https://fake.openrouter/api/v1")
+
+
+@pytest.mark.asyncio
+async def test_a_served_model_is_known():
+    catalog = _catalog({"data": [{"id": "openai/gpt-5"}, {"id": "deepseek/deepseek-v4-flash"}]})
+    check = await check_model(_config(), "openai/gpt-5", catalog)
+    assert check.known is True
+    assert check.suggestions == ()
+
+
+@pytest.mark.asyncio
+async def test_a_near_miss_comes_back_with_what_it_probably_meant():
+    catalog = _catalog({"data": [{"id": "deepseek/deepseek-v4-flash"}, {"id": "openai/gpt-5"}]})
+    check = await check_model(_config(), "deepseek/deepseek-v4-flash-latest", catalog)
+    assert check.known is False
+    assert "deepseek/deepseek-v4-flash" in check.suggestions
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_model_with_nothing_like_it_says_so_without_guessing():
+    """Unknown-with-suggestions and unknown-with-none are different answers.
+    Inventing a nearest match from an unrelated list is worse than none."""
+    catalog = _catalog({"data": [{"id": "openai/gpt-5"}]})
+    check = await check_model(_config(), "zzzzz/not-a-model", catalog)
+    assert check.known is False
+    assert check.suggestions == ()
+
+
+@pytest.mark.asyncio
+async def test_an_http_failure_is_unavailable_not_unknown():
+    """The fix for one is waiting and for the other retyping, so a caller
+    that cannot tell them apart tells the operator the wrong thing."""
+    catalog = _catalog({"error": "nope"}, status_code=500)
+    with pytest.raises(ModelCatalogUnavailable):
+        await check_model(_config(), "openai/gpt-5", catalog)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalogue_is_unavailable_not_every_model_being_wrong():
+    """Reading zero models as "none of them exist" would mark EVERY name
+    unknown and lock the settings page."""
+    catalog = _catalog({"data": []})
+    with pytest.raises(ModelCatalogUnavailable):
+        await check_model(_config(), "openai/gpt-5", catalog)
+
+
+@pytest.mark.asyncio
+async def test_a_shape_it_cannot_read_says_it_was_the_shape():
+    """"The list came back empty" and "I could not read the list" send an
+    operator to different places — OpenRouter's status page, or this parser.
+    The contract here was written without access to the live docs, so the
+    second is the one that will actually happen."""
+    catalog = _catalog({"models": "surprise"})
+    with pytest.raises(ModelCatalogUnavailable, match="shape"):
+        await check_model(_config(), "openai/gpt-5", catalog)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_list_and_a_slug_key_are_both_read():
+    """The contract was written without access to the live docs, so the parse
+    is deliberately loose about shapes that mean the same thing."""
+    catalog = _catalog([{"slug": "openai/gpt-5"}])
+    assert (await check_model(_config(), "openai/gpt-5", catalog)).known is True
