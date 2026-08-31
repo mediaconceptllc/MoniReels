@@ -12,7 +12,13 @@ import httpx
 import pytest
 
 from app.ai import usage as usage_meter
-from app.ai.openrouter_client import MAX_TOKENS, OpenRouterClient, OpenRouterConfig, OpenRouterError
+from app.ai.openrouter_client import (
+    LENGTH_RETRY_MULTIPLIER,
+    MAX_TOKENS,
+    OpenRouterClient,
+    OpenRouterConfig,
+    OpenRouterError,
+)
 
 SCHEMA = {
     "type": "object",
@@ -191,3 +197,93 @@ async def test_attribution_headers_are_optional():
     await _client(handler, app_url="", app_title="").complete_json("s", "u", SCHEMA, "n")
     assert seen["referer"] is None
     assert seen["title"] is None
+
+
+# --- the budget spent before a word was written ---------------------------
+#
+# Production, both calls of one job: HTTP 200, finish_reason=length, message
+# content empty. The first had been generating for four and a half minutes.
+# "Empty completion" was all the log said, and it named neither the ceiling
+# nor what the ceiling went on.
+
+
+def _empty_at_length(reasoning: int | None = None) -> dict:
+    details = {"reasoning_tokens": reasoning} if reasoning is not None else {}
+    return {
+        "model": "test/model",
+        "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 8000, "completion_tokens_details": details},
+    }
+
+
+@pytest.mark.asyncio
+async def test_nothing_within_the_budget_is_retried_once_with_more_room():
+    """A second identical request buys the same silence. A bigger ceiling is
+    the one thing that can change the answer."""
+    caps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(json.loads(request.content)["max_tokens"])
+        if len(caps) == 1:
+            return httpx.Response(200, json=_empty_at_length())
+        return _ok({"items": ["a"]})
+
+    result = await _client(handler).complete_json("s", "u", SCHEMA, "n")
+
+    assert result == {"items": ["a"]}
+    assert caps == [MAX_TOKENS, MAX_TOKENS * LENGTH_RETRY_MULTIPLIER]
+
+
+@pytest.mark.asyncio
+async def test_it_does_not_retry_forever():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_empty_at_length())
+
+    with pytest.raises(OpenRouterError):
+        await _client(handler).complete_json("s", "u", SCHEMA, "n")
+
+
+@pytest.mark.asyncio
+async def test_giving_up_names_the_ceiling_and_what_it_went_on():
+    """Truncated-long-answer and thought-until-there-was-no-room look the same
+    from outside and have different fixes."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_empty_at_length(reasoning=7994))
+
+    with pytest.raises(OpenRouterError) as excinfo:
+        await _client(handler).complete_json("s", "u", SCHEMA, "n")
+
+    message = str(excinfo.value)
+    assert "16000" in message, "the budget it actually gave up on"
+    assert "7994 of them reasoning" in message
+
+
+@pytest.mark.asyncio
+async def test_an_empty_completion_that_is_not_about_room_is_not_retried():
+    """Only `length` says a bigger ceiling could help. Paying for a second
+    call on any other empty answer is paying twice for the same nothing."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}]}
+        )
+
+    with pytest.raises(OpenRouterError, match="content_filter"):
+        await _client(handler).complete_json("s", "u", SCHEMA, "n")
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_knows_its_answer_size_sets_its_own_ceiling():
+    """One constant for every call is what let a request be sent that could
+    not fit its own answer (app.ai.punctuate returns the transcript again)."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _ok({"items": []})
+
+    await _client(handler).complete_json("s", "u", SCHEMA, "n", max_tokens=20000)
+    assert seen["body"]["max_tokens"] == 20000

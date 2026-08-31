@@ -8,9 +8,10 @@ import json
 import httpx
 import pytest
 
-from app.ai.openrouter_client import OpenRouterClient, OpenRouterConfig
+from app.ai import punctuate
+from app.ai.openrouter_client import MAX_TOKENS, OpenRouterClient, OpenRouterConfig
 from app.ai.schema import SuggestionValidationError
-from app.ai.suggest import generate_suggestions
+from app.ai.suggest import generate_suggestions, restore_sentences
 from app.models import Segment, Transcript
 
 
@@ -312,3 +313,170 @@ async def test_generate_suggestions_chunks_flatten_multiple_youtube_plans_from_c
     # And the full transcript must NOT be resent in this final call - that's
     # the whole point of the pick-indices redesign (see build_pick_indices_prompt).
     assert "wwwwwwww" not in pick_bodies[0]
+
+
+# --- the punctuation pass -------------------------------------------------
+
+
+def _punctuated_transcript(n: int, speakers: int = 2) -> Transcript:
+    """What ElevenLabs Scribe delivers: sentences already terminated, and the
+    speaker of each line measured from the audio rather than guessed."""
+    segments = [
+        Segment(
+            id=str(i), start=float(i), end=float(i + 1), text="wwwww.", speaker=f"S{i % speakers + 1}"
+        )
+        for i in range(n)
+    ]
+    return Transcript(
+        language="mn",
+        segments=segments,
+        full_text=" ".join(s.text for s in segments),
+        speakers=speakers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_already_punctuated_transcript_is_never_sent_for_punctuation():
+    """The most expensive call in the job — its answer is the whole transcript
+    again — and Scribe has already done it."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(_schema_name(request))
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
+
+    client = _client(handler)
+    await generate_suggestions(client, _punctuated_transcript(150), duration_sec=150.0)
+    await client.aclose()
+
+    assert "punctuated_transcript" not in seen
+    assert seen == ["suggestions"]
+
+
+@pytest.mark.asyncio
+async def test_punctuated_text_without_measured_speakers_still_runs_the_pass():
+    """Half the job is missing. Punctuation is only half of what this pass is
+    for — a cut that starts on someone else's answer is the other half."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(_schema_name(request))
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
+
+    t = _punctuated_transcript(150).model_copy(update={"speakers": 0})
+    client = _client(handler)
+    await generate_suggestions(client, t, duration_sec=150.0)
+    await client.aclose()
+
+    assert "punctuated_transcript" in seen
+
+
+@pytest.mark.asyncio
+async def test_a_failed_punctuation_pass_keeps_the_speakers_the_recogniser_measured():
+    """A quality step that fails may cost quality. It may not throw away a
+    measurement that was already paid for — the prompt is told how many people
+    are talking, and 0 is a different instruction from 2."""
+    prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        prompts.append(json.loads(request.content)["messages"][-1]["content"])
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
+
+    # Unpunctuated text, so the pass runs — but the speakers are known.
+    t = _transcript(150).model_copy(update={"speakers": 2})
+    client = _client(handler)
+    result = await generate_suggestions(client, t, duration_sec=150.0)
+    await client.aclose()
+
+    assert len(result.shorts) == 3
+    assert "2" in prompts[0], "the suggestions prompt lost the measured speaker count"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_too_big_for_one_answer_is_punctuated_in_chunks():
+    """Straight at restore_sentences: a transcript large enough to need
+    several punctuation calls would also trip the SUGGESTIONS chunker, and
+    that would test two chunkers at once and neither of them clearly."""
+    asks: list[list[int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert _is_punctuation(request)
+        _, _, tail = json.loads(request.content)["messages"][-1]["content"].partition(
+            "Punctuate these"
+        )
+        asks.append([int(r[1 : r.index("]")]) for r in tail.splitlines() if r.startswith("[")])
+        return _punctuation_response(request)
+
+    client = _client(handler)
+    out, speakers = await restore_sentences(client, _transcript(600, text_len=200))
+    await client.aclose()
+
+    assert len(asks) > 1, "one answer that size has never fitted a single call"
+    assert [i for ask in asks for i in ask] == list(range(600)), "every line asked exactly once"
+    assert speakers == 1
+    assert len(out.segments) == 600
+
+
+@pytest.mark.asyncio
+async def test_each_punctuation_call_asks_for_room_for_its_own_answer():
+    """The failure was a fixed ceiling under an answer whose size follows the
+    transcript. Chunking is only half the fix if every call still asks for the
+    same constant."""
+    caps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        caps.append(json.loads(request.content)["max_tokens"])
+        return _punctuation_response(request)
+
+    t = _transcript(600, text_len=200)
+    client = _client(handler)
+    await restore_sentences(client, t)
+    await client.aclose()
+
+    wanted = [punctuate.call_budget(t.segments, chunk) for chunk in punctuate.plan_chunks(t.segments)]
+    assert caps == wanted
+    assert wanted[0] != MAX_TOKENS, "the constant would have passed this test by accident"
+
+
+@pytest.mark.asyncio
+async def test_the_speaker_numbering_is_carried_from_one_chunk_to_the_next():
+    """Each chunk numbers its speakers from 1 on its own. Unless the next one
+    is shown what the last one handed out, "speaker 1" is a different person
+    in every chunk — labels that look complete and are wrong."""
+    prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompts.append(json.loads(request.content)["messages"][-1]["content"])
+        return _punctuation_response(request)
+
+    client = _client(handler)
+    await restore_sentences(client, _transcript(600, text_len=200))
+    await client.aclose()
+
+    assert len(prompts) > 1
+    for prompt in prompts[1:]:
+        assert "already labelled" in prompt, "the chunk was sent with no numbering to continue"
+        assert "S1:" in prompt or "S2:" in prompt, "context carried no speaker numbers"
+
+
+@pytest.mark.asyncio
+async def test_one_failed_chunk_does_not_cost_the_others():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        return _punctuation_response(request)
+
+    client = _client(handler)
+    out, _ = await restore_sentences(client, _transcript(600, text_len=200))
+    await client.aclose()
+
+    assert calls["n"] > 1, "the pass stopped at the first failure"
+    # The failed chunk keeps its lines as transcribed; the rest are punctuated.
+    assert len(out.segments) == 600

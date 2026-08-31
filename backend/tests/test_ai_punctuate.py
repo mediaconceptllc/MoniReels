@@ -1,11 +1,22 @@
 """Restoring sentences and speakers.
 
-One paid call, because both come from the same missing information and a
-second reader would disagree with the first about where a sentence ended.
+One read of the text, because both come from the same missing information and
+a second reader would disagree with the first about where a sentence ended —
+split by length when the answer will not fit one call, never by question.
 """
 from __future__ import annotations
 
-from app.ai.punctuate import apply, build_prompt, words_of
+from app.ai.punctuate import (
+    CHARS_PER_TOKEN,
+    MAX_ANSWER_TOKENS,
+    answer_tokens,
+    apply,
+    build_prompt,
+    call_budget,
+    is_punctuated,
+    plan_chunks,
+    words_of,
+)
 from app.models import Segment, Transcript
 
 
@@ -104,3 +115,87 @@ def test_the_prompt_numbers_every_line():
     prompt = build_prompt(t.segments)
     assert "[0] нэг" in prompt
     assert "[1] хоёр" in prompt
+
+
+# --- chunking -------------------------------------------------------------
+#
+# The pass asks the model to return the transcript again, so its ANSWER is
+# what bounds a call. In production one call was asked to re-emit a whole
+# 28-minute Mongolian transcript inside a fixed ceiling; it generated for four
+# and a half minutes and came back empty, every time.
+
+
+def _long_transcript(lines: int, chars: int) -> Transcript:
+    return _transcript(*["ү" * chars for _ in range(lines)])
+
+
+def test_a_transcript_whose_answer_cannot_fit_one_call_is_split():
+    t = _long_transcript(400, 200)
+    assert answer_tokens(t.segments, list(range(400))) > MAX_ANSWER_TOKENS
+
+    chunks = plan_chunks(t.segments)
+
+    assert len(chunks) > 1, "an answer this size has never fitted a single call"
+    for chunk in chunks:
+        assert answer_tokens(t.segments, chunk) <= MAX_ANSWER_TOKENS
+    # Every line is asked about exactly once, in order.
+    assert [i for chunk in chunks for i in chunk] == list(range(400))
+
+
+def test_a_short_transcript_is_still_one_call():
+    chunks = plan_chunks(_long_transcript(5, 20).segments)
+    assert chunks == [[0, 1, 2, 3, 4]]
+
+
+def test_a_single_line_too_big_for_the_budget_still_gets_asked():
+    """It is the transcript. It cannot be dropped, and the alternative is a
+    loop that never places it."""
+    t = _long_transcript(1, int(MAX_ANSWER_TOKENS * CHARS_PER_TOKEN * 2))
+
+    chunks = plan_chunks(t.segments)
+
+    assert chunks == [[0]]
+    assert call_budget(t.segments, [0]) > answer_tokens(t.segments, [0]), "asked for less than it needs"
+
+
+def test_the_next_chunk_is_shown_the_speaker_numbers_the_last_one_gave_out():
+    """Without this each chunk numbers its speakers from 1 independently and
+    "speaker 1" is a different person in every chunk — labels that look
+    complete and are wrong."""
+    t = _transcript("нэг", "хоёр", "гурав")
+
+    prompt = build_prompt(t.segments, [2], context=[(1, "S2: Хоёр.")])
+
+    assert "S2: Хоёр." in prompt
+    assert "same speaker numbers" in prompt
+    assert "do not return these" in prompt
+    assert "[2] гурав" in prompt
+
+
+def test_a_line_outside_the_chunk_cannot_overwrite_a_settled_one():
+    """A model shown context lines will sometimes helpfully return them too.
+    Accepting that would let a later chunk undo an earlier one."""
+    t = _transcript("нэг", "хоёр")
+    answer = {"speakers": 1, "lines": [_line(0, "Нэг!"), _line(1, "Хоёр.")]}
+
+    out, _, rejected = apply(t, answer, indices=[1])
+
+    assert [s.text for s in out.segments] == ["нэг", "Хоёр."]
+    assert rejected == []
+
+
+# --- is the pass needed at all? -------------------------------------------
+
+
+def test_scribe_style_text_is_recognised_as_already_punctuated():
+    t = _transcript("Тэр өдөр бид уулзсан.", "Чи хаана байсан бэ?", "Мэдэхгүй ээ.")
+    assert is_punctuated(t.segments) is True
+
+
+def test_unpunctuated_asr_text_is_not():
+    t = _transcript("тэр өдөр бид уулзсан", "чи хаана байсан бэ", "мэдэхгүй ээ")
+    assert is_punctuated(t.segments) is False
+
+
+def test_no_segments_is_not_punctuated():
+    assert is_punctuated([]) is False
