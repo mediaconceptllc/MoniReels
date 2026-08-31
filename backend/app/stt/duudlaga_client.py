@@ -317,7 +317,11 @@ class DuudlagaClient(SttProvider):
                 results.extend(outcome)
             if silent:
                 logger.info("%d/%d chunk(s) contained no speech", silent, len(boundaries))
-            return merge_transcripts(results)
+            merged = merge_transcripts(results)
+            # These were measured to decide where to chunk and were then
+            # dropped. They are the cheapest evidence this pipeline has about
+            # where a sentence ended — see app.ai.boundaries.
+            return merged.model_copy(update={"pauses": [start for start, _ in silences]})
         finally:
             for f in workdir.glob("*"):
                 f.unlink(missing_ok=True)

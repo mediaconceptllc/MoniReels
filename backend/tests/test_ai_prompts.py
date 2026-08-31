@@ -303,3 +303,25 @@ def test_split_long_segments_holds_the_cap_when_the_span_divides_exactly():
     # a boundary - the piece count has to grow instead of the cap giving way.
     out = split_long_segments(_one_segment(30.0, " ".join(f"үг{i}" for i in range(23))), max_sec=10.0)
     assert all(e - s <= 10.0 + 1e-6 for s, e, _ in out)
+
+
+# --------------------------------------------------------------------------
+# Speakers. How many people are talking changes what a good cut IS.
+# --------------------------------------------------------------------------
+
+
+def test_nothing_is_claimed_about_speakers_when_nobody_has_looked():
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=0)
+    assert "speaker" not in prompt.lower()
+
+
+def test_a_conversation_is_told_not_to_split_an_exchange():
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=2)
+    assert "2 speakers" in prompt
+    assert "question" in prompt
+
+
+def test_a_monologue_is_not_warned_about_exchanges():
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=1)
+    assert "One speaker" in prompt
+    assert "question" not in prompt
