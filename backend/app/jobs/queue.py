@@ -18,6 +18,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
@@ -164,13 +165,39 @@ def _stale_sec() -> int:
 # ---------------------------------------------------------------------------
 
 
-def reap_stale() -> int:
+@dataclass(frozen=True)
+class Reaped:
+    """What a reaping pass did — as TWO numbers, because it does two things.
+
+    A requeued job runs again on its own. A failed one never will, and the
+    person reading the log is the only one who can start it. Reporting the
+    total under one verb told them the opposite of what happened: the log
+    said "Requeued 1 job" for a `suggest` corpse that had in fact been
+    failed, so the run they were waiting for was never coming.
+    """
+
+    requeued: int = 0
+    failed: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.requeued + self.failed
+
+    def __bool__(self) -> bool:
+        return bool(self.total)
+
+
+def reap_stale() -> Reaped:
     """Return jobs whose worker stopped heartbeating to the queue.
 
     A row sitting in `running` is NOT evidence of life: a worker killed by
     OOM or a redeploy leaves a corpse there forever, and that corpse holds
     its lane slot shut so nothing else in that lane can ever start. Only a
     moving heartbeat counts as alive.
+
+    Retryable work goes back on the queue. Work that bills per attempt is
+    failed instead, saying so — a redeploy must not quietly buy a second
+    transcription.
     """
     cutoff = time.time() - _stale_sec()
     with session_scope() as db:
@@ -180,9 +207,11 @@ def reap_stale() -> int:
                 or_(Job.heartbeat_at.is_(None), Job.heartbeat_at < cutoff),
             )
         ).all()
+        requeued = failed = 0
         for job in stale:
             job.attempts += 1
             if job.no_retry or job.attempts >= MAX_ATTEMPTS:
+                failed += 1
                 job.state = "failed"
                 job.error = (
                     "Worker stopped responding. This job type is not retried automatically "
@@ -193,6 +222,7 @@ def reap_stale() -> int:
                 job.finished_at = time.time()
                 job.dedupe_key = None
             else:
+                requeued += 1
                 job.state = "queued"
                 job.claimed_by = None
                 job.heartbeat_at = None
@@ -200,7 +230,7 @@ def reap_stale() -> int:
                 job.stage = ""
                 job.message = "Requeued after the previous worker stopped responding"
             job.updated_at = time.time()
-        return len(stale)
+        return Reaped(requeued=requeued, failed=failed)
 
 
 def claim(worker_id: str) -> Job | None:

@@ -135,7 +135,7 @@ def test_reap_requeues_a_stale_retryable_job(db, project):
     row.heartbeat_at = time.time() - 10_000
     db.commit()
 
-    assert queue.reap_stale() == 1
+    assert queue.reap_stale() == queue.Reaped(requeued=1, failed=0)
     db.expire_all()
     assert db.get(Job, claimed.id).state == "queued"
 
@@ -147,11 +147,14 @@ def test_reap_fails_a_stale_paid_job_instead_of_recharging(db, project):
     row.heartbeat_at = time.time() - 10_000
     db.commit()
 
-    queue.reap_stale()
+    outcome = queue.reap_stale()
     db.expire_all()
     reaped = db.get(Job, claimed.id)
     assert reaped.state == "failed"
     assert "billed" in (reaped.error or "")
+    # The count has to say FAILED, not "reaped". A caller handed one total
+    # cannot tell the operator whether the work is coming back.
+    assert outcome == queue.Reaped(requeued=0, failed=1)
 
 
 def test_heartbeat_reports_a_cancel_request(db, project):
@@ -200,3 +203,29 @@ def test_payload_survives_the_round_trip_but_is_not_exposed(db, project):
     queue.finish(job_id, state="done", output={"outputs": []})
     db.expire_all()
     assert queue.to_dict(db.get(Job, job_id))["result"] == {"outputs": []}
+
+
+def test_a_reaping_pass_reports_requeued_and_failed_apart(db, project):
+    """One pass can do both at once. Summing them is what let the worker log
+    "Requeued 1 job" for a corpse it had actually failed — and the person
+    reading that waited for a run that was never coming."""
+    queue.enqueue("export", project_id=project.id)
+    retryable = queue.claim("worker-dead")
+    queue.enqueue("transcribe", project_id=project.id)
+    paid = queue.claim("worker-dead")
+    assert retryable is not None and paid is not None, "both must be in flight to be reaped"
+
+    for claimed in (retryable, paid):
+        db.get(Job, claimed.id).heartbeat_at = time.time() - 10_000
+    db.commit()
+
+    outcome = queue.reap_stale()
+
+    assert outcome == queue.Reaped(requeued=1, failed=1)
+    assert outcome.total == 2
+    assert bool(outcome) is True
+
+
+def test_a_pass_that_found_nothing_is_falsy(db, project):
+    """The worker logs only when there is something to say."""
+    assert bool(queue.reap_stale()) is False

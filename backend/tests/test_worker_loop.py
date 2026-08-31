@@ -10,6 +10,7 @@ something to report.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -132,3 +133,46 @@ async def test_housekeeping_survives_a_failing_step(monkeypatch):
     settings = type("S", (), {"job_keep_days": 30, "r2_enabled": False})()
 
     await worker._housekeeping(settings)  # returns, does not raise
+
+
+@pytest.mark.asyncio
+async def test_the_reaping_log_does_not_call_a_failed_job_requeued(monkeypatch, caplog):
+    """The line an operator reads to know whether to do anything.
+
+    A `suggest` corpse from a redeploy is FAILED, not requeued — it bills per
+    attempt, so nothing will start it but a person. Logging one total under
+    "Requeued" told them the run was on its way when it was not.
+    """
+    from app import worker
+
+    monkeypatch.setattr(
+        worker.queue, "reap_stale", lambda: worker.queue.Reaped(requeued=2, failed=1)
+    )
+    monkeypatch.setattr(worker.queue, "purge_old", lambda *_: 0)
+    monkeypatch.setattr(worker, "purge_trash", lambda: 0)
+    settings = type("S", (), {"job_keep_days": 30, "r2_enabled": False})()
+
+    with caplog.at_level(logging.WARNING):
+        await worker._housekeeping(settings)
+
+    lines = [r.getMessage() for r in caplog.records]
+    requeued = [line for line in lines if "Requeued" in line]
+    failed = [line for line in lines if "Failed" in line]
+    assert requeued and "2 job(s)" in requeued[0]
+    assert failed and "1 job(s)" in failed[0]
+    assert "will NOT run again" in failed[0], "the operator is not told to start it"
+
+
+@pytest.mark.asyncio
+async def test_a_pass_with_nothing_to_reap_says_nothing(monkeypatch, caplog):
+    from app import worker
+
+    monkeypatch.setattr(worker.queue, "reap_stale", lambda: worker.queue.Reaped())
+    monkeypatch.setattr(worker.queue, "purge_old", lambda *_: 0)
+    monkeypatch.setattr(worker, "purge_trash", lambda: 0)
+    settings = type("S", (), {"job_keep_days": 30, "r2_enabled": False})()
+
+    with caplog.at_level(logging.WARNING):
+        await worker._housekeeping(settings)
+
+    assert not [r for r in caplog.records if "stopped responding" in r.getMessage()]
