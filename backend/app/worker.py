@@ -500,7 +500,20 @@ async def _housekeeping(settings) -> None:
             if elapsed > SLOW_CHORE_SEC:
                 logger.warning("Housekeeping: %s took %.0fs", label, elapsed)
             if label == "reaping stale jobs" and count:
-                logger.warning("Requeued %d job(s) from workers that stopped responding", count)
+                # Two numbers, never one total. A requeued job runs again by
+                # itself; a failed one needs a person, and reporting both
+                # under "requeued" leaves that person waiting for a run that
+                # is not coming.
+                if count.requeued:
+                    logger.warning(
+                        "Requeued %d job(s) from workers that stopped responding", count.requeued
+                    )
+                if count.failed:
+                    logger.warning(
+                        "Failed %d job(s) from workers that stopped responding — this job type "
+                        "bills per attempt, so it will NOT run again until somebody starts it",
+                        count.failed,
+                    )
     except Exception:  # noqa: BLE001 - housekeeping must never kill the loop
         logger.exception("Housekeeping pass failed")
 
