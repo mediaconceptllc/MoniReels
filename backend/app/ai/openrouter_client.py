@@ -105,20 +105,28 @@ class OpenRouterClient:
 
         cap = max_tokens or MAX_TOKENS
         content, data = await self._attempt(system, user, json_schema, schema_name, temperature, cap)
+        parsed = _parse_or_none(content)
 
-        # Nothing at all, because the budget ran out first. A second identical
-        # request buys the same silence; a bigger ceiling is the one thing that
-        # can change the answer, so it is spent here rather than failing the job.
-        if not content and _finish_reason(data) == "length":
+        # The budget ran out before a usable answer existed. Whether that left
+        # nothing at all or a JSON object cut off mid-string is a difference in
+        # appearance only — both are "did not fit", and a bigger ceiling is the
+        # one thing that can change either. Splitting them is what let a
+        # truncated answer fail outright while the log line beside it said, in
+        # so many words, that it had hit the token limit.
+        if parsed is None and _finish_reason(data) == "length":
             wider = cap * LENGTH_RETRY_MULTIPLIER
             logger.warning(
-                "%s returned nothing within %d tokens (%s); retrying once at %d.",
-                self._config.model, cap, _spend(data), wider,
+                "%s did not fit an answer in %d tokens (%s, %s); retrying once at %d.",
+                self._config.model, cap, _shape_of(content), _spend(data), wider,
             )
             content, data = await self._attempt(
                 system, user, json_schema, schema_name, temperature, wider
             )
             cap = wider
+            parsed = _parse_or_none(content)
+
+        if parsed is not None:
+            return parsed
 
         if not content:
             raise OpenRouterError(
@@ -126,12 +134,20 @@ class OpenRouterClient:
                 f"(finish_reason={_finish_reason(data)}, budget={cap} tokens, {_spend(data)})"
             )
 
+        # Every failure past here names the budget AND what the budget went on.
+        # Without the second half, "hit the token limit" cannot say whether the
+        # answer was too long to fit or the model thought until there was no
+        # room left to write one — and those have different fixes.
+        truncated = _finish_reason(data) == "length"
+        hint = f" (hit the {cap}-token limit — {_spend(data)})" if truncated else ""
         try:
-            return json.loads(content)
+            # Re-parsed only to raise FROM the decode error, so the traceback
+            # still names the character it gave up on. Cheap, and only on the
+            # way out.
+            json.loads(content)
         except json.JSONDecodeError as e:
-            truncated = _finish_reason(data) == "length"
-            hint = f" (hit the {cap}-token limit — output is truncated)" if truncated else ""
             raise OpenRouterError(f"Response was not valid JSON{hint}: {content[:500]}") from e
+        raise OpenRouterError(f"Response was not valid JSON{hint}: {content[:500]}")
 
     async def _attempt(
         self,
@@ -401,6 +417,26 @@ def _strip_array_size_constraints(schema: object) -> object:
     if isinstance(schema, list):
         return [_strip_array_size_constraints(item) for item in schema]
     return schema
+
+
+def _parse_or_none(content: str) -> dict | None:
+    """The answer, or None if there isn't a whole one yet.
+
+    Parsing is the only honest test of "did the model finish": a `length`
+    finish on a complete object is harmless, and a `stop` finish on a broken
+    one is still broken.
+    """
+    if not content:
+        return None
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+def _shape_of(content: str) -> str:
+    """What came back, for the log line that decides whether to pay again."""
+    return "nothing" if not content else f"{len(content)} chars of unparseable JSON"
 
 
 def _finish_reason(data: dict) -> str | None:
