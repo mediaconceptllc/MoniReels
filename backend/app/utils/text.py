@@ -75,7 +75,18 @@ def split_span(
 
     # An even split can still overshoot by part of one word; one more piece is
     # the fix. Bounded by one piece per word.
+    #
+    # Count UP from the number asked for, never from the number returned.
+    # lay_out skips groups it left empty, so it can hand back fewer pieces
+    # than it was asked for — and re-deriving the next request from the
+    # length of the result then asks for the same number again, gets the same
+    # answer, and never advances. MEASURED: a span of words sized
+    # [1, 3, 80, 1] does exactly that, and one production transcribe sat on it
+    # burning a core with the job alive and no error, because the spin is
+    # inside a worker thread and the heartbeat kept moving.
     pieces = lay_out(max(1, wanted))
-    while len(pieces) < len(words) and any(over(e - s, len(t)) for s, e, t in pieces):
-        pieces = lay_out(len(pieces) + 1)
+    for n in range(max(1, wanted) + 1, len(words) + 1):
+        if not any(over(e - s, len(t)) for s, e, t in pieces):
+            break
+        pieces = lay_out(n)
     return pieces
