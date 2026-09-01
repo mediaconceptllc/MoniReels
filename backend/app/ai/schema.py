@@ -21,9 +21,10 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Matches app.ai.prompts.SYSTEM_PROMPT's stated cutting rule ("35-60 seconds.
-# Never exceed 60") — kept here too since this is the backend backstop that
-# actually enforces it, independent of whether the model followed the prompt.
+# The window a short must land in. Defined HERE and read by
+# app.ai.prompts.SYSTEM_PROMPT, so the length the model is asked for and the
+# length this module enforces cannot drift apart — they used to be two
+# hand-matched literals, and the YouTube pair beside them did drift.
 MIN_SHORT_DURATION = 35.0
 MAX_SHORT_DURATION = 60.0
 MIN_CUTS = 3
@@ -32,6 +33,9 @@ REQUIRED_SHORT_COUNT = 3
 VALID_ROLES = {"hook", "context", "proof", "payoff"}
 
 YOUTUBE_MIN_VIDEO_DURATION_SEC = 1200.0  # 20 minutes
+# Same contract as the shorts above: app.ai.prompts states this window to the
+# model and this module holds it to it. Stated as "about 600 seconds" with no
+# range, production returned 718.8s and 492.7s — both outside, neither refused.
 YOUTUBE_TARGET_DURATION_SEC = 600.0  # 10 minutes, per idea
 YOUTUBE_TARGET_TOLERANCE = 0.10
 REQUIRED_YOUTUBE_COUNT = 3  # only enforced when the video is >= YOUTUBE_MIN_VIDEO_DURATION_SEC

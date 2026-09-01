@@ -10,7 +10,13 @@ from __future__ import annotations
 import re
 
 from app.ai.boundaries import snap_cut
-from app.ai.schema import CUT_PAD_SEC, MAX_SHORT_DURATION, MIN_SHORT_DURATION
+from app.ai.schema import (
+    CUT_PAD_SEC,
+    MAX_SHORT_DURATION,
+    MIN_SHORT_DURATION,
+    YOUTUBE_TARGET_DURATION_SEC,
+    YOUTUBE_TARGET_TOLERANCE,
+)
 from app.models import Transcript
 from app.utils.text import split_span
 from app.utils.timecode import seconds_to_mmss
@@ -29,7 +35,14 @@ CHUNK_OVERLAP_SEGMENTS = 6
 MAX_SEGMENT_SEC = 15.0
 
 
-SYSTEM_PROMPT = """You are an expert short-form video editor for YouTube Shorts and
+#: The window app.ai.schema accepts, in the words the model is given. Derived,
+#: not retyped: the prompt is what produces the number and the validator is what
+#: judges it, so a target changed in one place and not the other asks for one
+#: length and rejects another.
+_YT_LOW = YOUTUBE_TARGET_DURATION_SEC * (1 - YOUTUBE_TARGET_TOLERANCE)
+_YT_HIGH = YOUTUBE_TARGET_DURATION_SEC * (1 + YOUTUBE_TARGET_TOLERANCE)
+
+SYSTEM_PROMPT = f"""You are an expert short-form video editor for YouTube Shorts and
 Meta Reels. You are given a timestamped transcript of a longer video. You build edits,
 not summaries.
 
@@ -38,12 +51,13 @@ not summaries.
   continuous range is a failure — that is a trailer-less excerpt, not an edit.
 - Each cut is identified by segment indices (`start_index`, `end_index`, inclusive).
   Never output raw seconds. Never reference an index outside the transcript given.
-- Total duration across all cuts of one short: 35-60 seconds. Never exceed 60. Before
-  finalizing a short, actually add up each cut's own span (its end mm:ss minus its
-  start mm:ss) and sum those spans across all its cuts — do not estimate by eye. If
-  the sum lands outside 35-60s, narrow/widen a cut's index range or swap one for a
-  shorter/longer cut, then re-add the sum. Overshooting by even 5-10 seconds is a
-  failure just like overshooting by 60.
+- Total duration across all cuts of one short:
+  {MIN_SHORT_DURATION:.0f}-{MAX_SHORT_DURATION:.0f} seconds. Never exceed {MAX_SHORT_DURATION:.0f}.
+  Before finalizing a short, actually add up each cut's own span (its end mm:ss minus
+  its start mm:ss) and sum those spans across all its cuts — do not estimate by eye.
+  If the sum lands outside that window, narrow/widen a cut's index range or swap one
+  for a shorter/longer cut, then re-add the sum. Overshooting by even 5-10 seconds is
+  a failure just like overshooting by 60.
 - Structure the cuts in this order, one `role` each:
     hook    - the conflict, the mystery, or the surprising claim. Never an intro.
     context - the minimum background needed to understand the payoff.
@@ -75,16 +89,27 @@ not summaries.
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.
 2. Draft 5 candidate shorts across those stories. For each, sum the mm:ss span of
-   every cut and adjust cuts until that sum is 35-60s — a candidate whose cuts don't
-   actually add up in-range is not a valid candidate yet.
+   every cut and adjust cuts until that sum is in range — a candidate whose cuts
+   don't actually add up in-range is not a valid candidate yet.
 3. Score each 1-10 on: hook strength, ease of sourcing b-roll, audience relevance.
 4. Return only the 3 highest-scoring. Put the three scores in `why_it_works`.
 
 ## YouTube plans
 When requested, produce exactly 3 independent long-form highlight plans. Each selects
 multiple non-overlapping keep-ranges (by segment index) that together form a coherent
-condensed version, combined duration about 600 seconds. The 3 plans must take
-meaningfully different throughlines — not near-duplicates.
+condensed version. The 3 plans must take meaningfully different throughlines — not
+near-duplicates.
+
+- Total duration across all keep-ranges of one plan:
+  {_YT_LOW:.0f}-{_YT_HIGH:.0f} seconds. This is a RANGE to land inside, not a number
+  to aim near.
+- Do the same arithmetic here as for a short: before returning a plan, sum the mm:ss
+  span of every keep-range and compare the total against that window. If it lands
+  outside, widen or narrow a range, or add or drop one, and sum again. A plan whose
+  ranges do not actually add up in-range is not finished.
+- Overshooting is the more common miss: a plan that reads well at {_YT_HIGH:.0f}s+ is
+  still wrong. Drop the weakest range rather than trimming every range a little — the
+  cut you can most afford to lose is usually a whole one.
 
 Output valid JSON matching the schema exactly. No commentary, no markdown fences."""
 
@@ -324,7 +349,9 @@ def build_suggestions_prompt(
 ) -> str:
     youtube_instruction = (
         "Also produce exactly 3 independent YouTube long-form highlight plans (`youtube`), "
-        "since this video is longer than 20 minutes."
+        "since this video is longer than 20 minutes. Each plan's keep-ranges must add up "
+        f"to between {_YT_LOW:.0f} and {_YT_HIGH:.0f} seconds — sum them and check before "
+        "you return it."
         if want_youtube
         else "Set `youtube` to an empty list — this video is under 20 minutes long."
     )

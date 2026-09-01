@@ -1,7 +1,9 @@
 from itertools import pairwise
 
+from app.ai import schema
 from app.ai.prompts import (
     MAX_SEGMENT_SEC,
+    SYSTEM_PROMPT,
     build_candidates_prompt,
     build_pick_indices_prompt,
     build_segment_lines,
@@ -325,3 +327,52 @@ def test_a_monologue_is_not_warned_about_exchanges():
     prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=1)
     assert "One speaker" in prompt
     assert "question" not in prompt
+
+
+# --- the duration the prompt asks for vs the one the validator accepts ------
+#
+# Production, both YouTube plans of one job: 718.8s and 492.7s against a
+# 600s +/-10% target. The shorts landed in range and the one that did not was
+# repaired; the YouTube plans were told "about 600 seconds" with no range and
+# no arithmetic step, and nothing failed them.
+
+
+def test_the_prompt_asks_for_the_window_the_validator_accepts():
+    """schema.py used to carry the comment "Matches app.ai.prompts.
+    SYSTEM_PROMPT's stated cutting rule" — an admission that two numbers were
+    kept in step by hand. A target changed in one place and not the other asks
+    for one length and rejects another."""
+    low = schema.YOUTUBE_TARGET_DURATION_SEC * (1 - schema.YOUTUBE_TARGET_TOLERANCE)
+    high = schema.YOUTUBE_TARGET_DURATION_SEC * (1 + schema.YOUTUBE_TARGET_TOLERANCE)
+    # What the model reads, not how the source file happens to wrap.
+    rendered = " ".join(SYSTEM_PROMPT.split())
+
+    assert f"{low:.0f}-{high:.0f} seconds" in rendered
+    assert f"{schema.MIN_SHORT_DURATION:.0f}-{schema.MAX_SHORT_DURATION:.0f} seconds" in rendered
+    # The old hardcoded literal must not survive alongside the derived ones.
+    assert "about 600 seconds" not in rendered
+
+
+def test_the_youtube_rule_asks_for_the_arithmetic_the_shorts_rule_asks_for():
+    """The shorts get "sum every cut and adjust until it lands in range" and
+    land in range. The YouTube plans got a target to aim near, and missed."""
+    youtube_rule = " ".join(SYSTEM_PROMPT.split("## YouTube plans")[1].split())
+
+    assert "sum the mm:ss" in youtube_rule, "no arithmetic step"
+    assert "RANGE to land inside" in youtube_rule, "still phrased as a number to approach"
+
+
+def test_the_request_itself_carries_the_range_not_just_the_system_prompt():
+    """A rule stated once in a long system prompt and never again is the rule
+    most likely to be dropped on a long transcript."""
+    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=1700.0, want_youtube=True)
+    low = schema.YOUTUBE_TARGET_DURATION_SEC * (1 - schema.YOUTUBE_TARGET_TOLERANCE)
+
+    assert f"{low:.0f}" in asked
+    assert "sum them and check" in asked
+
+
+def test_a_short_video_is_told_to_skip_youtube_without_a_duration_rule():
+    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=300.0, want_youtube=False)
+    assert "empty list" in asked
+    assert "sum them and check" not in asked
