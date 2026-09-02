@@ -26,6 +26,9 @@ os.environ.pop("R2_ACCESS_KEY_ID", None)
 os.environ.pop("R2_SECRET_ACCESS_KEY", None)
 os.environ.pop("R2_BUCKET", None)
 
+import signal  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
 import pytest  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
@@ -34,6 +37,32 @@ from app.dbmodels import Base  # noqa: E402
 
 DB_CONFIGURED = bool(os.environ.get("DATABASE_URL"))
 requires_db = pytest.mark.skipif(not DB_CONFIGURED, reason="DATABASE_URL is not set")
+
+
+@contextmanager
+def must_finish(what: str, seconds: int = 5):
+    """Turn a hang into a failure.
+
+    A loop that never terminates does not fail a suite, it STOPS one — in CI,
+    with no output and no failing test name. That is exactly how the two bugs
+    this guards reached production: split_span spun on one word shape, and
+    both forced-cut loops stand still if their chunk ceiling drops to their
+    overlap. Neither raised, neither logged, neither timed out.
+
+    Shared rather than copied: it is the same alarm either way, and a second
+    copy is a second place to forget to reset the handler.
+    """
+
+    def _bang(signum, frame):
+        raise AssertionError(f"{what} did not return within {seconds}s — it is looping")
+
+    previous = signal.signal(signal.SIGALRM, _bang)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.fixture(scope="session", autouse=True)
