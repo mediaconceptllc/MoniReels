@@ -29,6 +29,7 @@ import httpx
 
 from app.ai import usage as usage_meter
 from app.ai.llm_client import LLMError
+from app.utils import provider_errors
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -259,8 +260,18 @@ class OpenRouterClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
+            # The body goes to the log, the message goes to the user. It is
+            # the operator who needs the provider's internals; the person
+            # whose job failed needs the sentence explaining why.
+            logger.warning(
+                "OpenRouter answered %s: %s",
+                e.response.status_code,
+                e.response.text[:600],
+            )
+            detail = provider_errors.read_error(e.response).message
             raise OpenRouterError(
-                f"OpenRouter request failed ({e.response.status_code}): {e.response.text[:600]}"
+                f"OpenRouter request failed ({e.response.status_code})"
+                + (f": {detail}" if detail else "")
             ) from e
         except httpx.TimeoutException as e:
             raise OpenRouterError(

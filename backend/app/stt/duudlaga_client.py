@@ -46,6 +46,7 @@ from app.stt.chunking import (
     text_to_transcript,
     wav_duration_sec,
 )
+from app.utils import provider_errors
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -591,16 +592,10 @@ def _error_from_response(response: httpx.Response) -> DuudlagaError:
     retryable and a third (a daily cap) is not, and a 422 is not an error at
     all. Branching on the status alone gets all three wrong.
     """
-    code: str | None = None
-    detail: str | None = None
-    try:
-        body = response.json()
-        if isinstance(body, dict):
-            error = body.get("error") if isinstance(body.get("error"), dict) else body
-            code = error.get("code") if isinstance(error, dict) else None
-            detail = error.get("message") if isinstance(error, dict) else None
-    except ValueError:
-        pass
+    # Read through the shared reader rather than inline: three clients parse
+    # a provider's error body and the rule for what may leave it is one rule.
+    read = provider_errors.read_error(response)
+    code, detail = read.code, read.message
 
     retry_after = _retry_after_seconds(response)
     message = CODE_MESSAGES.get(code or "", "")
