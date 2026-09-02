@@ -24,6 +24,7 @@ import type {
   Me,
   Output,
   Project,
+  ProjectDocument,
   ProjectSummary,
   ProviderSettings,
   ProviderSettingsPatch,
@@ -167,8 +168,13 @@ export const api = {
       method: "POST",
     }),
 
+  /** Answers with the saved document — NOT the full project: `media` and
+   *  `jobs` are assembled per read and this route does not build them. */
   updateProject: (id: string, patch: Record<string, unknown>) =>
-    request<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+    request<ProjectDocument>(`/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
 
   deleteProject: (id: string) =>
     request<{ deleted: boolean }>(`/projects/${id}`, { method: "DELETE" }),

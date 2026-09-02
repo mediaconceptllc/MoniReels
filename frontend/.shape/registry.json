@@ -1,0 +1,19 @@
+{
+  "cut_roles": {
+    "context": 0,
+    "hook": 0,
+    "payoff": 0,
+    "proof": 0
+  },
+  "job_kinds": {
+    "export": 0,
+    "export_all": 0,
+    "import_video": 0,
+    "suggest": 0,
+    "transcribe": 0
+  },
+  "output_kinds": {
+    "reel": 0,
+    "youtube": 0
+  }
+}

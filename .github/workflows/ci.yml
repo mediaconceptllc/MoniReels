@@ -86,6 +86,19 @@ jobs:
       - name: Tests
         run: pytest tests -q
 
+      # The tests just REWROTE frontend/.shape from the live API. If that
+      # differs from what is committed, an API response changed shape and the
+      # frontend's copy of the contract was never updated — so the frontend
+      # job would go on checking itself against a fixture from before the
+      # change and pass. This is the step that makes the whole mechanism
+      # honest; without it the fixtures can quietly go stale forever.
+      - name: The captured API shapes are up to date
+        run: |
+          if ! git diff --exit-code -- ../frontend/.shape; then
+            echo "::error::An API response changed shape. Run pytest tests/test_frontend_shape.py and commit frontend/.shape/"
+            exit 1
+          fi
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -108,6 +121,13 @@ jobs:
       - run: npm run typecheck
 
       - run: npm run lint
+
+      # The only step that looks at BOTH halves. typecheck, lint and build all
+      # ask whether the frontend agrees with itself; this one assigns the
+      # backend's real JSON to the types the components read, so a renamed
+      # field fails here instead of rendering as `undefined` for a user.
+      # The fixtures are committed — see frontend/.shape/README.md.
+      - run: npm run verify-shape
 
       # A placeholder is fine: NEXT_PUBLIC_API_URL is baked in at build time
       # and nothing here calls it. What is being checked is that the build
