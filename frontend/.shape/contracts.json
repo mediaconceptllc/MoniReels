@@ -1,0 +1,676 @@
+{
+  "brand": {
+    "intro": null,
+    "logo": {
+      "key": "",
+      "url": ""
+    },
+    "outro": null,
+    "storage": false
+  },
+  "brand_empty": {
+    "intro": null,
+    "logo": null,
+    "outro": null,
+    "storage": false
+  },
+  "brand_saved": {
+    "intro": null,
+    "logo": {
+      "key": "",
+      "url": ""
+    },
+    "outro": null,
+    "storage": false
+  },
+  "brand_upload_url": {
+    "key": "",
+    "url": ""
+  },
+  "create_project": {
+    "project_id": "",
+    "upload_expires_in_s": 0,
+    "upload_key": "",
+    "upload_url": ""
+  },
+  "export_all_started": {
+    "job_id": ""
+  },
+  "export_started": {
+    "job_id": ""
+  },
+  "fonts": {
+    "default": "",
+    "families": [
+      ""
+    ]
+  },
+  "job": {
+    "attempts": 0,
+    "created_at": 0.0,
+    "error": null,
+    "finished_at": 0.0,
+    "job_id": "",
+    "kind": "transcribe",
+    "message": "",
+    "progress": 0.0,
+    "project_id": "",
+    "result": {
+      "*": 0
+    },
+    "stage": "",
+    "state": "done",
+    "updated_at": 0.0
+  },
+  "job_canceled": {
+    "canceled": false,
+    "reason": ""
+  },
+  "job_failed": {
+    "attempts": 0,
+    "created_at": 0.0,
+    "error": "",
+    "finished_at": null,
+    "job_id": "",
+    "kind": "export",
+    "message": "",
+    "progress": 0.0,
+    "project_id": "",
+    "result": null,
+    "stage": "",
+    "state": "failed",
+    "updated_at": 0.0
+  },
+  "me": {
+    "id": "",
+    "role": "admin",
+    "username": ""
+  },
+  "output_deleted": {
+    "deleted": false
+  },
+  "outputs": [
+    {
+      "created_at": 0.0,
+      "download_url": "",
+      "duration_sec": 0.0,
+      "id": "",
+      "kind": "reel",
+      "play_url": "",
+      "size_bytes": 0,
+      "srt_url": "",
+      "title": ""
+    },
+    {
+      "created_at": 0.0,
+      "download_url": "",
+      "duration_sec": 0.0,
+      "id": "",
+      "kind": "youtube",
+      "play_url": "",
+      "size_bytes": 0,
+      "srt_url": null,
+      "title": ""
+    }
+  ],
+  "project": {
+    "clips": [
+      {
+        "end": 0.0,
+        "id": "",
+        "order": 0,
+        "source_path": "",
+        "start": 0.0,
+        "transition_in": null
+      }
+    ],
+    "created_at": 0.0,
+    "export": {
+      "burn_subtitles": false,
+      "crf": 0,
+      "logo": {
+        "enabled": false,
+        "margin_pct": 0.0,
+        "opacity": 0.0,
+        "position": "top-right",
+        "width_pct": 0.0
+      },
+      "orientation": "portrait",
+      "portrait_fill": "blur",
+      "preset": "",
+      "use_intro": false,
+      "use_outro": false,
+      "write_srt": false
+    },
+    "id": "",
+    "jobs": [
+      {
+        "attempts": 0,
+        "created_at": 0.0,
+        "error": "",
+        "finished_at": null,
+        "job_id": "",
+        "kind": "export",
+        "message": "",
+        "progress": 0.0,
+        "project_id": "",
+        "result": null,
+        "stage": "",
+        "state": "failed",
+        "updated_at": 0.0
+      },
+      {
+        "attempts": 0,
+        "created_at": 0.0,
+        "error": null,
+        "finished_at": 0.0,
+        "job_id": "",
+        "kind": "transcribe",
+        "message": "",
+        "progress": 0.0,
+        "project_id": "",
+        "result": {
+          "*": 0
+        },
+        "stage": "",
+        "state": "done",
+        "updated_at": 0.0
+      }
+    ],
+    "media": {
+      "expires_in_s": 0,
+      "source_url": "",
+      "thumbnail_url": ""
+    },
+    "name": "",
+    "schema_version": 0,
+    "subtitle_style": {
+      "enabled": false,
+      "font_family": "",
+      "font_size": 0,
+      "margin_v": 0,
+      "outline_color": "",
+      "outline_width": 0.0,
+      "position": "bottom",
+      "primary_color": "",
+      "shadow": 0.0
+    },
+    "suggestions": {
+      "shorts": [
+        {
+          "b_roll": [
+            ""
+          ],
+          "caption": "",
+          "cuts": [
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "context",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "hook",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "payoff",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "proof",
+              "start": 0.0
+            }
+          ],
+          "hashtags": [
+            ""
+          ],
+          "hook_quote": "",
+          "hook_text": "",
+          "id": "",
+          "on_screen_texts": [
+            ""
+          ],
+          "title": "",
+          "why_it_works": ""
+        }
+      ],
+      "youtube": [
+        {
+          "ranges": [
+            {
+              "end": 0.0,
+              "reason": "",
+              "start": 0.0
+            }
+          ],
+          "throughline": "",
+          "title": "",
+          "total_duration": 0.0
+        }
+      ]
+    },
+    "transcript": {
+      "full_text": "",
+      "language": "",
+      "pauses": [],
+      "segments": [
+        {
+          "end": 0.0,
+          "id": "",
+          "speaker": "",
+          "start": 0.0,
+          "text": "",
+          "words": []
+        },
+        {
+          "end": 0.0,
+          "id": "",
+          "speaker": null,
+          "start": 0.0,
+          "text": "",
+          "words": []
+        }
+      ],
+      "speakers": 0,
+      "timings_estimated": false
+    },
+    "transition": {
+      "duration": 0.0,
+      "type": ""
+    },
+    "updated_at": 0.0,
+    "video": {
+      "audio_key": "",
+      "codec": "",
+      "duration_sec": 0.0,
+      "fps": 0.0,
+      "has_audio": false,
+      "height": 0,
+      "source_key": "",
+      "thumbnail_key": "",
+      "width": 0
+    }
+  },
+  "project_deleted": {
+    "deleted": false,
+    "objects_removed": 0
+  },
+  "project_patched": {
+    "clips": [
+      {
+        "end": 0.0,
+        "id": "",
+        "order": 0,
+        "source_path": "",
+        "start": 0.0,
+        "transition_in": null
+      }
+    ],
+    "created_at": 0.0,
+    "export": {
+      "burn_subtitles": false,
+      "crf": 0,
+      "logo": {
+        "enabled": false,
+        "margin_pct": 0.0,
+        "opacity": 0.0,
+        "position": "top-right",
+        "width_pct": 0.0
+      },
+      "orientation": "portrait",
+      "portrait_fill": "blur",
+      "preset": "",
+      "use_intro": false,
+      "use_outro": false,
+      "write_srt": false
+    },
+    "id": "",
+    "name": "",
+    "schema_version": 0,
+    "subtitle_style": {
+      "enabled": false,
+      "font_family": "",
+      "font_size": 0,
+      "margin_v": 0,
+      "outline_color": "",
+      "outline_width": 0.0,
+      "position": "bottom",
+      "primary_color": "",
+      "shadow": 0.0
+    },
+    "suggestions": {
+      "shorts": [
+        {
+          "b_roll": [
+            ""
+          ],
+          "caption": "",
+          "cuts": [
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "context",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "hook",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "payoff",
+              "start": 0.0
+            },
+            {
+              "end": 0.0,
+              "reason": "",
+              "role": "proof",
+              "start": 0.0
+            }
+          ],
+          "hashtags": [
+            ""
+          ],
+          "hook_quote": "",
+          "hook_text": "",
+          "id": "",
+          "on_screen_texts": [
+            ""
+          ],
+          "title": "",
+          "why_it_works": ""
+        }
+      ],
+      "youtube": [
+        {
+          "ranges": [
+            {
+              "end": 0.0,
+              "reason": "",
+              "start": 0.0
+            }
+          ],
+          "throughline": "",
+          "title": "",
+          "total_duration": 0.0
+        }
+      ]
+    },
+    "transcript": {
+      "full_text": "",
+      "language": "",
+      "pauses": [],
+      "segments": [
+        {
+          "end": 0.0,
+          "id": "",
+          "speaker": "",
+          "start": 0.0,
+          "text": "",
+          "words": []
+        },
+        {
+          "end": 0.0,
+          "id": "",
+          "speaker": null,
+          "start": 0.0,
+          "text": "",
+          "words": []
+        }
+      ],
+      "speakers": 0,
+      "timings_estimated": false
+    },
+    "transition": {
+      "duration": 0.0,
+      "type": ""
+    },
+    "updated_at": 0.0,
+    "video": {
+      "audio_key": "",
+      "codec": "",
+      "duration_sec": 0.0,
+      "fps": 0.0,
+      "has_audio": false,
+      "height": 0,
+      "source_key": "",
+      "thumbnail_key": "",
+      "width": 0
+    }
+  },
+  "projects": [
+    {
+      "created_at": 0.0,
+      "duration_sec": 0.0,
+      "has_suggestions": false,
+      "has_transcript": false,
+      "has_video": false,
+      "id": "",
+      "n_outputs": 0,
+      "name": "",
+      "updated_at": 0.0
+    }
+  ],
+  "provider_settings": {
+    "duudlaga_api_key": {
+      "hint": "",
+      "set": false,
+      "source": "unset"
+    },
+    "elevenlabs_api_key": {
+      "hint": "",
+      "set": false,
+      "source": "unset"
+    },
+    "openrouter_api_key": {
+      "hint": "",
+      "set": false,
+      "source": "unset"
+    },
+    "openrouter_model": {
+      "hint": "",
+      "set": false,
+      "source": "env"
+    },
+    "stt_provider": {
+      "hint": "",
+      "set": false,
+      "source": "env"
+    }
+  },
+  "provider_settings_saved": {
+    "changed": [
+      ""
+    ],
+    "model_check": {
+      "verified": false
+    },
+    "settings": {
+      "duudlaga_api_key": {
+        "hint": "",
+        "set": false,
+        "source": "db"
+      },
+      "elevenlabs_api_key": {
+        "hint": "",
+        "set": false,
+        "source": "unset"
+      },
+      "openrouter_api_key": {
+        "hint": "",
+        "set": false,
+        "source": "db"
+      },
+      "openrouter_model": {
+        "hint": "",
+        "set": false,
+        "source": "db"
+      },
+      "stt_provider": {
+        "hint": "",
+        "set": false,
+        "source": "db"
+      }
+    }
+  },
+  "providers": {
+    "capabilities": [
+      {
+        "blocked": "",
+        "configured": false,
+        "implemented": false,
+        "label": "",
+        "name": "tts",
+        "powers": "",
+        "provider": "",
+        "ready": false
+      },
+      {
+        "blocked": null,
+        "configured": false,
+        "implemented": false,
+        "label": "",
+        "name": "llm",
+        "powers": "",
+        "provider": "",
+        "ready": false
+      },
+      {
+        "blocked": null,
+        "configured": false,
+        "implemented": false,
+        "label": "",
+        "name": "stt",
+        "powers": "",
+        "provider": "",
+        "ready": false
+      }
+    ],
+    "openrouter": {
+      "configured": false,
+      "model": ""
+    },
+    "storage": {
+      "bucket": "",
+      "configured": false,
+      "error": null
+    },
+    "stt": {
+      "configured": false,
+      "error": "",
+      "ok": false,
+      "provider": ""
+    },
+    "stt_providers": [
+      ""
+    ]
+  },
+  "queue": {
+    "counts": {
+      "*": 0
+    },
+    "disk": {
+      "free_bytes": 0,
+      "min_free_bytes": 0,
+      "total_bytes": 0,
+      "used_bytes": 0
+    },
+    "live_workers": 0,
+    "stalled": false,
+    "waiting": 0
+  },
+  "ranges_selected": {
+    "clips": 0
+  },
+  "readiness": {
+    "capabilities": [
+      {
+        "blocked": "",
+        "label": "",
+        "name": "tts",
+        "ready": false
+      },
+      {
+        "blocked": null,
+        "label": "",
+        "name": "llm",
+        "ready": false
+      },
+      {
+        "blocked": null,
+        "label": "",
+        "name": "stt",
+        "ready": false
+      }
+    ]
+  },
+  "suggest_started": {
+    "job_id": ""
+  },
+  "template_deleted": {
+    "deleted": ""
+  },
+  "template_saved": {
+    "created_at": 0.0,
+    "id": "",
+    "name": "",
+    "style": {
+      "enabled": false,
+      "font_family": "",
+      "font_size": 0,
+      "margin_v": 0,
+      "outline_color": "",
+      "outline_width": 0.0,
+      "position": "bottom",
+      "primary_color": "",
+      "shadow": 0.0
+    }
+  },
+  "templates": {
+    "templates": [
+      {
+        "created_at": 0.0,
+        "id": "",
+        "name": "",
+        "style": {
+          "enabled": false,
+          "font_family": "",
+          "font_size": 0,
+          "margin_v": 0,
+          "outline_color": "",
+          "outline_width": 0.0,
+          "position": "bottom",
+          "primary_color": "",
+          "shadow": 0.0
+        }
+      }
+    ]
+  },
+  "token": {
+    "expires_in_s": 0,
+    "role": "admin",
+    "token": "",
+    "username": ""
+  },
+  "transcribe_started": {
+    "job_id": ""
+  },
+  "transcript_updated": {
+    "unknown_ids": [],
+    "updated": 0
+  },
+  "upload_complete": {
+    "job_id": "",
+    "project_id": ""
+  }
+}

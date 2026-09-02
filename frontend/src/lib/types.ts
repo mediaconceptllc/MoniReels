@@ -190,7 +190,21 @@ export interface ProjectSummary {
   n_outputs: number;
 }
 
-export interface Project {
+/**
+ * The stored document, and nothing else.
+ *
+ * A write path answers with exactly this: it confirms what was saved. It does
+ * NOT carry `media` or `jobs`, because both are assembled per read — the URLs
+ * are freshly signed and the job list is a query — and re-signing a URL the
+ * client already holds on every settings save buys nothing.
+ *
+ * Separated from `Project` rather than left implied: `PATCH /projects/{id}`
+ * was declared as returning a whole `Project`, so a caller reading
+ * `.media.source_url` off the result would have got `undefined` at runtime
+ * with nothing failing anywhere earlier. Found by `npm run verify-shape` on
+ * its first run.
+ */
+export interface ProjectDocument {
   schema_version: number;
   id: string;
   name: string;
@@ -203,6 +217,10 @@ export interface Project {
   transition: TransitionSetting;
   subtitle_style: SubtitleStyle;
   export: ExportSettings;
+}
+
+/** What the detail page reads: the document plus what only a read can give. */
+export interface Project extends ProjectDocument {
   /** Signed and short-lived. Regenerated on every read, so a page left open
    *  past the expiry must refetch rather than reuse what it has. */
   media: {
