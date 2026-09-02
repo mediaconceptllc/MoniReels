@@ -35,6 +35,7 @@ import httpx
 from app.models import Segment, Transcript
 from app.stt.base import SttProvider
 from app.stt.chunking import text_to_transcript
+from app.utils import provider_errors
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -110,8 +111,15 @@ class ElevenLabsSttClient(SttProvider):
             )
 
         if response.status_code >= 400:
+            # Same split as everywhere else: the body is the operator's, the
+            # message is the user's.
+            logger.warning(
+                "ElevenLabs answered %s: %s", response.status_code, response.text[:600]
+            )
+            detail = provider_errors.read_error(response).message
             raise ElevenLabsError(
-                f"ElevenLabs хүсэлт амжилтгүй ({response.status_code}): {response.text[:300]}",
+                f"ElevenLabs хүсэлт амжилтгүй ({response.status_code})"
+                + (f": {detail}" if detail else ""),
                 status=response.status_code,
             )
 
