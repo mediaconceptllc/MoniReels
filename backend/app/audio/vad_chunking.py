@@ -35,6 +35,7 @@ from app.models import Segment, Transcript
 from app.stt.chunking import (
     FORCED_CUT_OVERLAP_SEC,
     TARGET_CHUNK_MIN_SEC,
+    forced_cut_step,
     synthesize_segments_from_text,
 )
 from app.utils.logging import get_logger
@@ -77,9 +78,10 @@ def group_vad_segments_into_chunks(
             continue
         cursor = start
         while end - cursor > max_chunk_sec:
+            step = forced_cut_step(max_chunk_sec, overlap_sec)
             forced_end = cursor + max_chunk_sec
             normalized.append((cursor, forced_end))
-            cursor = max(cursor, forced_end - overlap_sec)
+            cursor += step
         if end - cursor > 0:
             normalized.append((cursor, end))
 

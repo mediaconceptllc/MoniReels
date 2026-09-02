@@ -18,6 +18,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com"
@@ -87,7 +88,16 @@ class Settings(BaseSettings):
     # 500 three times over while every chunk under 22s in the same job
     # succeeded. The client now halves a refused chunk, so this is a
     # round-trip optimisation rather than the thing keeping jobs alive.
-    duudlaga_max_audio_sec: int = 30
+    # Bounded, not free. Both forced-cut loops (app.stt.chunking and
+    # app.audio.vad_chunking) advance their cursor by
+    # `max_audio_sec - FORCED_CUT_OVERLAP_SEC`; at or below that 0.4s overlap
+    # the cursor stands still while the loop keeps appending, and it spins
+    # inside a worker thread, so the heartbeat keeps ticking and nothing ever
+    # reports it. forced_cut_step() now refuses that case outright — this
+    # bound is the outer guard, keeping the value from ever reaching it. The
+    # floor of 5 also keeps a chunk above TARGET_CHUNK_MIN_SEC, below which
+    # every cut is a forced one.
+    duudlaga_max_audio_sec: int = Field(default=30, ge=5, le=600)
     # Opus bitrate each chunk is re-encoded to before upload. OFF by default:
     # measured against production, compression cost accuracy and bought
     # nothing that was still needed. duudlaga.dev answered two Opus chunks

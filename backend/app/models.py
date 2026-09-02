@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.timeline.models import Clip, Transition
 
@@ -57,6 +57,18 @@ class Segment(BaseModel):
     words: list[Word] = Field(default_factory=list)
 
 
+#: The shortest interval a segment may occupy. A recogniser that reports a
+#: word's start and end as the same instant produces a segment of zero
+#: length, and zero length is not a small cue — it is an unusable one:
+#: `00:00:12,340 --> 00:00:12,340` renders nothing, and the cut planner is
+#: offered a unit worth no seconds. MEASURED in production: one 9-minute
+#: transcript came back with `shortest 0.0s` among its 54 cutting units.
+#:
+#: Two frames at 25fps. Not a readable subtitle — that is a separate
+#: question — just a real interval rather than a point.
+MIN_SEGMENT_SEC = 0.08
+
+
 class Transcript(BaseModel):
     language: str
     segments: list[Segment]
@@ -70,6 +82,33 @@ class Transcript(BaseModel):
     pauses: list[float] = Field(default_factory=list)
     #: How many people the LLM pass heard. 0 means nobody has looked.
     speakers: int = 0
+
+    @field_validator("segments")
+    @classmethod
+    def _no_zero_length_segments(cls, segments: list[Segment]) -> list[Segment]:
+        """Give every segment a real interval, here rather than at each builder.
+
+        Three separate paths build segments — word timings from a recogniser,
+        a character-proportional estimate, and merged per-chunk results — and
+        a fourth will exist eventually. Fixing this where transcripts are
+        ASSEMBLED means each of those, and the next one, is covered without
+        anybody remembering to.
+
+        The words are never dropped: somebody said them, and losing transcript
+        to arithmetic is worse than a short cue. An end is only ever pushed
+        forward, never past where the next segment starts, so nothing overlaps
+        and nothing is reordered. A segment with no room at all (the next one
+        starts at the same instant) is left as it is — reporting it honestly
+        beats inventing time that is not there.
+        """
+        for i, seg in enumerate(segments):
+            if seg.end - seg.start >= MIN_SEGMENT_SEC:
+                continue
+            ceiling = segments[i + 1].start if i + 1 < len(segments) else float("inf")
+            end = min(seg.start + MIN_SEGMENT_SEC, ceiling)
+            if end > seg.end:
+                segments[i] = seg.model_copy(update={"end": end})
+        return segments
 
 
 class Cut(BaseModel):

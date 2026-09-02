@@ -7,33 +7,21 @@ was inside a worker thread. It could not finish and nothing said so.
 from __future__ import annotations
 
 import random
-import signal
 from contextlib import contextmanager
 
 import pytest
 
 from app.utils.text import split_span
+from tests.conftest import must_finish
 
 
 @contextmanager
 def _must_finish(seconds: int = 5):
-    """Turn a hang into a failure.
-
-    Without this a regression here does not fail the suite — it stops it, in
-    CI, with no output, which is how this bug reached production in the first
-    place.
-    """
-
-    def _bang(signum, frame):
-        raise AssertionError(f"split_span did not return within {seconds}s — it is looping")
-
-    previous = signal.signal(signal.SIGALRM, _bang)
-    signal.alarm(seconds)
-    try:
+    """Turn a hang into a failure. The alarm itself lives in conftest now —
+    the forced-cut loops need the same guard, and one handler is easier to
+    reset correctly than two."""
+    with must_finish("split_span", seconds):
         yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
 
 
 def _intact(pieces, start: float, end: float, text: str) -> None:

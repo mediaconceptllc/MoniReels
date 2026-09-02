@@ -56,6 +56,30 @@ TARGET_CHUNK_MIN_SEC = 5.0
 # itself the buffer.
 FORCED_CUT_OVERLAP_SEC = 0.4
 
+
+def forced_cut_step(max_chunk_sec: float, overlap_sec: float) -> float:
+    """How far a forced cut advances, refusing a setting that advances nowhere.
+
+    Both force-cut loops here and in app.audio.vad_chunking move their cursor
+    by `max_chunk_sec - overlap_sec`. At or below zero the cursor stands still
+    while the loop keeps appending, which is an infinite loop that also eats
+    memory — the same shape as the split_span hang, and reachable the same
+    way: `overlap_sec` is a constant but `max_chunk_sec` comes from
+    DUUDLAGA_MAX_AUDIO_SEC, so one env var decides whether these terminate.
+
+    Raising is the point. A misconfiguration that stops a worker dead with no
+    error is the worst outcome; a job that fails naming the variable is the
+    best one available here.
+    """
+    step = max_chunk_sec - overlap_sec
+    if step <= 0:
+        raise ValueError(
+            f"A chunk of {max_chunk_sec}s cannot advance past a {overlap_sec}s overlap "
+            "— set DUUDLAGA_MAX_AUDIO_SEC above it."
+        )
+    return step
+
+
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 
 
@@ -114,9 +138,10 @@ def compute_pause_boundaries(
         if cp <= start:
             continue
         while cp - start > max_chunk_sec:
+            step = forced_cut_step(max_chunk_sec, overlap_sec)
             forced_end = start + max_chunk_sec
             boundaries.append([start, forced_end])
-            start = max(start, forced_end - overlap_sec)
+            start += step
         if cp <= start:
             continue
         if boundaries and cp - start < min_chunk_sec and cp - boundaries[-1][0] <= max_chunk_sec:
