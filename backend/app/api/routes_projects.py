@@ -9,6 +9,8 @@ Two things every route here obeys:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +28,7 @@ from app.models import Project
 from app.schemas import (
     CreateProjectIn,
     CreateProjectOut,
+    ExportSelectionIn,
     OutputOut,
     SelectRangesIn,
     SubtitleTemplateIn,
@@ -455,15 +458,60 @@ def provider_readiness(
 @router.post("/{project_id}/export-all")
 def export_all(
     project_id: str,
+    body: ExportSelectionIn | None = None,
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
+    """Render the model's ideas — all of them, or the ones named.
+
+    The body is optional and an omitted one still means everything, so a
+    client that predates choosing keeps working unchanged.
+
+    An id that is not in the CURRENT suggestions is refused here rather than
+    dropped later: the producer is standing at the button, and "2 of the 3 you
+    picked" discovered twenty minutes into a render is the worst place to find
+    out.
+    """
     project = _require_project(db, project_id, principal)
     if project.suggestions is None or not (project.suggestions.shorts or project.suggestions.youtube):
         raise HTTPException(status_code=400, detail="Экспортлох санал алга.")
+
+    pick: dict = {}
+    if body and body.shorts is not None:
+        known = {s.id for s in project.suggestions.shorts}
+        missing = [i for i in body.shorts if i not in known]
+        if missing:
+            raise HTTPException(
+                status_code=422, detail=f"Ийм богино видео алга: {', '.join(missing)}"
+            )
+        pick["shorts"] = body.shorts
+    if body and body.youtube is not None:
+        plans = project.suggestions.youtube
+        out_of_range = [i for i in body.youtube if not 0 <= i < len(plans)]
+        if out_of_range:
+            raise HTTPException(
+                status_code=422,
+                detail=f"YouTube хураангуйн дугаар буруу: {out_of_range}",
+            )
+        # The title travels with the index so the worker can tell whether the
+        # plan it is about to render is still the one that was chosen.
+        pick["youtube"] = [{"i": i, "title": plans[i].title} for i in body.youtube]
+
+    if pick and not (pick.get("shorts") or pick.get("youtube")):
+        raise HTTPException(status_code=400, detail="Нэг ч санал сонгогдоогүй байна.")
+
+    # The selection is part of the job's identity. Without it, exporting one
+    # short and then another while the first is queued would hand back the
+    # FIRST job's id and render the wrong thing under the right progress bar.
+    digest = hashlib.sha256(
+        json.dumps(pick, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()[:12] if pick else "all"
     return {
         "job_id": queue.enqueue(
-            "export_all", project_id=project_id, dedupe_key=f"export_all:{project_id}"
+            "export_all",
+            project_id=project_id,
+            payload={"pick": pick} if pick else None,
+            dedupe_key=f"export_all:{project_id}:{digest}",
         )
     }
 

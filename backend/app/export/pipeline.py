@@ -425,6 +425,54 @@ def _idea_clips(video_path: str, suggestions: Suggestions) -> list[tuple[str, st
     return ideas
 
 
+def pick_ideas(suggestions: Suggestions, payload: dict) -> tuple[Suggestions, list[str]]:
+    """Narrow a project's suggestions to the ones a job was queued for.
+
+    An empty or absent selection means everything — which is what the export
+    button did before there was any way to choose, so an old queued job and a
+    new one behave identically.
+
+    Anything the selection names that is no longer there is SKIPPED and
+    returned for the job's warnings, never guessed at. A job can sit in the
+    queue while somebody regenerates the suggestions, and rendering whatever
+    now occupies index 2 is the one outcome worth ruling out: the producer
+    would get a video they never asked for, with no way to tell.
+    """
+    picked = payload.get("pick") if isinstance(payload, dict) else None
+    if not isinstance(picked, dict):
+        return suggestions, []
+
+    skipped: list[str] = []
+    short_ids = picked.get("shorts")
+    if isinstance(short_ids, list):
+        by_id = {s.id: s for s in suggestions.shorts}
+        shorts = [by_id[i] for i in short_ids if i in by_id]
+        skipped += [f"богино видео «{i}» олдсонгүй" for i in short_ids if i not in by_id]
+    else:
+        shorts = list(suggestions.shorts)
+
+    wanted = picked.get("youtube")
+    if isinstance(wanted, list):
+        plans = []
+        for entry in wanted:
+            index = entry.get("i") if isinstance(entry, dict) else None
+            title = entry.get("title") if isinstance(entry, dict) else None
+            if not isinstance(index, int) or not 0 <= index < len(suggestions.youtube):
+                skipped.append(f"YouTube хураангуй №{index} олдсонгүй")
+                continue
+            plan = suggestions.youtube[index]
+            # The position alone is not identity: pin it to the title the
+            # selection was made against.
+            if title is not None and plan.title != title:
+                skipped.append(f"YouTube хураангуй «{title}» өөрчлөгдсөн тул алгаслаа")
+                continue
+            plans.append(plan)
+    else:
+        plans = list(suggestions.youtube)
+
+    return Suggestions(shorts=shorts, youtube=plans), skipped
+
+
 async def render_all_ideas(
     handle: JobHandle,
     binaries: FfmpegBinaries,
