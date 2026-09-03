@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { useAuth, errorMessage } from "@/lib/auth";
+import { errorMessage, useRequireAuth } from "@/lib/auth";
 import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
 import { Alert, Button, Card, Field, Spinner, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
+import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
 
 type SecretName = "openrouter_api_key" | "duudlaga_api_key" | "elevenlabs_api_key";
@@ -38,7 +39,10 @@ function sourceLabel(field: ProviderSettings[SecretName] | undefined): string {
 }
 
 export default function AdminPage() {
-  const { user, loading: authLoading } = useAuth();
+  // useRequireAuth, not useAuth: a signed-out visitor to /admin used to sit
+  // on a blank page forever — the role guard below only redirects someone
+  // who IS signed in, so nobody ever sent the signed-out case anywhere.
+  const { user, loading: authLoading } = useRequireAuth();
   const router = useRouter();
 
   const [settings, setSettings] = useState<ProviderSettings | null>(null);
@@ -102,100 +106,111 @@ export default function AdminPage() {
     }
   }
 
-  if (authLoading || (user?.role === "admin" && !settings && !error)) return <Spinner />;
-  if (user?.role !== "admin") return null;
+  // One wait, three reasons, and the reader cannot act on the difference:
+  // the session is loading, a redirect is in flight, or the settings are on
+  // their way. All three now happen INSIDE the shell, so the header and the
+  // page width do not appear and disappear around them.
+  if (authLoading || user?.role !== "admin" || (!settings && !error)) {
+    return (
+      <Shell>
+        <Spinner />
+      </Shell>
+    );
+  }
 
   const dirty = Object.keys(drafts).length > 0;
 
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Тохиргоо</h1>
-        <p className="mt-1 text-sm text-ink-3">
-          Гадаад үйлчилгээ ба брэндийн материал. Хадгалмагц дараагийн ажлаас эхлэн хүчинтэй —
-          дахин deploy хийх шаардлагагүй.
-        </p>
-      </div>
+    <Shell>
+      <div className="flex flex-col gap-6">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Тохиргоо</h1>
+          <p className="mt-1 text-sm text-ink-3">
+            Гадаад үйлчилгээ ба брэндийн материал. Хадгалмагц дараагийн ажлаас эхлэн хүчинтэй —
+            дахин deploy хийх шаардлагагүй.
+          </p>
+        </div>
 
-      {error && <Alert>{error}</Alert>}
-      {saved && (
-        <Alert tone="accent">
-          {saved.length === 0
-            ? "Өөрчлөлт алга — утга нь хэвээрээ байна."
-            : `Хадгаллаа: ${saved.length} талбар шинэчлэгдлээ.`}
-        </Alert>
-      )}
+        {error && <Alert>{error}</Alert>}
+        {saved && (
+          <Alert tone="accent">
+            {saved.length === 0
+              ? "Өөрчлөлт алга — утга нь хэвээрээ байна."
+              : `Хадгаллаа: ${saved.length} талбар шинэчлэгдлээ.`}
+          </Alert>
+        )}
 
-      <Card>
-        <div className="flex flex-col gap-5">
-          <div>
-            <h2 className="font-display text-lg font-semibold text-ink">API түлхүүрүүд</h2>
-            <p className="mt-1 text-sm text-ink-3">
-              Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана.
-            </p>
-          </div>
-          {SECRETS.map(({ name, label, hint }) => (
-            <Field key={name} label={label} hint={hint}>
+        <Card>
+          <div className="flex flex-col gap-5">
+            <div>
+              <h2 className="font-display text-lg font-semibold text-ink">API түлхүүрүүд</h2>
+              <p className="mt-1 text-sm text-ink-3">
+                Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана.
+              </p>
+            </div>
+            {SECRETS.map(({ name, label, hint }) => (
+              <Field key={name} label={label} hint={hint}>
+                <TextInput
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={sourceLabel(settings?.[name])}
+                  value={drafts[name] ?? ""}
+                  onChange={(e) => setDrafts((d) => ({ ...d, [name]: e.target.value }))}
+                />
+              </Field>
+            ))}
+
+            <Field
+              label="OpenRouter модел"
+              hint="Жишээ нь anthropic/claude-sonnet-4.5. Хоосон үлдээвэл серверийн анхдагч."
+            >
               <TextInput
-                type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder={sourceLabel(settings?.[name])}
-                value={drafts[name] ?? ""}
-                onChange={(e) => setDrafts((d) => ({ ...d, [name]: e.target.value }))}
+                placeholder={settings?.openrouter_model.hint || "anthropic/claude-sonnet-4.5"}
+                value={drafts.openrouter_model ?? ""}
+                onChange={(e) => setDrafts((d) => ({ ...d, openrouter_model: e.target.value }))}
               />
             </Field>
-          ))}
 
-          <Field
-            label="OpenRouter модел"
-            hint="Жишээ нь anthropic/claude-sonnet-4.5. Хоосон үлдээвэл серверийн анхдагч."
-          >
-            <TextInput
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={settings?.openrouter_model.hint || "anthropic/claude-sonnet-4.5"}
-              value={drafts.openrouter_model ?? ""}
-              onChange={(e) => setDrafts((d) => ({ ...d, openrouter_model: e.target.value }))}
-            />
-          </Field>
-
-          <div className="flex items-center gap-3">
-            <Button onClick={save} disabled={busy || !dirty}>
-              {busy ? "Хадгалж байна…" : "Хадгалах"}
-            </Button>
-            <span className="text-xs text-ink-3">
-              Талбарыг хоосон үлдээвэл хэвээрээ. Бичсэнээ бүрэн арилгаад хадгалбал тэр түлхүүр
-              устаж, серверийн орчны хувьсагч руу буцна.
-            </span>
+            <div className="flex items-center gap-3">
+              <Button onClick={save} disabled={busy || !dirty}>
+                {busy ? "Хадгалж байна…" : "Хадгалах"}
+              </Button>
+              <span className="text-xs text-ink-3">
+                Талбарыг хоосон үлдээвэл хэвээрээ. Бичсэнээ бүрэн арилгаад хадгалбал тэр түлхүүр
+                устаж, серверийн орчны хувьсагч руу буцна.
+              </span>
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
 
-      {capabilities.length > 0 && (
-        <CapabilityTable
-          capabilities={capabilities}
-          sttProvider={sttProvider}
-          sttProviders={sttProviders}
-          onSttProvider={(name) => {
-            // Applied immediately rather than left in the draft with the
-            // keys: this is one click, and a recogniser that looks selected
-            // but is not saved is how a job runs on the wrong vendor.
-            setSttProvider(name);
-            void (async () => {
-              try {
-                await api.saveProviderSettings({ stt_provider: name });
-                await load();
-              } catch (err) {
-                setError(errorMessage(err));
-              }
-            })();
-          }}
-        />
-      )}
+        {capabilities.length > 0 && (
+          <CapabilityTable
+            capabilities={capabilities}
+            sttProvider={sttProvider}
+            sttProviders={sttProviders}
+            onSttProvider={(name) => {
+              // Applied immediately rather than left in the draft with the
+              // keys: this is one click, and a recogniser that looks selected
+              // but is not saved is how a job runs on the wrong vendor.
+              setSttProvider(name);
+              void (async () => {
+                try {
+                  await api.saveProviderSettings({ stt_provider: name });
+                  await load();
+                } catch (err) {
+                  setError(errorMessage(err));
+                }
+              })();
+            }}
+          />
+        )}
 
-      <BrandAssetsCard />
+        <BrandAssetsCard />
 
-    </div>
+      </div>
+    </Shell>
   );
 }
