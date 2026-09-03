@@ -21,6 +21,7 @@ import socket
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from app.ai import usage as llm_usage
 from app.ai.openrouter_client import build_client as build_llm_client
@@ -524,6 +525,58 @@ def _abort_stale_uploads() -> int:
     return r2.abort_stale_uploads()
 
 
+async def _drain(running: dict[asyncio.Task, Any], grace_s: int) -> None:
+    """Wait for the running jobs, then SETTLE whatever did not make it.
+
+    Bounded, and deliberately so. The wait itself used to be unbounded, which
+    reads as the safer choice and is not: the platform's own SIGTERM-to-SIGKILL
+    window ends first, and a process killed there settles nothing at all. A
+    wait that ends just inside that window is the only one that can report.
+
+    MEASURED: a deploy arrived 58 seconds into a 4-5 minute speech-to-text
+    call. `transcribe` and `suggest` are billed per attempt and not retried,
+    so the producer paid, saw nothing, and read a generic reaper verdict five
+    minutes later.
+
+    A job that still cannot finish is named on the way out — requeued when its
+    kind allows a retry, failed when a retry would be a second bill. Same rule
+    as `_run_job`'s own failure path, so a job means the same thing however it
+    ended.
+    """
+    logger.info(
+        "Shutting down; %d job(s) running, waiting up to %ds", len(running), grace_s
+    )
+    # `timeout=grace_s` directly, never `grace_s or None`: zero has to mean
+    # "settle them now", the choice of an operator who would rather a deploy
+    # never blocked. "Wait forever" is the behaviour being removed here and
+    # must not be reachable from a setting at all.
+    _, pending = await asyncio.wait(set(running), timeout=grace_s)
+    if not pending:
+        return
+
+    for task in pending:
+        job = running[task]
+        # A retry is free for a render and a second charge for a paid call.
+        requeue = not (job.no_retry or job.attempts >= MAX_ATTEMPTS)
+        settled = await asyncio.to_thread(
+            queue.abandon,
+            job.id,
+            requeue=requeue,
+            reason="The worker was stopped by a deploy before this job finished.",
+        )
+        if not settled:
+            # It finished in the moment between the timeout and this call.
+            continue
+        logger.warning(
+            "Job %s (%s) did not finish within %ds; %s",
+            job.id,
+            job.kind,
+            grace_s,
+            "back in the queue" if requeue else "FAILED — this kind bills per "
+            "attempt, so it will not run again until somebody starts it",
+        )
+
+
 async def main() -> None:
     setup_logging()
     settings = get_settings()
@@ -547,7 +600,9 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _shutdown.set)
 
-    running: set[asyncio.Task] = set()
+    # Keyed by task so an abandoned one can still be NAMED at shutdown; a
+    # bare set of tasks cannot say which job it was.
+    running: dict[asyncio.Task, Any] = {}
     chores: asyncio.Task | None = None
     last_reap = 0.0
 
@@ -562,7 +617,7 @@ async def main() -> None:
             last_reap = time.time()
             chores = asyncio.create_task(_housekeeping(settings))
 
-        running = {t for t in running if not t.done()}
+        running = {t: j for t, j in running.items() if not t.done()}
         if len(running) >= settings.worker_concurrency:
             await asyncio.sleep(POLL_IDLE_SEC)
             continue
@@ -579,13 +634,12 @@ async def main() -> None:
             continue
 
         logger.info("Claimed job %s (%s, lane=%s)", job.id, job.kind, job.lane)
-        running.add(asyncio.create_task(_run_job(job)))
+        running[asyncio.create_task(_run_job(job))] = job
 
     if chores and not chores.done():
         chores.cancel()
     if running:
-        logger.info("Shutting down; waiting for %d job(s) to finish", len(running))
-        await asyncio.gather(*running, return_exceptions=True)
+        await _drain(running, settings.worker_shutdown_grace_s)
     logger.info("Worker %s stopped", worker_id)
 
 

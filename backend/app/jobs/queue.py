@@ -310,6 +310,33 @@ def finish(job_id: str, *, state: str, output: Any = None, error: str | None = N
         job.dedupe_key = None
 
 
+def abandon(job_id: str, *, requeue: bool, reason: str) -> bool:
+    """Settle a job the worker is walking away from, and say why.
+
+    A worker stopped by a deploy used to leave its row `running` with a
+    heartbeat that had stopped moving. Nothing said so for JOB_STALE_SEC, and
+    what the producer eventually saw was the reaper's generic verdict — for a
+    kind billed per attempt, five minutes after the money was already spent.
+
+    Only an ACTIVE row is touched. The abandoned task is still running as this
+    is called and may settle the job itself a moment later; if it did, its
+    answer is the true one and this must not overwrite it.
+    """
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        if job is None or job.state not in ACTIVE_STATES:
+            return False
+        job.state = "queued" if requeue else "failed"
+        job.error = reason
+        job.updated_at = time.time()
+        if not requeue:
+            job.finished_at = job.updated_at
+            # Same rule as `finish`: a settled job releases its dedupe key,
+            # without which the same action could never be started again.
+            job.dedupe_key = None
+        return True
+
+
 def request_cancel(job_id: str) -> bool:
     with session_scope() as db:
         job = db.get(Job, job_id)

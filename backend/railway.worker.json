@@ -7,6 +7,7 @@
   "deploy": {
     "startCommand": "python -m app.worker",
     "restartPolicyType": "ALWAYS",
-    "numReplicas": 1
+    "numReplicas": 1,
+    "drainingSeconds": "600"
   }
 }
