@@ -166,6 +166,23 @@ class Settings(BaseSettings):
     # dead and returned to the queue. Must exceed the heartbeat interval by
     # a wide margin or a merely busy worker loses its own job.
     job_stale_sec: int = 300
+    # How long the worker keeps waiting for its running jobs after SIGTERM.
+    #
+    # MEASURED: a deploy landed 58 seconds into a 4-5 minute speech-to-text
+    # call and the container was gone 10 seconds later. `transcribe` and
+    # `suggest` are billed per attempt and are NOT retried, so that is money
+    # spent for nothing — and the row sat `running` until the reaper gave it a
+    # generic verdict five minutes later.
+    #
+    # This MUST stay below the platform's own SIGTERM-to-SIGKILL window
+    # (`drainingSeconds` in railway.worker.json), or the worker is killed
+    # before it can settle anything and the wait buys nothing at all.
+    # `test_shutdown_grace_fits_the_platform_window` holds the two together.
+    #
+    # Costs nothing on an idle worker: the loop notices the signal within
+    # POLL_IDLE_SEC and exits. It is only spent when a job is genuinely
+    # running, which is exactly when it is worth spending.
+    worker_shutdown_grace_s: int = Field(default=580, ge=0, le=3600)
     job_keep_days: int = 30
     work_dir: str = "/tmp/monireels"
     # Refuse to start a disk-heavy job below this much free space rather
