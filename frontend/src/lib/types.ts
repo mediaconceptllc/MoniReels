@@ -188,6 +188,9 @@ export interface ProjectSummary {
   has_suggestions: boolean;
   duration_sec: number;
   n_outputs: number;
+  /** Signed and short-lived, like every other media URL here. Null until the
+   *  import has made one — or when storage is not configured at all. */
+  thumbnail_url: string | null;
 }
 
 /**

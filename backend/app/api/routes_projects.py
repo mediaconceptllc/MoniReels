@@ -139,7 +139,25 @@ def list_projects(
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> list[dict]:
-    return [summary(row) for row in list_for_owner(db, principal.id)]
+    """The list, with each project's thumbnail.
+
+    Import has always made one and the detail page has always signed one; the
+    list never asked for it, so a wall of video projects read as a wall of
+    text. Signed HERE rather than in `store.summary`, exactly as the detail
+    route does — a URL is a fact about this request, not about the row.
+
+    Signing is local (boto3 never leaves the process for it), so this stays
+    one database query however long the list is.
+    """
+    storage = r2.enabled()
+    items = []
+    for row in list_for_owner(db, principal.id):
+        item = summary(row)
+        item["thumbnail_url"] = (
+            r2.presign_get(row.thumbnail_key) if storage and row.thumbnail_key else None
+        )
+        items.append(item)
+    return items
 
 
 @router.get("/{project_id}")

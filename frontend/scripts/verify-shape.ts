@@ -127,6 +127,9 @@ const present: unknown[] = [
   raw.projects.map((p) => [
     p.id, p.name, p.created_at, p.updated_at, p.has_video, p.has_transcript,
     p.has_suggestions, p.duration_sec, p.n_outputs,
+    // The card's picture. Signed per request, so it is the one field on a
+    // list row that cannot be cached with the row.
+    p.thumbnail_url,
   ]),
 
   // the project itself

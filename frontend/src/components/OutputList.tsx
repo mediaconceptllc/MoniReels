@@ -14,6 +14,7 @@ import { errorMessage } from "@/lib/auth";
 import { OUTPUT_KIND_LABELS, fileSize } from "@/lib/format";
 import type { Output } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty } from "@/components/ui";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function OutputList({
   projectId,
@@ -26,6 +27,7 @@ export function OutputList({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [asking, setAsking] = useState<Output | null>(null);
 
   if (outputs.length === 0) {
     return (
@@ -37,13 +39,14 @@ export function OutputList({
   }
 
   async function remove(output: Output) {
-    if (!window.confirm(`«${output.title || "Гарц"}» устгах уу? Буцаах боломжгүй.`)) return;
     setDeleting(output.id);
     setError(null);
     try {
       await api.deleteOutput(projectId, output.id);
+      setAsking(null);
       onChanged();
     } catch (err) {
+      setAsking(null);
       setError(errorMessage(err));
     } finally {
       setDeleting(null);
@@ -86,7 +89,7 @@ export function OutputList({
                 tone="danger"
                 className="ml-auto px-2.5 py-1.5 text-xs"
                 loading={deleting === output.id}
-                onClick={() => void remove(output)}
+                onClick={() => setAsking(output)}
               >
                 Устгах
               </Button>
@@ -94,6 +97,19 @@ export function OutputList({
           </Card>
         ))}
       </div>
+
+      {/* The render is the expensive part — an encode of the whole source —
+          so the size goes in the question rather than being left to guess. */}
+      {asking && (
+        <ConfirmDialog
+          title={`«${asking.title || "Гарц"}» устгах уу?`}
+          lose={[`${fileSize(asking.size_bytes)} видео`, ...(asking.srt_url ? ["Хадмал файл"] : [])]}
+          confirmLabel="Устгах"
+          busy={deleting === asking.id}
+          onConfirm={() => void remove(asking)}
+          onCancel={() => setAsking(null)}
+        />
+      )}
     </div>
   );
 }
