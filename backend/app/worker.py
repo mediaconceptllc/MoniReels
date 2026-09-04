@@ -257,7 +257,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     from app import brand, r2
     from app.dbmodels import Output
     from app.export.overlay import LogoOverlay
-    from app.export.pipeline import render_all_ideas, render_timeline
+    from app.export.pipeline import pick_ideas, render_all_ideas, render_timeline
 
     binaries = _require_ffmpeg()
     workdir = job_workdir(handle.job_id)
@@ -318,13 +318,23 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     intro_path = await _brand_clip("intro") if project.export.use_intro else None
     outro_path = await _brand_clip("outro") if project.export.use_outro else None
 
+    skipped: list[str] = []
     if all_ideas:
         if project.suggestions is None or not (
             project.suggestions.shorts or project.suggestions.youtube
         ):
             raise RuntimeError("There are no suggestions to export")
+        # A job queued for SOME of the ideas carries which ones. An empty
+        # selection is every one of them, so a job queued before choosing
+        # existed renders exactly what it always did.
+        wanted, skipped = pick_ideas(project.suggestions, handle.payload)
+        if not (wanted.shorts or wanted.youtube):
+            raise RuntimeError(
+                "None of the selected ideas are still in this project: "
+                + "; ".join(skipped)
+            )
         rendered = await render_all_ideas(
-            handle, binaries, str(local), project.suggestions, project.transition,
+            handle, binaries, str(local), wanted, project.transition,
             crf=project.export.crf, preset=project.export.preset,
             orientation=project.export.orientation, portrait_fill=project.export.portrait_fill,
             supported_xfade=caps.xfade_transitions, container="mp4",
@@ -386,7 +396,12 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             )
         results.append({"kind": kind, "title": item.get("title", ""), "key": key, "srt_key": srt_key})
 
-    return {"outputs": results}
+    out: dict = {"outputs": results}
+    # An idea that could not be found is NAMED, never dropped quietly: the
+    # producer picked three and has to be able to see they got two.
+    if skipped:
+        out["skipped"] = skipped
+    return out
 
 
 HANDLERS = {

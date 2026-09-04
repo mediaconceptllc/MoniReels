@@ -197,8 +197,13 @@ export const api = {
 
   suggest: (id: string) => request<{ job_id: string }>(`/projects/${id}/suggest`, { method: "POST" }),
 
-  exportAll: (id: string) =>
-    request<{ job_id: string }>(`/projects/${id}/export-all`, { method: "POST" }),
+  /** Renders the model's ideas. `pick` names WHICH ones — omit it and every
+   *  idea is rendered, which is what this did before there was a choice. */
+  exportAll: (id: string, pick?: { shorts?: string[]; youtube?: number[] }) =>
+    request<{ job_id: string }>(`/projects/${id}/export-all`, {
+      method: "POST",
+      ...(pick ? { body: JSON.stringify(pick) } : {}),
+    }),
 
   exportTimeline: (id: string) =>
     request<{ job_id: string }>(`/projects/${id}/export`, { method: "POST" }),

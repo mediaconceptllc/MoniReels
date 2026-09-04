@@ -234,6 +234,20 @@ class SelectRangesIn(BaseModel):
     ranges: list[tuple[float, float]] = Field(min_length=1, max_length=200)
 
 
+class ExportSelectionIn(BaseModel):
+    """Which of the model's ideas to render. Omitting both renders every one,
+    which is what the button did before there was any way to choose.
+
+    Shorts carry their own id; YouTube plans do not, so they are named by
+    position. The position is pinned to the plan's title in the job payload —
+    regenerating the suggestions between queueing and rendering would
+    otherwise move index 2 onto a different plan and render it silently.
+    """
+
+    shorts: list[str] | None = Field(default=None, max_length=50)
+    youtube: list[int] | None = Field(default=None, max_length=50)
+
+
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------

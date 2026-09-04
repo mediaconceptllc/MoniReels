@@ -16,7 +16,14 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration } from "@/lib/format";
 import type { Output, Project } from "@/lib/types";
-import { Alert, Badge, Button, Card, Empty, Spinner } from "@/components/ui";
+import { Alert, Badge, Button, Card, Empty } from "@/components/ui";
+import {
+  PipelineRail,
+  PipelineRailSkeleton,
+  type RailAction,
+  type Stage,
+  type StageDef,
+} from "@/components/PipelineRail";
 import { ProviderWarnings } from "@/components/ProviderWarnings";
 import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
@@ -25,8 +32,6 @@ import { OutputList } from "@/components/OutputList";
 import { Shell } from "@/components/Shell";
 import { SuggestionList } from "@/components/SuggestionList";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
-
-type Tab = "source" | "transcript" | "suggestions" | "outputs";
 
 export default function ProjectPage() {
   const { user, loading: authLoading } = useRequireAuth();
@@ -39,7 +44,7 @@ export default function ProjectPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<Tab>("source");
+  const [tab, setTab] = useState<Stage>("source");
 
   const refresh = useCallback(async () => {
     try {
@@ -68,7 +73,7 @@ export default function ProjectPage() {
   // project lands where the work is rather than at the beginning.
   useEffect(() => {
     if (!project) return;
-    setTab((current) => {
+    setTab((current: Stage) => {
       if (current !== "source") return current;
       if (outputs.length) return "outputs";
       if (project.suggestions?.shorts.length) return "suggestions";
@@ -102,9 +107,12 @@ export default function ProjectPage() {
   }
 
   if (authLoading || !user || (!project && !error)) {
+    // The rail's own placeholder, not a spinner alone on a blank page: this
+    // page reloads itself every time a job settles, and the layout used to
+    // vanish and come back on each one.
     return (
       <Shell>
-        <Spinner />
+        <PipelineRailSkeleton />
       </Shell>
     );
   }
@@ -121,12 +129,104 @@ export default function ProjectPage() {
   const hasTranscript = !!project.transcript?.segments.length;
   const hasSuggestions = !!project.suggestions?.shorts.length;
 
-  const TABS: { key: Tab; label: string; ready: boolean }[] = [
-    { key: "source", label: "Эх видео", ready: true },
-    { key: "transcript", label: "Текст", ready: hasTranscript },
-    { key: "suggestions", label: "Санал", ready: hasSuggestions },
-    { key: "outputs", label: `Бэлэн (${outputs.length})`, ready: outputs.length > 0 },
+  const segments = project.transcript?.segments.length ?? 0;
+  const shorts = project.suggestions?.shorts.length ?? 0;
+  const plans = project.suggestions?.youtube.length ?? 0;
+
+  // Every cell says what it HOLDS, in the producer's terms — and a stage that
+  // cannot run yet says why in its own cell, rather than as a footnote under
+  // a row of disabled buttons.
+  const STAGES: StageDef[] = [
+    {
+      key: "source",
+      label: "Эх видео",
+      state: hasVideo ? "done" : "current",
+      detail: hasVideo
+        ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}`
+        : "Боловсруулагдаж байна",
+    },
+    {
+      key: "transcript",
+      label: "Текст",
+      state: hasTranscript ? "done" : hasVideo ? "current" : "blocked",
+      detail: hasTranscript
+        ? `${segments} мөр`
+        : hasVideo
+          ? "Дараагийн алхам"
+          : "Видео бэлдэж дуустал",
+    },
+    {
+      key: "suggestions",
+      label: "Санал",
+      state: hasSuggestions ? "done" : hasTranscript ? "current" : "blocked",
+      detail: hasSuggestions
+        ? `${shorts} богино · ${plans} хураангуй`
+        : hasTranscript
+          ? "Дараагийн алхам"
+          : "Текст бэлдсэний дараа",
+    },
+    {
+      key: "outputs",
+      label: "Бэлэн видео",
+      state: outputs.length ? "done" : hasSuggestions ? "current" : "blocked",
+      detail: outputs.length
+        ? `${outputs.length} файл`
+        : hasSuggestions
+          ? "Саналаас экспортлоно"
+          : "Саналын дараа",
+    },
   ];
+
+  // ONE action at a time, and it belongs to the stage that is OPEN — which
+  // is what restores re-running a finished step. Three buttons where two are
+  // disabled is a menu of things you cannot do; one button for the stage you
+  // just clicked, disabled with its reason when it cannot run, is an answer.
+  const running = busy || !!activeJob;
+
+  function actionFor(stage: Stage): RailAction | undefined {
+    switch (stage) {
+      case "transcript":
+        return {
+          label: hasTranscript ? "Яриаг дахин таних" : "Яриаг текст болгох",
+          note: hasVideo
+            ? "Илтгэгч тус бүрээр, үгийн нарийвчлалтай хугацаатай. Оролдлого тутам төлбөртэй."
+            : "Видео бэлдэж дуустал хүлээнэ үү.",
+          onRun: () => void run(() => api.transcribe(projectId)),
+          disabled: !hasVideo || running,
+          loading: busy,
+        };
+      case "suggestions":
+        return {
+          label: hasSuggestions ? "Санал дахин авах" : "Санал боловсруулах",
+          note: hasTranscript
+            ? `${segments} мөр текстээс богино видео, YouTube хураангуйн санал гаргана. Оролдлого тутам төлбөртэй.`
+            : "Эхлээд яриаг текст болгоно.",
+          onRun: () => void run(() => api.suggest(projectId)),
+          disabled: !hasTranscript || running,
+          loading: busy,
+        };
+      case "outputs":
+        return {
+          label: "Бүгдийг экспортлох",
+          note: hasSuggestions
+            ? "Санал таб дээрээс тус тусад нь ч экспортлож болно."
+            : "Санал боловсруулсны дараа экспортлоно.",
+          onRun: () => void run(() => api.exportAll(projectId)),
+          disabled: !hasSuggestions || running,
+          loading: busy,
+        };
+      case "source":
+        // Nothing to re-run here — the import happens once, on upload. So the
+        // opening screen offers the pipeline's next real move instead of
+        // nothing at all.
+        if (!hasVideo) return undefined;
+        if (!hasTranscript) return actionFor("transcript");
+        if (!hasSuggestions) return actionFor("suggestions");
+        return actionFor("outputs");
+    }
+  }
+
+  const action = actionFor(tab);
 
   return (
     <Shell>
@@ -150,8 +250,13 @@ export default function ProjectPage() {
 
         {error && <Alert>{error}</Alert>}
 
-        {activeJob && (
-          <Card className="p-4">
+        <PipelineRail
+          stages={STAGES}
+          active={tab}
+          onSelect={setTab}
+          action={action}
+        >
+          {activeJob ? (
             <JobProgress
               jobId={activeJob}
               onSettled={() => {
@@ -159,62 +264,8 @@ export default function ProjectPage() {
                 void refresh();
               }}
             />
-          </Card>
-        )}
-
-        <Card className="flex flex-wrap items-center gap-2 p-4">
-          <Button
-            tone="primary"
-            disabled={!hasVideo || busy || !!activeJob}
-            loading={busy}
-            onClick={() => void run(() => api.transcribe(projectId))}
-          >
-            {hasTranscript ? "Дахин таних" : "Яриаг текст болгох"}
-          </Button>
-          <Button
-            disabled={!hasTranscript || busy || !!activeJob}
-            onClick={() => void run(() => api.suggest(projectId))}
-          >
-            {hasSuggestions ? "Дахин санал авах" : "Санал боловсруулах"}
-          </Button>
-          <Button
-            disabled={!hasSuggestions || busy || !!activeJob}
-            onClick={() => void run(() => api.exportAll(projectId))}
-          >
-            Бүгдийг экспортлох
-          </Button>
-
-          {/* The reason a step is unavailable, stated once — otherwise a
-              disabled button is just a dead end. */}
-          {!hasVideo && (
-            <span className="text-xs text-ink-3">Видео бэлдэж дуустал хүлээнэ үү.</span>
-          )}
-          {hasVideo && !hasTranscript && (
-            <span className="text-xs text-ink-3">Эхлээд яриаг текст болгоно.</span>
-          )}
-          {hasTranscript && !hasSuggestions && (
-            <span className="text-xs text-ink-3">Санал боловсруулсны дараа экспортлоно.</span>
-          )}
-        </Card>
-
-        <nav className="flex flex-wrap gap-1 border-b border-rule">
-          {TABS.map((item) => (
-            <button
-              key={item.key}
-              onClick={() => setTab(item.key)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
-                tab === item.key
-                  ? "border-accent text-ink"
-                  : "border-transparent text-ink-3 hover:text-ink-2"
-              }`}
-            >
-              {item.label}
-              {!item.ready && item.key !== "source" && (
-                <span className="ml-1.5 text-[11px] text-ink-3">—</span>
-              )}
-            </button>
-          ))}
-        </nav>
+          ) : undefined}
+        </PipelineRail>
 
         {tab === "source" && (
           <div className="flex flex-col gap-6">
@@ -271,7 +322,12 @@ export default function ProjectPage() {
 
         {tab === "suggestions" &&
           (hasSuggestions ? (
-            <SuggestionList suggestions={project.suggestions!} />
+            <SuggestionList
+              suggestions={project.suggestions!}
+              sourceUrl={project.media.source_url}
+              busy={busy || !!activeJob}
+              onExport={(pick) => void run(() => api.exportAll(projectId, pick))}
+            />
           ) : (
             <Empty
               title="Санал хараахан алга"
