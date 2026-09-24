@@ -19,6 +19,12 @@
  *      layout in place. Enforced by confining Spinner to ui.tsx, where
  *      Button renders it.
  *
+ *   3. CARDS. `Card` is a SURFACE — a border, a radius and a background —
+ *      and has never had padding of its own, because one card's content is
+ *      a full-bleed thumbnail. Six call sites wrote `<Card>` with nothing
+ *      else and rendered their text flush against the border. A card either
+ *      states its padding or states that it is deliberately edge-to-edge.
+ *
  * Run: npm run check-ui
  */
 
@@ -226,7 +232,10 @@ function checkTargets(file, source, isPrimitives) {
       index,
       source,
       `<${tag}> has no ${FLOOR_PX}px target height. Use the Button / TextInput / Select ` +
-        `primitive, or add \`\${TAP}\` to its className.`,
+        `primitive, or add \`\${TAP}\` to its className. If it is a link INSIDE a ` +
+        `sentence, do not stretch it — that breaks the line it sits in; make it a ` +
+        `real action beside the text, or extend this rule with the WCAG 2.2 inline ` +
+        `exemption.`,
     );
   }
 }
@@ -257,6 +266,44 @@ function checkPrimitives(source) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Rule 3 — cards
+ * ------------------------------------------------------------------ */
+
+function checkCards(file, source) {
+  const consts = stringConstants(source);
+  const re = /<Card(?=[\s/>])/g;
+  let match;
+  while ((match = re.exec(source))) {
+    // Reuse the same walker: a Card's className is a template literal often
+    // enough that a lazy regex would stop inside one.
+    let i = match.index;
+    let depth = 0;
+    let quote = null;
+    while (i < source.length) {
+      const ch = source[i];
+      if (quote) {
+        if (ch === "\\") i += 1;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+      else if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      else if (ch === ">" && depth === 0) break;
+      i += 1;
+    }
+    const classes = classesOf(source.slice(match.index, i + 1), consts);
+    const tokens = classes.split(/[\s`]+/);
+    const padded = tokens.some((t) => /^p[xytrbl]?-/.test(t));
+    // The one legitimate unpadded card clips a thumbnail to its own corners,
+    // which is what `overflow-hidden` is there for — so saying it is also
+    // how a card declares that it meant to be edge-to-edge.
+    const fullBleed = tokens.includes("overflow-hidden");
+    if (!padded && !fullBleed) {
+      fail(file, match.index, source, "<Card> states no padding. Add `p-5` (or `overflow-hidden` if its content really is edge-to-edge).");
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Rule 2 — loading
  * ------------------------------------------------------------------ */
 
@@ -279,6 +326,7 @@ checkPrimitives(readFileSync(UI, "utf8"));
 for (const file of files) {
   const source = withoutComments(readFileSync(file, "utf8"));
   checkTargets(file, source, file === UI);
+  checkCards(file, source);
   if (file !== UI) checkSpinner(file, source);
 }
 
@@ -288,4 +336,7 @@ if (problems.length) {
   console.error("");
   process.exit(1);
 }
-console.log(`check-ui: ${files.length} files, every target at least ${FLOOR_PX}px, no stray Spinner.`);
+console.log(
+  `check-ui: ${files.length} files, every target at least ${FLOOR_PX}px, ` +
+    "no stray Spinner, every Card padded.",
+);

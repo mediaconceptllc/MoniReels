@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { api, setToken } from "@/lib/api";
 import { useAuth, errorMessage } from "@/lib/auth";
+import { duration, relativeTime } from "@/lib/format";
+import type { ProjectSummary } from "@/lib/types";
 import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TAP, TextInput } from "@/components/ui";
 import { Shell } from "@/components/Shell";
 
@@ -42,10 +44,14 @@ export default function ProfilePage() {
       <div className="flex max-w-2xl flex-col gap-6">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">Профайл</h1>
-          <p className="mt-1 text-sm text-ink-3">Таны бүртгэл ба нэвтрэх мэдээлэл.</p>
+          <p className="mt-1 text-sm text-ink-3">Таны бүртгэл ба хийсэн ажил.</p>
         </div>
 
-        <Card>
+        {/* The page was a name, a role and a password form — three facts, none
+            of them about the work the account has actually done. */}
+        <Work />
+
+        <Card className="p-5">
           <dl className="flex flex-col gap-3">
             <Row label="Нэвтрэх нэр" value={user.username} />
             <Row
@@ -64,7 +70,7 @@ export default function ProfilePage() {
         {/* Settings live behind the admin role on the SERVER; this link is
             convenience, and its absence is not what keeps anyone out. */}
         {user.role === "admin" && (
-          <Card>
+          <Card className="p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="font-display text-lg font-semibold text-ink">Тохиргоо</h2>
@@ -80,6 +86,89 @@ export default function ProfilePage() {
         )}
       </div>
     </Shell>
+  );
+}
+
+/**
+ * What this account has made.
+ *
+ * Read from the projects list the home page already loads — owner-scoped on
+ * the server, so nothing here widens what the account can see, and no new
+ * endpoint exists to keep in step with one.
+ *
+ * The counts describe THOSE projects and say so. The list is capped
+ * server-side, and a sum presented as a lifetime total would be quietly short
+ * by whatever the cap cut off; "N төслөөс" is both the scope and the number.
+ */
+function Work() {
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setProjects(await api.listProjects());
+    } catch {
+      // A profile is not worth an error banner: the name, the role and the
+      // password form below are all still usable without this block.
+      setFailed(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (failed) return null;
+  if (!projects) {
+    return (
+      <Loading>
+        <Skeleton className="h-28 rounded-lg" />
+      </Loading>
+    );
+  }
+  if (projects.length === 0) {
+    return (
+      <Card className="flex flex-col items-start gap-3 p-5">
+        <div>
+          <h2 className="font-display text-lg font-semibold text-ink">Миний ажил</h2>
+          <p className="mt-1 text-sm text-ink-3">Одоогоор төсөл алга.</p>
+        </div>
+        {/* An empty state with a way out of it. A link buried in the sentence
+            would be the one target on this page too small to hit — and making
+            THAT 44px tall would break the line it sits in. */}
+        <Link href="/" className={`${TAP} inline-flex`}>
+          <Button tone="primary">Эхний видеогоо оруулах</Button>
+        </Link>
+      </Card>
+    );
+  }
+
+  const outputs = projects.reduce((n, p) => n + p.n_outputs, 0);
+  const seconds = projects.reduce((n, p) => n + p.duration_sec, 0);
+  const last = Math.max(...projects.map((p) => p.updated_at));
+
+  return (
+    <Card className="p-5">
+      <h2 className="font-display text-lg font-semibold text-ink">Миний ажил</h2>
+      <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+        <Stat label="Төсөл" value={String(projects.length)} />
+        <Stat label="Бэлэн видео" value={String(outputs)} note={`${projects.length} төслөөс`} />
+        <Stat label="Эх материал" value={duration(seconds)} note="хадмалын уртаар ≈" />
+        <Stat label="Сүүлд" value={relativeTime(last)} />
+      </dl>
+    </Card>
+  );
+}
+
+function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <dt className="text-xs text-ink-3">{label}</dt>
+      <dd className="tabular font-display text-lg font-semibold leading-tight text-ink">
+        {value}
+      </dd>
+      {note && <dd className="text-[11px] text-ink-3">{note}</dd>}
+    </div>
   );
 }
 
@@ -132,7 +221,7 @@ function PasswordCard() {
   }
 
   return (
-    <Card>
+    <Card className="p-5">
       <div className="flex flex-col gap-4">
         <div>
           <h2 className="font-display text-lg font-semibold text-ink">Нууц үг солих</h2>
