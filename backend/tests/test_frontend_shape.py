@@ -89,6 +89,7 @@ _LITERAL = frozenset({
 #: key that is not `*` or a plain identifier.
 _MAPS = {
     "counts": 1,   # QueueStatus.counts — one entry per job state present
+    "speaker_voices": 1,   # ExportSettings.speaker_voices — {speaker: voice id}
 }
 
 _FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -306,6 +307,9 @@ def _filled_project(db, owner_id: str) -> Project:
         Clip(id="c2", source_path="sources/shape/source.mp4", start=40.0, end=55.0, order=1),
     ]
     project.export.use_intro = True
+    # A map WITH an entry, so `Record<string, string>` is checked on a value
+    # rather than on `{}`. Keyed by the speaker the transcript above has.
+    project.export.speaker_voices = {"0": "V1"}
     save(db, project)
 
     db.add_all([
@@ -328,8 +332,8 @@ def _filled_project(db, owner_id: str) -> Project:
 # ---------------------------------------------------------------------------
 
 
-def _voices(monkeypatch, get) -> dict:
-    """The voice picker's answer with voices IN it — an empty list satisfies
+def _voices(monkeypatch, get, path: str = "/admin/tts/voices", *, default_voice: str = "") -> dict:
+    """A voice picker's answer with voices IN it — an empty list satisfies
     `TtsVoice[]` while checking nothing about TtsVoice. One voice has a
     sample and one does not, so `preview_url: string | null` carries both.
 
@@ -361,11 +365,14 @@ def _voices(monkeypatch, get) -> dict:
     real = provider_settings.effective
     monkeypatch.setattr(
         provider_settings, "effective",
-        lambda db: real(db).model_copy(update={"elevenlabs_api_key": "el-shape-not-a-real-key"}),
+        lambda db: real(db).model_copy(update={
+            "elevenlabs_api_key": "el-shape-not-a-real-key",
+            "elevenlabs_tts_voice_id": default_voice,
+        }),
     )
     monkeypatch.setattr(elevenlabs, "build_client", build)
     try:
-        return get("/admin/tts/voices")
+        return get(path)
     finally:
         monkeypatch.setattr(provider_settings, "effective", real)
 
@@ -500,6 +507,10 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         ),
         "providers": get("/admin/providers"),
         "tts_voices": _voices(monkeypatch, get),
+        # The producer's thinner list for a speaker's voice — with a default
+        # voice set, so `default_voice_id` is checked on its string side (the
+        # admin list above carries the null one).
+        "project_voices": _voices(monkeypatch, get, "/projects/tts/voices", default_voice="V1"),
         "readiness": get("/projects/providers/status"),
         # Nothing uploaded yet, so every slot is null — which is the half of
         # `BrandLogo | null` a fresh deployment shows. The filled half is

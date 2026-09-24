@@ -1,10 +1,11 @@
 """ElevenLabs text to speech.
 
 What these hold: the request is the one that was chosen (v3, the voice in the
-path, the format in the query); a busy answer is retried because it was never
-billed, and nothing else is; the account-level failures say so; and the voice
-and model lists are read defensively, because the contract could not be
-checked against the live documentation from the network this was written on.
+path — the default, or a speaker's own — the format in the query); a busy
+answer is retried because it was never billed, and nothing else is; the
+failures no retry can fix end the run and say so; and the voice and model
+lists are read defensively, because the contract could not be checked
+against the live documentation from the network this was written on.
 """
 from __future__ import annotations
 
@@ -123,13 +124,31 @@ async def test_a_spent_quota_ends_the_run_and_says_why():
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_voice_does_not_end_the_run_as_an_account_problem():
+async def test_a_voice_gone_from_the_account_ends_the_run_and_says_which():
+    """A speaker's voice deleted after it was given: every line of theirs
+    would be refused the same way, so no retry is spent on it."""
     body = {"detail": {"status": "voice_not_found", "message": "A voice with that ID does not exist"}}
     client, _ = _client(lambda request: httpx.Response(400, json=body))
     with pytest.raises(TtsError) as excinfo:
-        await client.synthesize("Нэг.")
-    assert not excinfo.value.ends_the_run
+        await client.synthesize("Нэг.", "Gone")
+    assert excinfo.value.ends_the_run
     assert "хоолой олдсонгүй" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("code", ["invalid_uid", "model_not_found"])
+def test_a_wrong_voice_or_model_ends_the_run(code):
+    assert TtsError("x", status=400, code=code).ends_the_run
+    assert not TtsError("x", status=400, code="max_character_limit_exceeded").ends_the_run
+
+
+@pytest.mark.asyncio
+async def test_a_line_is_sent_in_the_voice_it_was_given():
+    seen: list[httpx.Request] = []
+    client, _ = _client(lambda request: seen.append(request) or httpx.Response(200, content=b"x"))
+    await client.synthesize("Нэг.", "Speaker2Voice")
+    await client.synthesize("Хоёр.")
+    assert [r.url.path for r in seen] == ["/v1/text-to-speech/Speaker2Voice",
+                                         "/v1/text-to-speech/Voice123"]
 
 
 @pytest.mark.parametrize("voice_id", ["", "../user", "a/b", "a b", "x" * 65])
@@ -143,6 +162,17 @@ async def test_anything_but_an_id_never_reaches_the_url(voice_id):
     with pytest.raises(TtsError):
         await client.synthesize("Нэг.")
     assert calls == []
+
+
+@pytest.mark.parametrize("voice_id", ["../user", "a/b", "a%2Fb", "x" * 65])
+@pytest.mark.asyncio
+async def test_a_speakers_voice_is_held_to_an_id_too(voice_id):
+    """The schema refuses these; this is the second wall, at the URL."""
+    calls = []
+    client, _ = _client(lambda request: calls.append(1) or httpx.Response(200, content=b"x"))
+    with pytest.raises(TtsError) as excinfo:
+        await client.synthesize("Нэг.", voice_id)
+    assert calls == [] and excinfo.value.ends_the_run
 
 
 @pytest.mark.asyncio
@@ -185,6 +215,14 @@ def test_the_fingerprint_changes_with_the_voice_and_the_model_but_not_the_key():
     assert base.fingerprint() != VoiceConfig(api_key="a", voice_id="V2").fingerprint()
     other_model = VoiceConfig(api_key="a", voice_id="V1", model="eleven_multilingual_v2")
     assert base.fingerprint() != other_model.fingerprint()
+
+
+def test_a_speakers_voice_is_fingerprinted_as_that_voice():
+    """A speaker given V2 sounds exactly like a default of V2 — the same
+    clips — and a speaker given nothing sounds like the default."""
+    base = VoiceConfig(api_key="a", voice_id="V1")
+    assert base.fingerprint("V2") == VoiceConfig(api_key="a", voice_id="V2").fingerprint()
+    assert base.fingerprint(None) == base.fingerprint() != base.fingerprint("V2")
 
 
 # --------------------------------------------------------------------------

@@ -44,6 +44,7 @@ from app.schemas import (
 from app.security import Principal, current_user
 from app.store import ProjectNotFound, get_row, list_for_owner, load, save, summary, to_domain
 from app.timeline.builder import build_clips_from_ranges
+from app.tts.voiceover import speakers
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -214,6 +215,9 @@ def get_project(
     # The export guards' verdicts, read by the page rather than re-derived.
     data["translation"] = translation_view(project)
     data["voice"] = voice_view(db, project)
+    # Who speaks, for the per-speaker voice picker: counted and quoted, since
+    # a bare `speaker_1` identifies nobody.
+    data["speakers"] = speakers(project.transcript.segments) if project.transcript else []
     transcript = (data.get("transcript") or {}).get("full_text") or ""
     data["spend"] = spend.view(
         db,
@@ -674,6 +678,41 @@ def provider_readiness(
             for c in providers.describe(settings)
         ]
     }
+
+
+@router.get("/tts/voices", include_in_schema=False)
+async def tts_voices(
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """The voices a speaker can be given, for the page that gives them.
+
+    Thinner than the admin view, like `providers/status`: the voices, the
+    default a speaker without one falls back to, and why the list could not
+    be read — nothing about the model or the account. Free: ElevenLabs is
+    asked for its list and nothing is synthesised. Never raises; an
+    unreachable provider is the answer, not a 500.
+    """
+    from app import provider_settings
+    from app.tts import elevenlabs
+
+    settings = provider_settings.effective(db)
+    out: dict = {
+        "voices": [],
+        "default_voice_id": settings.elevenlabs_tts_voice_id or None,
+        "error": None,
+    }
+    if not settings.elevenlabs_api_key:
+        out["error"] = "ElevenLabs-ийн API түлхүүр тавигдаагүй байна."
+        return out
+    client = elevenlabs.build_client(settings)
+    try:
+        out["voices"] = await client.voices()
+    except Exception as e:  # noqa: BLE001 - reachability is part of the answer
+        out["error"] = str(e) or type(e).__name__
+    finally:
+        await client.aclose()
+    return out
 
 
 @router.post("/{project_id}/export-all")

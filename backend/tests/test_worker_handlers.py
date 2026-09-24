@@ -1292,9 +1292,9 @@ def _voice_over(db, project_id: str, *, on: bool = True, volume: float = 0.3, cl
     db.commit()
 
 
-def _fake_voice(monkeypatch, world) -> list[str]:
-    """A voice that records what it was asked to read, over a bucket that
-    knows which clips it already holds."""
+def _fake_voice(monkeypatch, world, heard: list | None = None) -> list[str]:
+    """A voice that records what it was asked to read — and, into `heard`,
+    in which voice — over a bucket that knows which clips it already holds."""
     from app import worker
     from app.tts.elevenlabs import VoiceConfig
 
@@ -1303,8 +1303,10 @@ def _fake_voice(monkeypatch, world) -> list[str]:
     class FakeTts:
         config = VoiceConfig(api_key="k", voice_id="V1")
 
-        async def synthesize(self, text: str) -> bytes:
+        async def synthesize(self, text: str, voice_id: str | None = None) -> bytes:
             said.append(text)
+            if heard is not None:
+                heard.append((voice_id, text))
             return b"mp3"
 
         async def aclose(self) -> None:
@@ -1374,6 +1376,28 @@ def test_a_line_already_bought_is_not_bought_again(world, project, db, monkeypat
 
     assert said == ["<closed>"]
     assert result["voice"]["cached"] == 2 and result["voice"]["synthesized"] == 0
+
+
+def test_each_speaker_is_read_in_the_voice_the_producer_gave_them(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    doc = load(db, project.id)
+    doc.transcript.segments[0].speaker = "speaker_0"
+    doc.transcript.segments[1].speaker = "speaker_1"
+    doc.export.speaker_voices = {"speaker_1": "Bold"}
+    save(db, doc)
+    db.commit()
+    _voice_over(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    heard: list = []
+    _fake_voice(monkeypatch, world, heard)
+
+    asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    # speaker_0 was given no voice of their own: the default.
+    assert heard == [("V1", "Сайн уу."), ("Bold", "Баяртай.")]
 
 
 def test_no_voice_is_made_unless_asked(world, project, db, monkeypatch):

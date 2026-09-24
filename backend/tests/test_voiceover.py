@@ -25,6 +25,7 @@ from app.tts.elevenlabs import TtsError, VoiceConfig
 from app.tts.voiceover import (
     GAP_S,
     MAX_TEMPO,
+    SAMPLE_CHARS,
     SAMPLE_RATE,
     Line,
     VoiceOver,
@@ -33,6 +34,7 @@ from app.tts.voiceover import (
     lines_in,
     place_lines,
     prepare,
+    speakers,
     write_wav,
 )
 
@@ -40,8 +42,12 @@ FFMPEG = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg is not installed")
 
 
-def _seg(i: int, start: float, end: float, translation: str | None = None, text: str = "Hello.") -> Segment:
-    return Segment(id=f"s{i}", start=start, end=end, text=text, translation=translation)
+def _seg(
+    i: int, start: float, end: float, translation: str | None = None, text: str = "Hello.",
+    speaker: str | None = None,
+) -> Segment:
+    return Segment(id=f"s{i}", start=start, end=end, text=text, translation=translation,
+                   speaker=speaker)
 
 
 # --------------------------------------------------------------------------
@@ -137,12 +143,15 @@ class FakeTts:
     def __init__(self, fail_on: str | None = None) -> None:
         self.config = VoiceConfig(api_key="k", voice_id="V1")
         self.said: list[str] = []
+        #: (voice id, words), for every clip bought.
+        self.calls: list[tuple[str | None, str]] = []
         self.fail_on = fail_on
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(self, text: str, voice_id: str | None = None) -> bytes:
         if text == self.fail_on:
             raise TtsError("quota", status=401, code="quota_exceeded")
         self.said.append(text)
+        self.calls.append((voice_id, text))
         return f"mp3:{text}".encode()
 
 
@@ -225,6 +234,81 @@ def test_a_line_with_no_translation_is_counted_and_not_read(tmp_path, bucket):
     client = FakeTts()
     paths, report = asyncio.run(prepare(client, "p1", segments, [(0.0, 5.0)], tmp_path))
     assert set(paths) == {"s0"} and report.missing == 1
+
+
+# --------------------------------------------------------------------------
+# A voice per speaker
+# --------------------------------------------------------------------------
+
+DIALOGUE = [
+    _seg(0, 0.0, 2.0, "Нэг.", speaker="speaker_0"),
+    _seg(1, 2.0, 4.0, "Хоёр.", speaker="speaker_1"),
+    _seg(2, 4.0, 6.0, "Гурав."),                      # no speaker
+    _seg(3, 6.0, 8.0, "Дөрөв.", speaker="speaker_2"),  # given no voice
+]
+
+
+def test_each_speaker_is_read_in_the_voice_they_were_given(tmp_path, bucket):
+    objects, _ = bucket
+    client = FakeTts()
+    voices = {"speaker_0": "Anna", "speaker_1": "Bold"}
+    paths, report = asyncio.run(prepare(client, "p1", DIALOGUE, [(0.0, 8.0)], tmp_path, voices=voices))
+
+    # A line with no speaker, and a speaker given no voice: the default.
+    assert client.calls == [("Anna", "Нэг."), ("Bold", "Хоёр."), ("V1", "Гурав."), ("V1", "Дөрөв.")]
+    # Stored under the voice that spoke it — where the next export looks.
+    assert clip_key("p1", client.config.fingerprint("Anna"), "Нэг.") in objects
+    assert clip_key("p1", client.config.fingerprint("V1"), "Гурав.") in objects
+    assert report.synthesized == 4
+
+
+def test_the_same_words_in_two_voices_are_two_clips(tmp_path, bucket):
+    segments = [_seg(0, 0.0, 1.0, "Тийм.", speaker="a"), _seg(1, 1.0, 2.0, "Тийм.", speaker="b")]
+    client = FakeTts()
+    paths, report = asyncio.run(
+        prepare(client, "p1", segments, [(0.0, 2.0)], tmp_path, voices={"a": "Anna", "b": "Bold"})
+    )
+    assert client.calls == [("Anna", "Тийм."), ("Bold", "Тийм.")]
+    assert paths["s0"] != paths["s1"] and report.synthesized == 2
+
+
+def test_a_speaker_given_the_default_voice_shares_its_clips(tmp_path, bucket):
+    """The default voice named outright is still the default voice: its
+    clips are the ones already bought, not twins of them."""
+    segments = [_seg(0, 0.0, 1.0, "Тийм.", speaker="a"), _seg(1, 1.0, 2.0, "Тийм.")]
+    client = FakeTts()
+    paths, report = asyncio.run(
+        prepare(client, "p1", segments, [(0.0, 2.0)], tmp_path, voices={"a": "V1"})
+    )
+    assert client.calls == [("V1", "Тийм.")]
+    assert paths["s0"] == paths["s1"] and (report.synthesized, report.cached) == (1, 0)
+
+
+def test_a_new_voice_for_one_speaker_pays_for_that_speakers_lines_only(tmp_path, bucket):
+    first = FakeTts()
+    asyncio.run(prepare(first, "p1", DIALOGUE, [(0.0, 8.0)], tmp_path / "first",
+                        voices={"speaker_0": "Anna", "speaker_1": "Bold"}))
+    again = FakeTts()
+    _, report = asyncio.run(prepare(again, "p1", DIALOGUE, [(0.0, 8.0)], tmp_path / "again",
+                                    voices={"speaker_0": "Anna", "speaker_1": "Tuya"}))
+    assert again.calls == [("Tuya", "Хоёр.")]
+    assert (report.synthesized, report.cached) == (1, 3)
+
+
+def test_the_speakers_are_listed_as_they_first_speak_with_what_they_say():
+    segments = [
+        _seg(0, 0.0, 1.0, text="Welcome back.", speaker="speaker_1"),
+        _seg(1, 1.0, 2.0, text="  ", speaker="speaker_2"),        # no words: not speech
+        _seg(2, 2.0, 3.0, text="Thanks.", speaker="speaker_0"),
+        _seg(3, 3.0, 4.0, text="Nobody's line."),                 # no speaker: the default voice
+        _seg(4, 4.0, 5.0, text="x" * 200, speaker="speaker_1"),
+    ]
+    assert speakers(segments) == [
+        {"id": "speaker_1", "lines": 2, "sample": "Welcome back."},
+        {"id": "speaker_0", "lines": 1, "sample": "Thanks."},
+    ]
+    long_first = [_seg(0, 0.0, 1.0, text="  " + "y" * 200, speaker="s")]
+    assert speakers(long_first)[0]["sample"] == "y" * SAMPLE_CHARS
 
 
 # --------------------------------------------------------------------------
