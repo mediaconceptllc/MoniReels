@@ -53,6 +53,7 @@ import type {
   SubtitleFonts,
   SubtitleTemplate,
   TokenResponse,
+  TtsVoices,
 } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
@@ -67,6 +68,8 @@ const created = contracts.create_project as CreateProjectResponse;
 const outputs = contracts.outputs as Output[];
 const job = contracts.job as Job;
 const jobFailed = contracts.job_failed as Job;
+const jobVoiced = contracts.job_voiced as Job;
+const ttsVoices = contracts.tts_voices as TtsVoices;
 const queue = contracts.queue as QueueStatus;
 const providerSettings = contracts.provider_settings as ProviderSettings;
 const readiness = contracts.readiness as ProviderReadiness;
@@ -173,6 +176,7 @@ const present: unknown[] = [
   raw.project.export.burn_subtitles, raw.project.export.write_srt,
   raw.project.export.use_intro, raw.project.export.use_outro,
   raw.project.export.subtitle_language,
+  raw.project.export.voice_over, raw.project.export.original_volume,
   raw.project.export.logo.enabled, raw.project.export.logo.position,
   raw.project.export.logo.width_pct, raw.project.export.logo.opacity,
   raw.project.export.logo.margin_pct,
@@ -198,7 +202,10 @@ const present: unknown[] = [
   // from `blocks_export` rather than working the rule out a second time.
   raw.project.translation.needed, raw.project.translation.lines,
   raw.project.translation.translated, raw.project.translation.missing,
-  raw.project.translation.blocks_export,
+  raw.project.translation.blocks_export, raw.project.translation.used_for,
+  // Whether the export reads a Mongolian voice and why it cannot right now —
+  // the voice guard's own verdict, as for the translation above.
+  raw.project.voice.on, raw.project.voice.blocked,
 
   // creating one, and the upload that follows
   raw.create_project.project_id, raw.create_project.upload_url,
@@ -224,6 +231,12 @@ const present: unknown[] = [
   raw.job.result.llm.prompt_tokens, raw.job.result.llm.completion_tokens,
   raw.job.result.llm.cost_usd, raw.job.result.llm.models,
   raw.job_failed.result.elapsed_sec,
+  // What a voice-over did, in characters — the one cost of it this system
+  // can state — and the lines it had to hurry or cut.
+  raw.job_voiced.result.voice.lines, raw.job_voiced.result.voice.synthesized,
+  raw.job_voiced.result.voice.characters, raw.job_voiced.result.voice.cached,
+  raw.job_voiced.result.voice.missing, raw.job_voiced.result.voice.sped_up,
+  raw.job_voiced.result.voice.cut,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs.
@@ -240,6 +253,13 @@ const present: unknown[] = [
   raw.provider_settings.openrouter_model.hint,
   raw.provider_settings.stt_provider.hint,
   raw.provider_settings_saved.changed,
+  raw.provider_settings.elevenlabs_tts_voice_id.hint,
+  raw.provider_settings.elevenlabs_tts_model.hint,
+
+  // the voice picker: asked, never guessed — `mongolian` may be null
+  raw.tts_voices.model, raw.tts_voices.voice_id, raw.tts_voices.mongolian,
+  raw.tts_voices.error,
+  raw.tts_voices.voices.map((v) => [v.id, v.name, v.category, v.gender, v.accent, v.preview_url]),
 
   // what can and cannot run
   raw.readiness.capabilities.map((c) => [c.name, c.label, c.ready, c.blocked]),
@@ -322,7 +342,7 @@ console.log(
 // Keeps the compiler from pruning the two lists above as unused. They exist
 // to be checked, not to be read.
 void [
-  token, me, projects, project, created, outputs, job, jobFailed, queue,
+  token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices, queue,
   providerSettings, readiness, brand, brandEmpty, fonts, templateSaved,
   providers, writes, present,
 ];

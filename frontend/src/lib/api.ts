@@ -31,6 +31,7 @@ import type {
   SubtitleStyle,
   SubtitleTemplate,
   TokenResponse,
+  TtsVoices,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -247,6 +248,9 @@ export const api = {
 
   // -- admin --------------------------------------------------------------
   providerSettings: () => request<ProviderSettings>("/admin/settings"),
+
+  /** Free: ElevenLabs is asked for its voice list, nothing is synthesised. */
+  ttsVoices: () => request<TtsVoices>("/admin/tts/voices"),
 
   saveProviderSettings: (patch: ProviderSettingsPatch) =>
     request<{ changed: string[]; settings: ProviderSettings }>("/admin/settings", {

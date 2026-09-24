@@ -39,10 +39,12 @@ class ProviderError:
 def read_error(response: httpx.Response, limit: int = MESSAGE_MAX) -> ProviderError:
     """The provider's own `code` and `message`, and nothing else.
 
-    Two shapes are accepted because providers disagree: `{"error": {...}}`
-    and a flat `{"code": ..., "message": ...}`. A body that is neither — HTML
-    from a proxy, an empty 520 — yields an empty result rather than a
-    fallback to the raw text, which is the whole point.
+    Three shapes are accepted because providers disagree: `{"error": {...}}`,
+    a flat `{"code": ..., "message": ...}`, and ElevenLabs' `{"detail":
+    {"status": ..., "message": ...}}` — whose `status` is the code that says
+    what went wrong (`quota_exceeded`, `invalid_api_key`). A body that is
+    none of them — HTML from a proxy, an empty 520 — yields an empty result
+    rather than a fallback to the raw text, which is the whole point.
     """
     try:
         body = response.json()
@@ -59,7 +61,21 @@ def read_error(response: httpx.Response, limit: int = MESSAGE_MAX) -> ProviderEr
         error = body
 
     code = error.get("code")
-    message = error.get("message") or error.get("detail")
+    message = error.get("message")
+    detail = error.get("detail")
+    if message is None and detail is not None:
+        # One level down. Read as a whole, the ElevenLabs body used to reach
+        # the user as the repr of a Python dict.
+        if isinstance(detail, dict):
+            if code is None:
+                code = detail.get("status") or detail.get("code")
+            message = detail.get("message")
+        elif isinstance(detail, list):
+            # FastAPI's own validation answer: [{"loc": ..., "msg": ...}].
+            first = detail[0] if detail and isinstance(detail[0], dict) else {}
+            message = first.get("msg")
+        else:
+            message = detail
     return ProviderError(
         # A numeric code (OpenRouter sends the status again) is still a code.
         code=str(code) if code is not None else None,

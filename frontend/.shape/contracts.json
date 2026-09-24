@@ -92,6 +92,32 @@
     "state": "failed",
     "updated_at": 0.0
   },
+  "job_voiced": {
+    "attempts": 0,
+    "created_at": 0.0,
+    "error": null,
+    "finished_at": 0.0,
+    "job_id": "",
+    "kind": "export_all",
+    "message": "",
+    "progress": 0.0,
+    "project_id": "",
+    "result": {
+      "elapsed_sec": 0.0,
+      "voice": {
+        "cached": 0,
+        "characters": 0,
+        "cut": 0,
+        "lines": 0,
+        "missing": 0,
+        "sped_up": 0,
+        "synthesized": 0
+      }
+    },
+    "stage": "",
+    "state": "done",
+    "updated_at": 0.0
+  },
   "me": {
     "id": "",
     "role": "admin",
@@ -147,11 +173,13 @@
         "width_pct": 0.0
       },
       "orientation": "portrait",
+      "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
       "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
+      "voice_over": false,
       "write_srt": false
     },
     "id": "",
@@ -172,6 +200,32 @@
         },
         "stage": "",
         "state": "failed",
+        "updated_at": 0.0
+      },
+      {
+        "attempts": 0,
+        "created_at": 0.0,
+        "error": null,
+        "finished_at": 0.0,
+        "job_id": "",
+        "kind": "export_all",
+        "message": "",
+        "progress": 0.0,
+        "project_id": "",
+        "result": {
+          "elapsed_sec": 0.0,
+          "voice": {
+            "cached": 0,
+            "characters": 0,
+            "cut": 0,
+            "lines": 0,
+            "missing": 0,
+            "sped_up": 0,
+            "synthesized": 0
+          }
+        },
+        "stage": "",
+        "state": "done",
         "updated_at": 0.0
       },
       {
@@ -334,7 +388,8 @@
       "lines": 0,
       "missing": 0,
       "needed": false,
-      "translated": 0
+      "translated": 0,
+      "used_for": []
     },
     "updated_at": 0.0,
     "video": {
@@ -347,6 +402,10 @@
       "source_key": "",
       "thumbnail_key": "",
       "width": 0
+    },
+    "voice": {
+      "blocked": null,
+      "on": false
     }
   },
   "project_deleted": {
@@ -376,11 +435,13 @@
         "width_pct": 0.0
       },
       "orientation": "portrait",
+      "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
       "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
+      "voice_over": false,
       "write_srt": false
     },
     "id": "",
@@ -530,6 +591,16 @@
       "set": false,
       "source": "unset"
     },
+    "elevenlabs_tts_model": {
+      "hint": "",
+      "set": false,
+      "source": "env"
+    },
+    "elevenlabs_tts_voice_id": {
+      "hint": "",
+      "set": false,
+      "source": "unset"
+    },
     "openrouter_api_key": {
       "hint": "",
       "set": false,
@@ -560,6 +631,16 @@
         "source": "db"
       },
       "elevenlabs_api_key": {
+        "hint": "",
+        "set": false,
+        "source": "unset"
+      },
+      "elevenlabs_tts_model": {
+        "hint": "",
+        "set": false,
+        "source": "env"
+      },
+      "elevenlabs_tts_voice_id": {
         "hint": "",
         "set": false,
         "source": "unset"
@@ -730,6 +811,30 @@
   },
   "translate_started": {
     "job_id": ""
+  },
+  "tts_voices": {
+    "error": null,
+    "model": "",
+    "mongolian": false,
+    "voice_id": null,
+    "voices": [
+      {
+        "accent": "",
+        "category": "",
+        "gender": "",
+        "id": "",
+        "name": "",
+        "preview_url": ""
+      },
+      {
+        "accent": "",
+        "category": "",
+        "gender": "",
+        "id": "",
+        "name": "",
+        "preview_url": null
+      }
+    ]
   },
   "upload_complete": {
     "job_id": "",

@@ -12,8 +12,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from app.export.normalize import build_audio_filter, build_video_filter, validate_portrait_fill
+from app.export.normalize import (
+    build_audio_filter,
+    build_video_filter,
+    build_voice_mix,
+    validate_portrait_fill,
+)
 from app.export.overlay import LogoOverlay, build_burn_args, build_overlay_filter
 from app.export.presets import (
     AUDIO_CHANNEL_LAYOUT,
@@ -34,6 +40,9 @@ from app.utils.logging import get_logger
 from app.utils.paths import ascii_safe_filename, atomic_write_text, job_workdir
 from app.video.ffmpeg import FfmpegBinaries, FfmpegCancelled, FfmpegRun
 from app.video.probe import probe_video
+
+if TYPE_CHECKING:
+    from app.tts.voiceover import VoiceOver
 
 logger = get_logger(__name__)
 
@@ -62,12 +71,27 @@ async def _cut_and_normalize_clip(
     out_path: Path,
     progress_lo: float,
     progress_hi: float,
+    voice_path: Path | None = None,
+    original_volume: float = 1.0,
 ) -> None:
     vf = build_video_filter(width, height, fps, orientation, portrait_fill)
     duration = clip.end - clip.start
 
     args = ["-ss", f"{clip.start:.3f}", "-to", f"{clip.end:.3f}", "-i", clip.source_path]
-    if has_audio:
+    if voice_path is not None:
+        # The voice track is built on the clip's own timeline (0 = clip.start),
+        # so it takes no seek of its own. Video keeps its plain -vf; only the
+        # sound goes through the graph.
+        af = build_audio_filter(AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_LAYOUT)
+        args += [
+            "-i", str(voice_path),
+            "-map", "0:v", "-vf", vf,
+            "-filter_complex", build_voice_mix(af, original_volume, has_audio),
+            "-map", "[vo_mix]",
+        ]
+        if not has_audio:
+            args += ["-shortest"]
+    elif has_audio:
         af = build_audio_filter(AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_LAYOUT)
         args += ["-vf", vf, "-af", af]
     else:
@@ -288,6 +312,7 @@ async def render_timeline(
     transcript_source: str | None = None,
     intro_path: Path | None = None,
     outro_path: Path | None = None,
+    voice: VoiceOver | None = None,
 ) -> Path:
     if not clips:
         raise ValueError("Cannot render an empty clip list")
@@ -310,6 +335,7 @@ async def render_timeline(
     part_path = output_path.with_name(f"{output_path.stem}.part{output_path.suffix}")
     joined_path = workdir / f"joined{output_path.suffix}"
     normalized_paths: list[Path] = []
+    voice_paths: list[Path] = []
 
     try:
         fps_source = pick_fps_source(ordered_clips, transcript_source)
@@ -325,9 +351,20 @@ async def render_timeline(
 
             meta = await probe_video(binaries.ffprobe, Path(clip.source_path))  # type: ignore[arg-type]
             out_path = workdir / f"clip_{i:03d}.mp4"
+            # Only the content speaks Mongolian: a brand intro or outro is
+            # not a range of the source and has no lines in it.
+            voice_path = None
+            if voice is not None and clip.source_path == transcript_source:
+                voice_path = await voice.track_for(
+                    clip.start, clip.end, workdir / f"voice_{i:03d}.wav"
+                )
+                if voice_path is not None:
+                    voice_paths.append(voice_path)
             await _cut_and_normalize_clip(
                 binaries, handle, clip, meta["has_audio"], width, height, target_fps,
                 crf, preset, orientation, portrait_fill, out_path, lo, hi,
+                voice_path=voice_path,
+                original_volume=voice.original_volume if voice is not None else 1.0,
             )
             normalized_paths.append(out_path)
             clip_durations.append(clip.end - clip.start)
@@ -396,7 +433,7 @@ async def render_timeline(
             part_path.unlink(missing_ok=True)
         if joined_path.exists():
             joined_path.unlink(missing_ok=True)
-        for p in normalized_paths:
+        for p in normalized_paths + voice_paths:
             p.unlink(missing_ok=True)
         (workdir / "concat_list.txt").unlink(missing_ok=True)
         (workdir / "subs.ass").unlink(missing_ok=True)
@@ -496,6 +533,7 @@ async def render_all_ideas(
     transcript_source: str | None = None,
     intro_path: Path | None = None,
     outro_path: Path | None = None,
+    voice: VoiceOver | None = None,
 ) -> list[dict]:
     """Renders one standalone output file per suggested idea (up to 3 reels +
     up to 3 youtube compilations), reusing render_timeline unchanged for each.
@@ -545,6 +583,7 @@ async def render_all_ideas(
             write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
             transcript_segments=transcript_segments, logo=logo, logo_path=logo_path,
             transcript_source=transcript_source, intro_path=intro_path, outro_path=outro_path,
+            voice=voice,
         )
         results.append({"kind": kind, "title": title, "output_path": str(output_path)})
 

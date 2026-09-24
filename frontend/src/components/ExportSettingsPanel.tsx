@@ -176,6 +176,37 @@ export function ExportSettingsPanel({
         </div>
       )}
 
+      {/* Only for a video not in Mongolian — a Mongolian one already speaks
+          it. The price is said here, where the choice is made, not after the
+          export: every line read is billed by the character. */}
+      {sourceLanguage && (
+        <div className="flex flex-col gap-2">
+          <Checkbox checked={draft.voice_over} onChange={(on) => update("voice_over", on)}>
+            Орчуулгыг монгол дуугаар уншуулах
+          </Checkbox>
+          <p className="text-xs text-ink-3">
+            ElevenLabs-ээр, тэмдэгтээр нь төлбөртэй. Зөвхөн экспортлох хэсгүүдийн мөрийг, нэг
+            удаа: дахин экспортлоход өмнө нь үүсгэснээ ашиглана.
+          </p>
+          {draft.voice_over && (
+            <Field
+              label={`Эх дууны түвшин — ${Math.round(draft.original_volume * 100)}%`}
+              hint="Монгол дууны доор эх дуу хэр сонсогдох вэ. 0% бол бүрэн чимээгүй."
+            >
+              <input
+                type="range"
+                min={0}
+                max={60}
+                step={5}
+                value={Math.round(draft.original_volume * 100)}
+                onChange={(e) => update("original_volume", Number(e.target.value) / 100)}
+                className={`${TAP} w-full accent-[var(--accent)]`}
+              />
+            </Field>
+          )}
+        </div>
+      )}
+
       {(draft.use_intro || draft.use_outro) && (
         <p className="text-xs text-ink-3">
           Эхлэл/төгсгөлийн видеог админ ⚙️ Тохиргооноос оруулна. Нягтралт, кадрын давтамжийг нь

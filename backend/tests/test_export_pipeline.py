@@ -207,3 +207,78 @@ def test_a_source_that_is_not_in_the_timeline_falls_back():
 
     only = Clip(id="i", source_path="/w/intro.mp4", start=0.0, end=4.0, order=0)
     assert pick_fps_source([only], "/w/gone.mp4") is only
+
+
+# --------------------------------------------------------------------------
+# The Mongolian voice-over reaches the clips that speak
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_every_idea_is_rendered_with_the_voice(monkeypatch, tmp_path):
+    seen: list = []
+
+    async def fake_render_timeline(handle, binaries, clips, transition, **kwargs):
+        seen.append(kwargs.get("voice"))
+        return kwargs["output_path"]
+
+    monkeypatch.setattr("app.export.pipeline.render_timeline", fake_render_timeline)
+    voice = object()
+    await render_all_ideas(
+        _handle(), binaries=object(), video_path="C:/video.mp4",
+        suggestions=Suggestions(shorts=[_short("a", (0, 5), (6, 10), (11, 20))],
+                                youtube=[_youtube("y", [(0, 300)])]),
+        transition=Transition(), crf=20, preset="medium", orientation="landscape",
+        portrait_fill="blur", supported_xfade=[], container="mp4", output_dir=tmp_path,
+        job_id="job-test", voice=voice,
+    )
+    assert seen == [voice, voice]
+
+
+@pytest.mark.asyncio
+async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatch, tmp_path):
+    """A brand intro is not a range of the source and has no lines in it."""
+    from app.export import pipeline
+    from app.timeline.models import Clip
+
+    cuts: list[tuple[str, object, float]] = []
+
+    async def fake_probe(ffprobe, path):
+        return {"fps": 30.0, "has_audio": True, "duration": 3.0}
+
+    async def fake_cut(binaries, handle, clip, has_audio, *args, voice_path=None, original_volume=1.0):
+        cuts.append((clip.source_path, voice_path, original_volume))
+
+    async def fake_concat(binaries, handle, paths, total, workdir, out_path):
+        Path(out_path).write_bytes(b"mp4")
+
+    class FakeVoice:
+        original_volume = 0.25
+
+        def __init__(self) -> None:
+            self.asked: list[tuple[float, float]] = []
+
+        async def track_for(self, start, end, out_path):
+            self.asked.append((start, end))
+            out_path.write_bytes(b"wav")
+            return out_path
+
+    monkeypatch.setattr(pipeline, "probe_video", fake_probe)
+    monkeypatch.setattr(pipeline, "_cut_and_normalize_clip", fake_cut)
+    monkeypatch.setattr(pipeline, "_join_concat", fake_concat)
+    intro = tmp_path / "intro.mp4"
+    intro.write_bytes(b"x")
+    voice = FakeVoice()
+
+    await pipeline.render_timeline(
+        _handle(), type("Bin", (), {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})(),
+        # No transition: two clips then join by concatenation, which is faked.
+        [Clip(id="c", source_path="/src.mp4", start=5.0, end=9.0, order=0)], Transition(duration=0.0),
+        crf=20, preset="medium", orientation="landscape", portrait_fill="pad",
+        supported_xfade=[], workdir=tmp_path / "work", output_path=tmp_path / "out.mp4",
+        transcript_source="/src.mp4", intro_path=intro, voice=voice,
+    )
+
+    assert voice.asked == [(5.0, 9.0)]
+    (intro_cut, content_cut) = cuts
+    assert intro_cut[0] == str(intro) and intro_cut[1] is None
+    assert content_cut[0] == "/src.mp4" and content_cut[1] is not None and content_cut[2] == 0.25

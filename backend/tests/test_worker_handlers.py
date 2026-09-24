@@ -1276,3 +1276,188 @@ def test_a_translation_cleared_after_queueing_falls_back_and_is_named(world, pro
 
     assert [s.text for s in world.render_kwargs["transcript_segments"]] == ["Сайн уу.", "Goodbye now."]
     assert result["subtitle_fallback_lines"] == 1
+
+
+# --------------------------------------------------------------------------
+# The Mongolian voice-over
+# --------------------------------------------------------------------------
+
+def _voice_over(db, project_id: str, *, on: bool = True, volume: float = 0.3, clips=None) -> None:
+    doc = load(db, project_id)
+    doc.export.voice_over = on
+    doc.export.original_volume = volume
+    if clips is not None:
+        doc.clips = clips
+    save(db, doc)
+    db.commit()
+
+
+def _fake_voice(monkeypatch, world) -> list[str]:
+    """A voice that records what it was asked to read, over a bucket that
+    knows which clips it already holds."""
+    from app import worker
+    from app.tts.elevenlabs import VoiceConfig
+
+    said: list[str] = []
+
+    class FakeTts:
+        config = VoiceConfig(api_key="k", voice_id="V1")
+
+        async def synthesize(self, text: str) -> bytes:
+            said.append(text)
+            return b"mp3"
+
+        async def aclose(self) -> None:
+            said.append("<closed>")
+
+    monkeypatch.setattr(worker, "build_tts_client", lambda settings: FakeTts())
+    monkeypatch.setattr(r2, "exists", lambda key: key in world.r2.objects)
+    return said
+
+
+def test_the_voice_reads_only_what_the_rendered_clips_say(world, project, db, monkeypatch):
+    """Billed by the character: a line outside every clip is a line nobody
+    hears."""
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id, clips=[
+        Clip(id="c1", source_path="C:/old.mp4", start=0.0, end=2.0, order=0),
+    ])
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert said == ["Сайн уу.", "<closed>"]
+    voice = world.render_kwargs["voice"]
+    assert set(voice.audio) == {"a"} and voice.original_volume == 0.3
+    assert result["voice"]["synthesized"] == 1 and result["voice"]["characters"] == len("Сайн уу.")
+    # Stored where the next export will look for it.
+    assert any(key.startswith(f"audio/{project.id}/voice-") for key, _ in world.r2.uploads)
+
+
+def test_the_ideas_picked_decide_which_lines_are_read(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id, clips=False, suggestions=_suggestions())
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    doc = load(db, project.id)
+    doc.transcript.segments.append(
+        Segment(id="c", start=30.0, end=32.0, text="Later.", translation="Дараа.")
+    )
+    save(db, doc)
+    db.commit()
+    _voice_over(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    # Every short cuts 0-5 and 10-20; the line at 30s is in none of them.
+    assert said == ["Сайн уу.", "Баяртай.", "<closed>"]
+
+
+def test_a_line_already_bought_is_not_bought_again(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+    said.clear()
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert said == ["<closed>"]
+    assert result["voice"]["cached"] == 2 and result["voice"]["synthesized"] == 0
+
+
+def test_no_voice_is_made_unless_asked(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert said == [] and world.render_kwargs["voice"] is None and "voice" not in result
+
+
+def test_a_mongolian_video_is_never_voiced_over(world, project, db, monkeypatch):
+    """It already speaks Mongolian; there is no translation to read."""
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _set_language(db, project.id, "mn")
+    _voice_over(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert said == [] and world.render_kwargs["voice"] is None
+
+
+def test_a_spent_voice_quota_fails_the_export_at_once(world, project, db, monkeypatch):
+    """Every retry would claim the render slot and download the source again
+    to be refused the same way."""
+    from app import worker
+    from app.tts.elevenlabs import TtsError
+
+    async def refused(handle):
+        raise TtsError("Тэмдэгтийн үлдэгдэл дууссан", status=401, code="quota_exceeded")
+
+    monkeypatch.setitem(worker.HANDLERS, "export", refused)
+    job = _running_job(db, project.id, "export")
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    failed = db.get(Job, job.id)
+    assert failed.state == "failed" and "үлдэгдэл" in failed.error
+
+
+def test_a_voice_failure_on_one_line_is_retried_like_any_render(world, project, db, monkeypatch):
+    from app import worker
+    from app.tts.elevenlabs import TtsError
+
+    async def hiccup(handle):
+        raise TtsError("ElevenLabs 500", status=500)
+
+    monkeypatch.setitem(worker.HANDLERS, "export", hiccup)
+    job = _running_job(db, project.id, "export")
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    assert db.get(Job, job.id).state == "queued"
+
+
+def test_a_youtube_plan_reads_the_lines_its_ranges_hold(world, project, db, monkeypatch):
+    from app import worker
+
+    plans = Suggestions(shorts=[], youtube=[YoutubePlan(
+        title="Plan", throughline="t", ranges=[KeepRange(start=25.0, end=40.0)], total_duration=15.0,
+    )])
+    _ready_to_render(db, project.id, clips=False, suggestions=plans)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    doc = load(db, project.id)
+    doc.transcript.segments.append(
+        Segment(id="c", start=30.0, end=32.0, text="Later.", translation="Дараа.")
+    )
+    save(db, doc)
+    db.commit()
+    _voice_over(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+
+    asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    assert said == ["Дараа.", "<closed>"]

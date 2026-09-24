@@ -16,8 +16,10 @@ from app.languages import (
     SOURCE_LANGUAGES,
     subtitle_segments,
     subtitles_need_translation,
+    translation_uses,
     translation_view,
     untranslated_lines,
+    voice_over_on,
 )
 from app.models import ExportSettings, Project, Segment, Transcript, Word
 from app.schemas import SourceLanguage
@@ -62,7 +64,7 @@ def test_the_request_schema_offers_exactly_the_languages_that_can_be_heard():
 # --------------------------------------------------------------------------
 
 def _project(language: str, *, subtitle_language: str = "mn", burn: bool = True, srt: bool = True,
-             translated: tuple[str | None, ...] = ("Сайн уу", "Баяртай")) -> Project:
+             translated: tuple[str | None, ...] = ("Сайн уу", "Баяртай"), voice: bool = False) -> Project:
     words = [Word(text="Hello", start=0.0, end=0.5)]
     segments = [
         Segment(id=f"s{i}", start=i * 2.0, end=i * 2.0 + 1.5, text=text, words=words, translation=tr)
@@ -72,7 +74,9 @@ def _project(language: str, *, subtitle_language: str = "mn", burn: bool = True,
         name="p",
         language=language,
         transcript=Transcript(language="eng", segments=segments, full_text="Hello Goodbye"),
-        export=ExportSettings(subtitle_language=subtitle_language, burn_subtitles=burn, write_srt=srt),
+        export=ExportSettings(
+            subtitle_language=subtitle_language, burn_subtitles=burn, write_srt=srt, voice_over=voice
+        ),
     )
 
 
@@ -131,7 +135,8 @@ def test_untranslated_lines_counts_only_lines_with_words():
 
 def test_the_view_counts_what_the_page_shows():
     view = translation_view(_project(ENGLISH, translated=("Сайн уу", None)))
-    assert view == {"needed": True, "lines": 2, "translated": 1, "missing": 1, "blocks_export": True}
+    assert view == {"needed": True, "lines": 2, "translated": 1, "missing": 1, "blocks_export": True,
+                    "used_for": ["subtitles"]}
 
 
 def test_a_line_with_no_words_is_neither_translated_nor_missing():
@@ -149,8 +154,9 @@ def test_missing_lines_block_nothing_when_they_would_not_reach_the_output():
 def test_a_mongolian_video_is_never_missing_a_translation():
     """Its lines have no translation because they need none — counted as
     missing, the page would offer to translate Mongolian into Mongolian."""
-    view = translation_view(_project(MONGOLIAN, translated=(None, None)))
-    assert view == {"needed": False, "lines": 2, "translated": 0, "missing": 0, "blocks_export": False}
+    view = translation_view(_project(MONGOLIAN, translated=(None, None), voice=True))
+    assert view == {"needed": False, "lines": 2, "translated": 0, "missing": 0, "blocks_export": False,
+                    "used_for": []}
 
 
 def test_a_project_with_no_transcript_yet_has_nothing_to_count():
@@ -158,3 +164,30 @@ def test_a_project_with_no_transcript_yet_has_nothing_to_count():
     project.transcript = None
     view = translation_view(project)
     assert (view["lines"], view["missing"], view["blocks_export"]) == (0, 0, False)
+
+
+
+# --------------------------------------------------------------------------
+# The voice reads the translation too
+# --------------------------------------------------------------------------
+
+def test_only_a_video_not_in_mongolian_is_voiced_over():
+    assert voice_over_on(_project(ENGLISH, voice=True))
+    assert not voice_over_on(_project(ENGLISH, voice=False))
+    assert not voice_over_on(_project(MONGOLIAN, voice=True))
+
+
+def test_what_the_translation_is_used_for_is_named():
+    assert translation_uses(_project(ENGLISH)) == ["subtitles"]
+    assert translation_uses(_project(ENGLISH, voice=True)) == ["subtitles", "voice"]
+    assert translation_uses(_project(ENGLISH, subtitle_language="source", voice=True)) == ["voice"]
+    assert translation_uses(_project(ENGLISH, subtitle_language="source")) == []
+
+
+def test_a_voice_blocks_an_export_even_with_subtitles_in_the_source_language():
+    """Switching the subtitles to English is the way out for subtitles only:
+    a Mongolian voice has nothing else to read."""
+    view = translation_view(
+        _project(ENGLISH, subtitle_language="source", translated=("Сайн уу", None), voice=True)
+    )
+    assert view["blocks_export"] is True and view["used_for"] == ["voice"]

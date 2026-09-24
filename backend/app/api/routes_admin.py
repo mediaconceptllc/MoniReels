@@ -150,6 +150,50 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     }
 
 
+@router.get("/tts/voices")
+async def tts_voices(db: Session = Depends(get_db)) -> dict:  # noqa: B008
+    """The voices the voice-over can use, and whether ElevenLabs lists
+    Mongolian for the chosen model.
+
+    Free — nothing is synthesised — and never raises: a provider that cannot
+    be reached is itself the answer, as on the providers page.
+
+    `mongolian` is ASKED, not assumed. It is True or False when ElevenLabs'
+    model list says so, and None when that list could not be read or does
+    not mention the model: unknown is not the same as no, and a picker that
+    printed "not supported" for a model it could not ask about would be
+    guessing in the operator's direction.
+    """
+    from app import provider_settings
+    from app.tts import elevenlabs
+
+    settings = provider_settings.effective(db)
+    out: dict = {
+        "model": settings.elevenlabs_tts_model,
+        "voice_id": settings.elevenlabs_tts_voice_id or None,
+        "voices": [],
+        "mongolian": None,
+        "error": None,
+    }
+    if not settings.elevenlabs_api_key:
+        out["error"] = "ElevenLabs-ийн API түлхүүр тавигдаагүй байна."
+        return out
+
+    client = elevenlabs.build_client(settings)
+    try:
+        out["voices"] = await client.voices()
+        try:
+            languages = await client.model_languages(settings.elevenlabs_tts_model)
+            out["mongolian"] = elevenlabs.is_mongolian(languages)
+        except Exception as e:  # noqa: BLE001 - the voices are still worth showing
+            logger.warning("Could not read ElevenLabs' model list: %s", e)
+    except Exception as e:  # noqa: BLE001 - reachability is part of the answer
+        out["error"] = str(e) or type(e).__name__
+    finally:
+        await client.aclose()
+    return out
+
+
 @router.get("/settings")
 def provider_settings_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     """Where each provider value comes from, and a hint at its contents.

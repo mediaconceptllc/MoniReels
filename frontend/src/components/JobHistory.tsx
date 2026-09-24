@@ -66,6 +66,7 @@ export function JobHistory({
         {jobs.map((job) => {
           const cost = job.result?.llm?.cost_usd;
           const ran = job.result?.elapsed_sec;
+          const voice = job.result?.voice;
           return (
             <li key={job.job_id} className="flex flex-col gap-1 px-4 py-2.5">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -77,7 +78,11 @@ export function JobHistory({
                 {/* An absent cost is "nothing measured it", which is not the
                     same as free — so it is a dash, never $0.00. */}
                 <span className="tabular text-xs text-ink-2">
-                  {typeof cost === "number" ? usd(cost) : "—"}
+                  {typeof cost === "number"
+                    ? usd(cost)
+                    : voice
+                      ? `${voice.characters} тэмдэгт`
+                      : "—"}
                 </span>
                 <span className="tabular ml-auto text-xs text-ink-3">
                   {relativeTime(job.finished_at ?? job.created_at)}
@@ -88,6 +93,18 @@ export function JobHistory({
               {job.error && (
                 <p className="font-mono text-[11px] leading-snug text-tally">{job.error}</p>
               )}
+              {/* The lines a voice-over had to hurry or cut are the ones to
+                  listen to before publishing — counted, so nobody has to
+                  find them by ear. */}
+              {voice && (
+                <p className="tabular text-xs text-ink-3">
+                  Монгол дуу: {voice.lines} мөр · шинээр {voice.synthesized} · хадгалснаас{" "}
+                  {voice.cached}
+                  {voice.sped_up > 0 && ` · ${voice.sped_up} хурдасгасан`}
+                  {voice.cut > 0 && ` · ${voice.cut} таслагдсан`}
+                  {voice.missing > 0 && ` · ${voice.missing} орчуулгагүй`}
+                </p>
+              )}
             </li>
           );
         })}
@@ -96,6 +113,12 @@ export function JobHistory({
       {/* What these numbers do NOT cover, beside the numbers themselves.
           Each line is a real hole, not a disclaimer. */}
       <div className="flex flex-col gap-0.5 border-t border-rule bg-surface-2 px-4 py-2.5 text-xs text-ink-3">
+        {jobs.some((job) => job.result?.voice) && (
+          <p>
+            Монгол дуу тэмдэгтээр тооцогддог. Долларын үнэ нь ElevenLabs-ийн багцаас хамаарах тул
+            энд тэмдэгтийн тоогоор харуулна.
+          </p>
+        )}
         {!spend.stt_measured && (
           <p>
             Зөвхөн загварын зарлага хэмжигддэг. Яриа таних төлбөрийг систем тоолдоггүй тул тэр
