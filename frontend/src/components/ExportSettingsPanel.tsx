@@ -13,7 +13,8 @@ import { useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { LANGUAGE_LABELS } from "@/lib/format";
-import type { ExportSettings, LogoPosition, SourceLanguage } from "@/lib/types";
+import type { ExportSettings, LogoPosition, SourceLanguage, SpeakerSummary } from "@/lib/types";
+import { SpeakerVoices } from "@/components/SpeakerVoices";
 
 // Corners only: a mark anywhere else is a watermark over the face the
 // short is about. Top by default — subtitles sit at the bottom.
@@ -35,10 +36,29 @@ const PRESET_LABELS: Record<string, string> = {
   slow: "Удаан",
 };
 
+/** Key order is not content. The server keeps the document in Postgres
+ *  JSONB, which reorders an object's keys — so `speaker_voices` comes back
+ *  in ITS order, not in the order the producer chose voices, and a plain
+ *  JSON comparison would call the saved settings unsaved forever. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, canonical(record[key])]),
+    );
+  }
+  return value;
+}
+
 export function ExportSettingsPanel({
   projectId,
   settings,
   sourceLanguage,
+  speakers,
+  hasTranscript,
   onSaved,
 }: {
   projectId: string;
@@ -46,6 +66,9 @@ export function ExportSettingsPanel({
   /** What the video is spoken in when that is not Mongolian — the one case
    *  with a choice of subtitle language. Null hides the choice. */
   sourceLanguage: SourceLanguage | null;
+  /** Who speaks, for a voice each — the server's view of the transcript. */
+  speakers: SpeakerSummary[];
+  hasTranscript: boolean;
   onSaved: () => void;
 }) {
   const [draft, setDraft] = useState<ExportSettings>(settings);
@@ -53,7 +76,7 @@ export function ExportSettingsPanel({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+  const dirty = JSON.stringify(canonical(draft)) !== JSON.stringify(canonical(settings));
 
   function update<K extends keyof ExportSettings>(key: K, value: ExportSettings[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -203,6 +226,14 @@ export function ExportSettingsPanel({
                 className={`${TAP} w-full accent-[var(--accent)]`}
               />
             </Field>
+          )}
+          {draft.voice_over && (
+            <SpeakerVoices
+              speakers={speakers}
+              hasTranscript={hasTranscript}
+              value={draft.speaker_voices}
+              onChange={(next) => update("speaker_voices", next)}
+            />
           )}
         </div>
       )}

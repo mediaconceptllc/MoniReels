@@ -10,7 +10,7 @@
  * than presenting a button that returns a 400.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
@@ -79,19 +79,29 @@ export default function ProjectPage() {
     if (user) void refresh();
   }, [user, refresh]);
 
-  // Pick the furthest step that actually has content, so returning to a
-  // project lands where the work is rather than at the beginning.
+  // The furthest step that actually has content, so returning to a project
+  // lands where the work is rather than at the beginning, and a job that
+  // gets further moves the page along with it.
+  const furthest: Stage | null = !project
+    ? null
+    : outputs.length
+      ? "outputs"
+      : project.suggestions?.shorts.length
+        ? "suggestions"
+        : project.translation.needed && project.translation.translated
+          ? "translation"
+          : project.transcript?.segments.length
+            ? "transcript"
+            : "source";
+  // Only when that step CHANGES. Every save refreshes the project, and the
+  // settings live on the first tab: moving on each refresh threw the producer
+  // off the panel they had just saved, before they could see it was saved.
+  const reached = useRef<Stage | null>(null);
   useEffect(() => {
-    if (!project) return;
-    setTab((current: Stage) => {
-      if (current !== "source") return current;
-      if (outputs.length) return "outputs";
-      if (project.suggestions?.shorts.length) return "suggestions";
-      if (project.translation.needed && project.translation.translated) return "translation";
-      if (project.transcript?.segments.length) return "transcript";
-      return "source";
-    });
-  }, [project, outputs.length]);
+    if (!furthest || furthest === reached.current) return;
+    reached.current = furthest;
+    setTab((current: Stage) => (current === "source" ? furthest : current));
+  }, [furthest]);
 
   async function run(action: () => Promise<{ job_id: string }>) {
     setBusy(true);
@@ -429,6 +439,8 @@ export default function ProjectPage() {
                 projectId={projectId}
                 settings={project.export}
                 sourceLanguage={translation.needed ? project.language : null}
+                speakers={project.speakers}
+                hasTranscript={hasTranscript}
                 onSaved={() => void refresh()}
               />
             </Card>

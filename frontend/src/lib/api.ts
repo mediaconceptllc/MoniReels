@@ -22,6 +22,7 @@ import type {
   Project,
   ProjectDocument,
   ProjectSummary,
+  ProjectVoices,
   ProviderReadiness,
   ProviderSettings,
   ProviderSettingsPatch,
@@ -270,6 +271,11 @@ export const api = {
    *  to appear on the page with the paid button, and that page is not
    *  admin-only. */
   providerReadiness: () => request<ProviderReadiness>("/projects/providers/status"),
+
+  /** The voices a speaker can be given. Readable by anyone signed in, like
+   *  the readiness above: the producer choosing a speaker's voice is not an
+   *  admin. Free — nothing is synthesised. */
+  projectVoices: () => request<ProjectVoices>("/projects/tts/voices"),
 
   subtitleFonts: () => request<SubtitleFonts>("/projects/subtitle/fonts"),
 

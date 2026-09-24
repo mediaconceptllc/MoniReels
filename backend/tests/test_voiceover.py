@@ -307,8 +307,11 @@ def test_the_speakers_are_listed_as_they_first_speak_with_what_they_say():
         {"id": "speaker_1", "lines": 2, "sample": "Welcome back."},
         {"id": "speaker_0", "lines": 1, "sample": "Thanks."},
     ]
+    # Cut where it is long, and saying so; whole where it is not.
     long_first = [_seg(0, 0.0, 1.0, text="  " + "y" * 200, speaker="s")]
-    assert speakers(long_first)[0]["sample"] == "y" * SAMPLE_CHARS
+    assert speakers(long_first)[0]["sample"] == "y" * SAMPLE_CHARS + "…"
+    exactly = [_seg(0, 0.0, 1.0, text="z" * SAMPLE_CHARS, speaker="s")]
+    assert speakers(exactly)[0]["sample"] == "z" * SAMPLE_CHARS
 
 
 # --------------------------------------------------------------------------

@@ -47,6 +47,7 @@ import type {
   Project,
   ProjectDocument,
   ProjectSummary,
+  ProjectVoices,
   ProviderReadiness,
   ProviderSettings,
   QueueStatus,
@@ -70,6 +71,7 @@ const job = contracts.job as Job;
 const jobFailed = contracts.job_failed as Job;
 const jobVoiced = contracts.job_voiced as Job;
 const ttsVoices = contracts.tts_voices as TtsVoices;
+const projectVoices = contracts.project_voices as ProjectVoices;
 const queue = contracts.queue as QueueStatus;
 const providerSettings = contracts.provider_settings as ProviderSettings;
 const readiness = contracts.readiness as ProviderReadiness;
@@ -177,6 +179,9 @@ const present: unknown[] = [
   raw.project.export.use_intro, raw.project.export.use_outro,
   raw.project.export.subtitle_language,
   raw.project.export.voice_over, raw.project.export.original_volume,
+  // A voice per speaker, sent whole; a speaker read in the default voice has
+  // no entry.
+  raw.project.export.speaker_voices,
   raw.project.export.logo.enabled, raw.project.export.logo.position,
   raw.project.export.logo.width_pct, raw.project.export.logo.opacity,
   raw.project.export.logo.margin_pct,
@@ -206,6 +211,9 @@ const present: unknown[] = [
   // Whether the export reads a Mongolian voice and why it cannot right now —
   // the voice guard's own verdict, as for the translation above.
   raw.project.voice.on, raw.project.voice.blocked,
+  // Who speaks, for a voice each: counted and quoted by the server, because
+  // a bare `speaker_1` identifies nobody.
+  raw.project.speakers.map((s) => [s.id, s.lines, s.sample]),
 
   // creating one, and the upload that follows
   raw.create_project.project_id, raw.create_project.upload_url,
@@ -260,6 +268,10 @@ const present: unknown[] = [
   raw.tts_voices.model, raw.tts_voices.voice_id, raw.tts_voices.mongolian,
   raw.tts_voices.error,
   raw.tts_voices.voices.map((v) => [v.id, v.name, v.category, v.gender, v.accent, v.preview_url]),
+  // the producer's list for a speaker's voice — thinner than the admin's,
+  // with the default a speaker without one is read in
+  raw.project_voices.default_voice_id, raw.project_voices.error,
+  raw.project_voices.voices.map((v) => [v.id, v.name, v.gender, v.accent, v.preview_url]),
 
   // what can and cannot run
   raw.readiness.capabilities.map((c) => [c.name, c.label, c.ready, c.blocked]),
@@ -342,7 +354,8 @@ console.log(
 // Keeps the compiler from pruning the two lists above as unused. They exist
 // to be checked, not to be read.
 void [
-  token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices, queue,
+  token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices,
+  projectVoices, queue,
   providerSettings, readiness, brand, brandEmpty, fonts, templateSaved,
   providers, writes, present,
 ];

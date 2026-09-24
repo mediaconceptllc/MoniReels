@@ -81,7 +81,8 @@ def speakers(segments: list[Segment]) -> list[dict]:
 
     Each comes with how much they say and their first line, because a label
     like `speaker_1` identifies nobody: "the one who opens with 'Welcome back
-    to the channel'" does. Lines with no words are not speech, and a line
+    to the channel'" does. A first line longer than SAMPLE_CHARS is cut and
+    says so with an ellipsis. Lines with no words are not speech, and a line
     with no speaker is read in the default voice, so neither makes a row.
     """
     order: list[str] = []
@@ -94,7 +95,9 @@ def speakers(segments: list[Segment]) -> list[dict]:
         if seg.speaker not in counts:
             order.append(seg.speaker)
             counts[seg.speaker] = 0
-            samples[seg.speaker] = text[:SAMPLE_CHARS]
+            samples[seg.speaker] = (
+                text if len(text) <= SAMPLE_CHARS else text[:SAMPLE_CHARS].rstrip() + "…"
+            )
         counts[seg.speaker] += 1
     return [{"id": sid, "lines": counts[sid], "sample": samples[sid]} for sid in order]
 
