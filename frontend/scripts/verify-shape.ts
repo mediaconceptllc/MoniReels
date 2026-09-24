@@ -177,6 +177,12 @@ const present: unknown[] = [
   raw.project.spend.spent_usd, raw.project.spend.priced_jobs,
   raw.project.spend.keep_days, raw.project.spend.suggest_estimate_usd,
   raw.project.spend.suggest_samples, raw.project.spend.stt_measured,
+  raw.project.spend.suggest_basis_shorts,
+  // How many ideas to ask for. The picker's range comes from the server, and
+  // what was asked travels with what came back so a shortfall can be said.
+  raw.project.suggest_limits.shorts_max, raw.project.suggest_limits.youtube_max,
+  raw.project.suggest_limits.shorts_default, raw.project.suggest_limits.youtube_default,
+  raw.project.suggestions.requested_shorts, raw.project.suggestions.requested_youtube,
 
   // creating one, and the upload that follows
   raw.create_project.project_id, raw.create_project.upload_url,

@@ -29,8 +29,24 @@ MIN_SHORT_DURATION = 35.0
 MAX_SHORT_DURATION = 60.0
 MIN_CUTS = 3
 MAX_CUTS = 5
-REQUIRED_SHORT_COUNT = 3
 VALID_ROLES = {"hook", "context", "proof", "payoff"}
+
+# ---------------------------------------------------------------------------
+# How many ideas to ask for. The producer chooses, inside a range this module
+# owns: the route refuses a request outside it, the project page draws its
+# picker from it, and the worker clamps to it — one rule, read three times,
+# never retyped.
+#
+# The number was a literal 3 in twelve places, including the JSON schema sent
+# to the model (`minItems: 3, maxItems: 3`), so the model was structurally
+# unable to return any other count. `REQUIRED_SHORT_COUNT` existed here and the
+# orchestrator did not even read it — it restated `3` beside it.
+# ---------------------------------------------------------------------------
+DEFAULT_SHORT_COUNT = 3
+MAX_SHORT_COUNT = 8
+
+DEFAULT_YOUTUBE_COUNT = 3
+MAX_YOUTUBE_COUNT = 5
 
 YOUTUBE_MIN_VIDEO_DURATION_SEC = 1200.0  # 20 minutes
 # Same contract as the shorts above: app.ai.prompts states this window to the
@@ -38,7 +54,6 @@ YOUTUBE_MIN_VIDEO_DURATION_SEC = 1200.0  # 20 minutes
 # range, production returned 718.8s and 492.7s — both outside, neither refused.
 YOUTUBE_TARGET_DURATION_SEC = 600.0  # 10 minutes, per idea
 YOUTUBE_TARGET_TOLERANCE = 0.10
-REQUIRED_YOUTUBE_COUNT = 3  # only enforced when the video is >= YOUTUBE_MIN_VIDEO_DURATION_SEC
 MERGE_GAP_SEC = 0.5
 
 # The STT provider returns no word-level timestamps, so a segment's start/end is
@@ -98,10 +113,36 @@ class RawYoutubePlan(BaseModel):
 
 class RawSuggestions(BaseModel):
     shorts: list[RawShort]
-    # 0 items or exactly REQUIRED_YOUTUBE_COUNT (enforced in postprocess_suggestions,
-    # since whether youtube is wanted at all depends on video duration, which this
-    # shape-only layer doesn't know about).
+    # Whether youtube is wanted at all depends on the video's duration and on
+    # what the producer asked for, neither of which this shape-only layer
+    # knows — postprocess_suggestions decides.
     youtube: list[RawYoutubePlan] = Field(default_factory=list)
+
+
+def count_limits(duration_sec: float) -> tuple[int, int]:
+    """(most shorts, most YouTube plans) worth asking this video for.
+
+    The shorts bound is arithmetic, not taste: each short is at least
+    MIN_SHORT_DURATION of material on a topic MEANINGFULLY DIFFERENT from the
+    others, so a video holds at most `duration / MIN_SHORT_DURATION` of them
+    without two sharing a story. Asking a 2-minute source for eight would
+    only buy near-duplicates, and a bill for them. Derived from the rule the
+    model is already held to, so the two cannot drift apart.
+    """
+    shorts = max(1, min(MAX_SHORT_COUNT, int(duration_sec // MIN_SHORT_DURATION)))
+    youtube = MAX_YOUTUBE_COUNT if duration_sec > YOUTUBE_MIN_VIDEO_DURATION_SEC else 0
+    return shorts, youtube
+
+
+def default_counts(duration_sec: float) -> tuple[int, int]:
+    """What an omitted choice means: the old fixed three, inside the limits.
+
+    Unchanged for anything longer than three minimum-length shorts (105s).
+    Below that the old three asked for more distinct stories than the source
+    can hold, and the model filled the gap with near-duplicates.
+    """
+    shorts_max, youtube_max = count_limits(duration_sec)
+    return min(DEFAULT_SHORT_COUNT, shorts_max), min(DEFAULT_YOUTUBE_COUNT, youtube_max)
 
 
 def validate_llm_output(raw_json: dict) -> RawSuggestions:
@@ -222,23 +263,60 @@ def _build_youtube_plan(raw: RawYoutubePlan, segments: Segments, duration_sec: f
     return YoutubePlan(title=raw.title, throughline=raw.throughline, ranges=ranges, total_duration=total)
 
 
-def postprocess_suggestions(raw: RawSuggestions, segments: Segments, duration_sec: float) -> Suggestions:
-    if len(raw.shorts) != REQUIRED_SHORT_COUNT:
-        raise SuggestionValidationError(
-            f"Expected exactly {REQUIRED_SHORT_COUNT} shorts, got {len(raw.shorts)}"
-        )
+def postprocess_suggestions(
+    raw: RawSuggestions,
+    segments: Segments,
+    duration_sec: float,
+    *,
+    shorts: int = DEFAULT_SHORT_COUNT,
+    youtube: int = DEFAULT_YOUTUBE_COUNT,
+) -> Suggestions:
+    """Resolve the model's indices into timed ideas — every one that holds.
 
-    shorts = [_build_short(s, segments, duration_sec) for s in raw.shorts]
+    A short that breaks a rule here is DROPPED and named in the log, not
+    allowed to fail the job. It used to fail it: one bad short out of three
+    discarded the two good ones along with the money already spent on all of
+    them. That was tolerable at a fixed three and is not at eight, where the
+    chance that every short survives a round of validation falls fast — and
+    the producer would get nothing for a bill instead of seven ideas and a
+    count of the one that did not make it.
+
+    Only an answer with NO usable short is a failure, because there is nothing
+    to show for it.
+    """
+    built: list[ShortIdea] = []
+    # Every short is tried, not only the first `shorts`: when the model
+    # returned a spare, the spare stands in for one that was dropped instead
+    # of being thrown away beside it.
+    for raw_short in raw.shorts:
+        if len(built) == shorts:
+            break
+        try:
+            built.append(_build_short(raw_short, segments, duration_sec))
+        except SuggestionValidationError as e:
+            logger.warning("Dropped a short that breaks a rule: %s", e)
+    if not built:
+        raise SuggestionValidationError(
+            f"None of the {len(raw.shorts)} short(s) returned is usable"
+        )
+    if len(built) < shorts:
+        logger.info("Asked for %d short(s); %d held up", shorts, len(built))
 
     # Below the duration gate, youtube is always [] regardless of what the
     # model returned - a short video should never fail suggestion generation
-    # over youtube being wrong.
-    youtube: list[YoutubePlan] = []
-    if duration_sec > YOUTUBE_MIN_VIDEO_DURATION_SEC:
-        if len(raw.youtube) != REQUIRED_YOUTUBE_COUNT:
-            raise SuggestionValidationError(
-                f"Expected exactly {REQUIRED_YOUTUBE_COUNT} youtube ideas, got {len(raw.youtube)}"
-            )
-        youtube = [_build_youtube_plan(plan, segments, duration_sec) for plan in raw.youtube]
+    # over youtube being wrong. Nor should a long one: a shortfall in the plans
+    # is recorded, never allowed to cost the shorts that did come back.
+    plans: list[YoutubePlan] = []
+    if youtube and duration_sec > YOUTUBE_MIN_VIDEO_DURATION_SEC:
+        plans = [_build_youtube_plan(p, segments, duration_sec) for p in raw.youtube[:youtube]]
+        if len(plans) < youtube:
+            logger.info("Asked for %d YouTube plan(s); %d came back", youtube, len(plans))
+    else:
+        youtube = 0
 
-    return Suggestions(shorts=shorts, youtube=youtube)
+    return Suggestions(
+        shorts=built,
+        youtube=plans,
+        requested_shorts=shorts,
+        requested_youtube=youtube,
+    )

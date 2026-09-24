@@ -24,6 +24,7 @@ that reads as good news.
 from __future__ import annotations
 
 from statistics import median
+from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -73,7 +74,28 @@ def project_spend(db: Session, project_id: str) -> tuple[float, int]:
     return round(sum(costs), 6), len(costs)
 
 
-def suggest_rate(db: Session, owner_id: str) -> tuple[float, int] | None:
+class Rate(NamedTuple):
+    per_char: float
+    samples: int
+    #: How many shorts the measured runs were asked for (their median). The
+    #: bill follows that count — the model writes out every short it is told
+    #: to — so an estimate measured on runs of three says nothing exact about a
+    #: request for eight, and the page must be able to say which it was.
+    basis_shorts: int
+
+
+def _asked_shorts(output: dict) -> int | None:
+    """What a run was asked for. Rows from before the count existed record
+    only what came back — and then what came back WAS what was asked, since
+    the answer was always three."""
+    for key in ("requested_shorts", "shorts"):
+        value = output.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def suggest_rate(db: Session, owner_id: str) -> Rate | None:
     """Dollars per character of transcript, from this owner's own runs.
 
     Per CHARACTER rather than per run, because the bill is driven by how much
@@ -98,17 +120,22 @@ def suggest_rate(db: Session, owner_id: str) -> tuple[float, int] | None:
     ).all()
 
     rates = []
+    asked = []
     for job in rows:
         cost = job_cost(job)
-        characters = _output(job).get("characters")
+        output = _output(job)
+        characters = output.get("characters")
         if cost is None or cost <= 0 or not isinstance(characters, int):
             continue
         if characters < MIN_RATE_CHARS:
             continue
         rates.append(cost / characters)
+        count = _asked_shorts(output)
+        if count:
+            asked.append(count)
     if not rates:
         return None
-    return median(rates), len(rates)
+    return Rate(median(rates), len(rates), round(median(asked)) if asked else 0)
 
 
 def view(db: Session, *, project_id: str, owner_id: str, characters: int, keep_days: int) -> dict:
@@ -127,8 +154,10 @@ def view(db: Session, *, project_id: str, owner_id: str, characters: int, keep_d
         # Null, not zero: there is nothing to go on until a run has been
         # measured, and a made-up number beside a paid button is worse than
         # no number at all.
-        "suggest_estimate_usd": round(rate[0] * characters, 4) if rate else None,
-        "suggest_samples": rate[1] if rate else 0,
+        "suggest_estimate_usd": round(rate.per_char * characters, 4) if rate else None,
+        "suggest_samples": rate.samples if rate else 0,
+        # Null when unknown, never a guessed 3: see Rate.basis_shorts.
+        "suggest_basis_shorts": (rate.basis_shorts or None) if rate else None,
         # Speech-to-text spends money that nothing here counts. Said in the
         # payload rather than assumed by the page, so the one place that knows
         # is the one place that says it.

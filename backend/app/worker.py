@@ -25,6 +25,7 @@ from typing import Any
 
 from app.ai import usage as llm_usage
 from app.ai.openrouter_client import build_client as build_llm_client
+from app.ai.schema import count_limits, default_counts
 from app.ai.suggest import generate_suggestions
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
@@ -215,6 +216,30 @@ async def handle_transcribe(handle: JobHandle) -> dict:
     }
 
 
+def _suggest_counts(payload: dict | None, duration_sec: float) -> tuple[int, int]:
+    """The counts this job was queued with, held to what this video can take.
+
+    A job queued before counts existed carries none and gets what the button
+    always meant. The limit is applied again here rather than trusted from the
+    route: a row can sit in the queue across a deploy that tightened it, and a
+    count this video cannot hold would only buy near-duplicates.
+    """
+    shorts_max, youtube_max = count_limits(duration_sec)
+    shorts_default, youtube_default = default_counts(duration_sec)
+    payload = payload or {}
+
+    def pick(key: str, default: int, most: int, least: int) -> int:
+        value = payload.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return default
+        return max(least, min(most, value))
+
+    return (
+        pick("shorts", shorts_default, shorts_max, 1),
+        pick("youtube", youtube_default, youtube_max, 0),
+    )
+
+
 async def handle_suggest(handle: JobHandle) -> dict:
     from app import provider_settings
 
@@ -226,11 +251,14 @@ async def handle_suggest(handle: JobHandle) -> dict:
     if project.transcript is None or not project.transcript.segments:
         raise RuntimeError("Transcribe the video before asking for suggestions")
 
+    shorts, youtube = _suggest_counts(handle.payload, project.video.duration_sec)
+
     await handle.set_progress(0.1, stage="requesting", message="Asking the model for suggestions")
     client = build_llm_client(settings)
     try:
         suggestions: Suggestions = await generate_suggestions(
-            client, project.transcript, project.video.duration_sec
+            client, project.transcript, project.video.duration_sec,
+            shorts=shorts, youtube=youtube,
         )
     finally:
         await client.aclose()
@@ -245,6 +273,11 @@ async def handle_suggest(handle: JobHandle) -> dict:
     return {
         "shorts": len(suggestions.shorts),
         "youtube": len(suggestions.youtube),
+        # What was asked for, beside what came back. The bill follows the ask
+        # (the model generates what it was told to), so an estimate built from
+        # past runs has to know which count those runs were for.
+        "requested_shorts": shorts,
+        "requested_youtube": youtube,
         # What went INTO the prompt, recorded beside what came out of it. The
         # bill scales with this, so a cost without it can be reported but not
         # projected onto the next run (see app.spend.suggest_rate).

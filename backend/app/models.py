@@ -149,10 +149,18 @@ class YoutubePlan(BaseModel):
 
 
 class Suggestions(BaseModel):
-    shorts: list[ShortIdea]  # always exactly 3, enforced by post-validation
-    # 0 items (video < 20min) or exactly 3 (video >= 20min), enforced by
-    # post-validation. Empty list, not None, when not wanted.
+    # Between 1 and `requested_shorts`: fewer when some did not hold up, never
+    # padded to the number with a weaker one.
+    shorts: list[ShortIdea]
+    # Empty below 20 minutes or when none were asked for. Empty list, not
+    # None, when not wanted.
     youtube: list[YoutubePlan] = Field(default_factory=list)
+    #: What the producer asked for. Kept beside what came back so a shortfall
+    #: can be SAID — "5 asked, 3 held up" — rather than read as the model
+    #: having been asked for three. None on sets made before there was a
+    #: choice, when the answer was always three.
+    requested_shorts: int | None = None
+    requested_youtube: int | None = None
 
 
 class SubtitleStyle(BaseModel):

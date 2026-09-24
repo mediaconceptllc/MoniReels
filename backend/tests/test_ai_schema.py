@@ -7,12 +7,18 @@ from __future__ import annotations
 import pytest
 
 from app.ai.schema import (
+    MAX_SHORT_COUNT,
+    MAX_YOUTUBE_COUNT,
+    MIN_SHORT_DURATION,
     RawCut,
     RawKeepRange,
     RawShort,
     RawSuggestions,
     RawYoutubePlan,
     SuggestionValidationError,
+    _build_short,
+    count_limits,
+    default_counts,
     postprocess_suggestions,
     validate_llm_output,
 )
@@ -48,8 +54,8 @@ def _three_valid_shorts() -> list[RawShort]:
 
 
 def _filler_shorts() -> list[RawShort]:
-    """Two more valid shorts to pad out to REQUIRED_SHORT_COUNT=3 when a test
-    only cares about how the first one is processed.
+    """Two more valid shorts, for a test that only cares about how the first
+    one is processed.
     """
     return [_raw_short("B", _valid_cuts(50)), _raw_short("C", _valid_cuts(100))]
 
@@ -59,8 +65,8 @@ def _raw_keep_range(start_index: int, end_index: int) -> RawKeepRange:
 
 
 def _three_youtube_plans(*plans: RawYoutubePlan) -> list[RawYoutubePlan]:
-    """REQUIRED_YOUTUBE_COUNT is 3 - pad a single plan-under-test up to 3 with
-    trivial filler plans when the test only cares about one plan's processing.
+    """Pad a single plan-under-test up to 3 with trivial filler plans, for a
+    test that only cares about one plan's processing.
     """
     filler = RawYoutubePlan(title="filler", throughline="d", keep_ranges=[_raw_keep_range(0, 9)])
     result = list(plans)
@@ -96,20 +102,86 @@ def test_validate_llm_output_youtube_null_raises():
 
 
 # --------------------------------------------------------------------------
-# "only 2 shorts returned"
+# How many come back. The count is the producer's; the answer can hold fewer
+# (never padded) and is recorded beside what was asked, so a shortfall is SAID.
 # --------------------------------------------------------------------------
 
 
-def test_postprocess_fails_when_only_two_shorts():
+def test_fewer_shorts_than_asked_are_kept_and_the_ask_is_recorded():
+    """Two good shorts used to fail the whole job ("exactly 3"), billing the
+    producer for an answer that had two usable ideas in it."""
     raw = RawSuggestions(shorts=[_raw_short("A", _valid_cuts(0)), _raw_short("B", _valid_cuts(50))])
-    with pytest.raises(SuggestionValidationError, match="exactly 3"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0, shorts=3, youtube=0)
+    assert [s.title for s in result.shorts] == ["A", "B"]
+    assert result.requested_shorts == 3
 
 
-def test_postprocess_fails_when_four_shorts():
+def test_more_shorts_than_asked_are_trimmed_to_the_ask():
     raw = RawSuggestions(shorts=[*_three_valid_shorts(), _raw_short("D", _valid_cuts(150))])
-    with pytest.raises(SuggestionValidationError, match="exactly 3"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0, shorts=3, youtube=0)
+    assert [s.title for s in result.shorts] == ["A", "B", "C"]
+
+
+def test_a_short_that_breaks_a_rule_is_dropped_and_the_rest_are_kept():
+    """One bad short used to fail the job and throw the good ones away with
+    it. At eight, the odds of every short surviving validation fall fast; the
+    producer would be billed for nothing instead of shown seven ideas."""
+    bad = _raw_short("bad", [_raw_cut(0, 1, role="hook"), _raw_cut(2, 3), _raw_cut(4, 5, role="payoff")])
+    raw = RawSuggestions(shorts=[bad, *_filler_shorts()])
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0, shorts=3, youtube=0)
+    assert [s.title for s in result.shorts] == ["B", "C"]
+    assert result.requested_shorts == 3
+
+
+def test_a_spare_stands_in_for_a_dropped_short():
+    """When the model returned one more than asked, the extra is used before
+    the answer is reported short."""
+    bad = _raw_short("bad", [_raw_cut(0, 1, role="hook"), _raw_cut(2, 3), _raw_cut(4, 5, role="payoff")])
+    raw = RawSuggestions(shorts=[bad, *_filler_shorts(), _raw_short("D", _valid_cuts(150))])
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0, shorts=3, youtube=0)
+    assert [s.title for s in result.shorts] == ["B", "C", "D"]
+
+
+def test_an_answer_with_no_usable_short_is_still_a_failure():
+    """The one case with nothing to show for the bill."""
+    bad = _raw_short("bad", [_raw_cut(0, 1, role="hook"), _raw_cut(2, 3), _raw_cut(4, 5, role="payoff")])
+    raw = RawSuggestions(shorts=[bad])
+    with pytest.raises(SuggestionValidationError, match="usable"):
+        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0, shorts=3, youtube=0)
+
+
+# --------------------------------------------------------------------------
+# The range a video can be asked for.
+# --------------------------------------------------------------------------
+
+
+def test_the_shorts_limit_is_the_arithmetic_of_the_minimum_short():
+    """Each short is at least MIN_SHORT_DURATION on a DIFFERENT story, so a
+    video holds at most duration / MIN_SHORT_DURATION of them. Derived, not
+    invented, so it moves if the rule does."""
+    assert count_limits(MIN_SHORT_DURATION * 4)[0] == 4
+    assert count_limits(MIN_SHORT_DURATION * 4 - 0.1)[0] == 3
+
+
+def test_the_shorts_limit_has_a_ceiling_and_a_floor():
+    assert count_limits(10_000.0)[0] == MAX_SHORT_COUNT
+    # Even a clip too short for a real short can be asked for one: the model
+    # is the one that says it cannot, and a limit of zero would hide the button.
+    assert count_limits(20.0)[0] == 1
+
+
+def test_youtube_plans_are_offered_only_above_twenty_minutes():
+    assert count_limits(1200.0)[1] == 0
+    assert count_limits(1200.1)[1] == MAX_YOUTUBE_COUNT
+
+
+def test_an_omitted_choice_keeps_the_old_three_wherever_the_video_can_hold_them():
+    """A client that predates choosing must behave exactly as before on the
+    videos this product is for; below three minimum-length shorts the old
+    three asked for stories the source does not have."""
+    assert default_counts(MIN_SHORT_DURATION * 3) == (3, 0)
+    assert default_counts(3600.0) == (3, 3)
+    assert default_counts(MIN_SHORT_DURATION * 2) == (2, 0)
 
 
 # --------------------------------------------------------------------------
@@ -161,55 +233,49 @@ def test_postprocess_unknown_role_falls_back_to_context():
 # --------------------------------------------------------------------------
 
 
-def test_postprocess_raises_when_fewer_than_three_cuts():
+def test_a_short_is_refused_when_fewer_than_three_cuts():
     cuts = [_raw_cut(0, 9, role="hook"), _raw_cut(10, 39, role="payoff")]
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="cuts"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
-def test_postprocess_raises_when_more_than_five_cuts():
+def test_a_short_is_refused_when_more_than_five_cuts():
     cuts = [_raw_cut(i * 5, i * 5 + 4, role="context") for i in range(6)]
     cuts[0] = _raw_cut(0, 4, role="hook")
     cuts[-1] = _raw_cut(25, 29, role="payoff")
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="cuts"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
-def test_postprocess_raises_when_total_duration_too_short():
+def test_a_short_is_refused_when_total_duration_too_short():
     # 6s total (2s hook + 2s context + 2s payoff)
     cuts = [_raw_cut(0, 1, role="hook"), _raw_cut(2, 3, role="context"), _raw_cut(4, 5, role="payoff")]
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="duration"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
-def test_postprocess_raises_when_total_duration_too_long():
+def test_a_short_is_refused_when_total_duration_too_long():
     # 90s total (30s hook + 30s context + 30s payoff)
     cuts = [_raw_cut(0, 29, role="hook"), _raw_cut(30, 59, role="context"), _raw_cut(60, 89, role="payoff")]
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="duration"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
-def test_postprocess_raises_when_last_cut_is_not_payoff():
+def test_a_short_is_refused_when_last_cut_is_not_payoff():
     cuts = [_raw_cut(0, 9, role="hook"), _raw_cut(10, 24, role="context"), _raw_cut(25, 39, role="proof")]
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="payoff"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
-def test_postprocess_raises_when_no_hook_cut():
+def test_a_short_is_refused_when_no_hook_cut():
     cuts = [_raw_cut(0, 9, role="context"), _raw_cut(10, 24, role="proof"), _raw_cut(25, 39, role="payoff")]
-    raw = RawSuggestions(shorts=[_raw_short("A", cuts), *_filler_shorts()])
     with pytest.raises(SuggestionValidationError, match="hook"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=300.0)
+        _build_short(_raw_short("A", cuts), _SEGMENTS, 300.0)
 
 
 # --------------------------------------------------------------------------
-# YouTube plan gating - a list of exactly REQUIRED_YOUTUBE_COUNT (3)
-# independent plans when duration_sec is above the threshold, [] otherwise.
+# YouTube plan gating - up to the number asked for when duration_sec is above
+# the threshold, [] otherwise.
 # --------------------------------------------------------------------------
 
 
@@ -220,11 +286,31 @@ def test_postprocess_forces_empty_youtube_list_for_short_video():
     assert result.youtube == []
 
 
-def test_postprocess_fails_when_youtube_wanted_but_wrong_count():
+def test_fewer_plans_than_asked_never_cost_the_shorts():
+    """Two plans for three asked used to fail the job — shorts and all."""
     yt = RawYoutubePlan(title="t", throughline="d", keep_ranges=[_raw_keep_range(0, 99)])
-    raw = RawSuggestions(shorts=_three_valid_shorts(), youtube=[yt, yt])  # only 2, not 3
-    with pytest.raises(SuggestionValidationError, match="exactly 3 youtube"):
-        postprocess_suggestions(raw, _SEGMENTS, duration_sec=2400.0)
+    raw = RawSuggestions(shorts=_three_valid_shorts(), youtube=[yt, yt])
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=2400.0, shorts=3, youtube=3)
+    assert len(result.shorts) == 3
+    assert len(result.youtube) == 2
+    assert result.requested_youtube == 3
+
+
+def test_a_long_video_asked_for_no_plans_keeps_none():
+    yt = RawYoutubePlan(title="t", throughline="d", keep_ranges=[_raw_keep_range(0, 99)])
+    raw = RawSuggestions(shorts=_three_valid_shorts(), youtube=_three_youtube_plans(yt))
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=2400.0, shorts=3, youtube=0)
+    assert result.youtube == []
+    assert result.requested_youtube == 0
+
+
+def test_a_short_video_records_that_no_plans_were_asked_for():
+    """Whatever the request said, a video under the gate was not asked for
+    plans — and the record must say what the MODEL was asked, or a missing
+    plan would read as a shortfall."""
+    raw = RawSuggestions(shorts=_three_valid_shorts())
+    result = postprocess_suggestions(raw, _SEGMENTS, duration_sec=900.0, shorts=3, youtube=3)
+    assert result.requested_youtube == 0
 
 
 def test_postprocess_keeps_three_independent_youtube_plans_for_long_video():

@@ -11,6 +11,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
+from app.ai.schema import MAX_SHORT_COUNT, MAX_YOUTUBE_COUNT
+
 # Column-width-matched ceilings.
 ID_MAX = 32
 NAME_MAX = 200
@@ -232,6 +234,22 @@ class SelectRangesIn(BaseModel):
     """Build a timeline from explicit ranges — the "cut it myself" path."""
 
     ranges: list[tuple[float, float]] = Field(min_length=1, max_length=200)
+
+
+class SuggestIn(BaseModel):
+    """How many ideas to ask for. Either field omitted keeps what the button
+    always did — three of each where the video can hold them — so a client
+    that predates choosing is unaffected.
+
+    The field bounds are the absolute ceilings; the per-video limit
+    (app.ai.schema.count_limits) is enforced by the route, which knows the
+    video. Both are refusals, never silent clamps: the producer is standing at
+    the button and "you asked for 8, you got 4" is theirs to know before the
+    bill, not after.
+    """
+
+    shorts: int | None = Field(default=None, ge=1, le=MAX_SHORT_COUNT)
+    youtube: int | None = Field(default=None, ge=0, le=MAX_YOUTUBE_COUNT)
 
 
 class ExportSelectionIn(BaseModel):

@@ -104,6 +104,8 @@ class Recorder:
         self.stt_closed = False
         self.llm_closed = False
         self.llm_built = 0
+        #: The counts the worker asked the model for, (shorts, youtube).
+        self.asked: tuple[int, int] | None = None
         self.rendered_clips: list[Clip] = []
         self.render_kwargs: dict = {}
         self.transcript = Transcript(
@@ -195,7 +197,11 @@ def world(tmp_path, monkeypatch):
             await on_progress(1.0)
         return rec.transcript
 
-    async def fake_suggest(client, transcript, duration_sec):
+    async def fake_suggest(client, transcript, duration_sec, *, shorts, youtube):
+        # Keyword-only and without defaults, like nothing in the real
+        # signature: a worker that stopped passing the counts must fail here
+        # rather than be quietly handed the defaults.
+        rec.asked = (shorts, youtube)
         return rec.suggestions
 
     monkeypatch.setattr(worker, "build_stt_client", lambda s: FakeClient("stt"))
@@ -280,7 +286,8 @@ def _with_video(db, project_id: str, **overrides) -> None:
     project = load(db, project_id)
     project.video = VideoMeta(
         source_key=f"sources/{project_id}/source.mp4",
-        duration_sec=PROBE["duration_sec"], width=PROBE["width"], height=PROBE["height"],
+        duration_sec=overrides.pop("duration_sec", PROBE["duration_sec"]),
+        width=PROBE["width"], height=PROBE["height"],
         fps=PROBE["fps"], has_audio=True, codec="h264",
         thumbnail_key=r2.thumbnail_key(project_id),
         audio_key=overrides.pop("audio_key", r2.audio_key(project_id, "audio.wav")),
@@ -543,6 +550,10 @@ def test_suggestions_are_stored_and_counted(world, project, db):
     assert result == {
         "shorts": 3,
         "youtube": 0,
+        # What was asked for, beside what came back: the cost estimate has to
+        # know which count a past run's bill was for.
+        "requested_shorts": 3,
+        "requested_youtube": 0,
         "characters": len(world.transcript.full_text),
     }
 
@@ -550,6 +561,55 @@ def test_suggestions_are_stored_and_counted(world, project, db):
 # ==========================================================================
 # export / export_all
 # ==========================================================================
+
+
+def _suggest_handle(db, project_id: str, payload: dict | None) -> JobHandle:
+    job = _running_job(db, project_id, "suggest")
+    return JobHandle(job_id=job.id, kind="suggest", project_id=project_id, payload=payload or {})
+
+
+def _ready_to_suggest(world, db, project_id: str, **video) -> None:
+    _with_video(db, project_id, **video)
+    doc = load(db, project_id)
+    doc.transcript = world.transcript
+    save(db, doc)
+    db.commit()
+
+
+def test_the_worker_asks_for_the_counts_the_job_was_queued_with(world, project, db):
+    from app import worker
+
+    _ready_to_suggest(world, db, project.id, duration_sec=1800.0)
+    asyncio.run(worker.handle_suggest(_suggest_handle(db, project.id, {"shorts": 6, "youtube": 2})))
+    assert world.asked == (6, 2)
+
+
+def test_a_job_queued_before_counts_existed_gets_what_the_button_always_meant(world, project, db):
+    """A row can sit in the queue across the deploy that added the choice."""
+    from app import worker
+
+    _ready_to_suggest(world, db, project.id, duration_sec=1800.0)
+    asyncio.run(worker.handle_suggest(_suggest_handle(db, project.id, None)))
+    assert world.asked == (3, 3)
+
+
+def test_a_queued_count_the_video_cannot_hold_is_held_to_its_limit(world, project, db):
+    """The route refuses it, but a row can outlive a tightened limit — and a
+    count the video cannot hold only buys near-duplicates."""
+    from app import worker
+
+    _ready_to_suggest(world, db, project.id, duration_sec=100.0)  # limit: 2 shorts, no plans
+    asyncio.run(worker.handle_suggest(_suggest_handle(db, project.id, {"shorts": 8, "youtube": 5})))
+    assert world.asked == (2, 0)
+
+
+def test_a_malformed_count_falls_back_to_the_default(world, project, db):
+    """`True` is an int in Python; a payload carrying it is not a count."""
+    from app import worker
+
+    _ready_to_suggest(world, db, project.id, duration_sec=1800.0)
+    asyncio.run(worker.handle_suggest(_suggest_handle(db, project.id, {"shorts": True, "youtube": "4"})))
+    assert world.asked == (3, 3)
 
 
 def _ready_to_render(db, project_id: str, *, clips: bool = True, suggestions=None) -> None:
@@ -880,7 +940,7 @@ def test_a_job_that_spent_money_reports_what_it_cost(world, project, db, monkeyp
     from app import worker
     from app.ai import usage as llm_usage
 
-    async def paid(client, transcript, duration_sec):
+    async def paid(client, transcript, duration_sec, *, shorts, youtube):
         llm_usage.record(model="test/model", prompt=1200, completion=800, cost=0.0042)
         return world.suggestions
 

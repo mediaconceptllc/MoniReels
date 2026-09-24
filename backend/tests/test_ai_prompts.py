@@ -9,8 +9,10 @@ from app.ai.prompts import (
     build_segment_lines,
     build_suggestions_prompt,
     chunk_segment_lines,
+    pick_schema,
     repair_short_dict,
     split_long_segments,
+    suggestions_schema,
     validate_shorts,
 )
 from app.models import Segment, Transcript
@@ -75,21 +77,61 @@ def test_chunk_segment_lines_overlaps_trailing_lines_across_boundary():
 
 
 # --------------------------------------------------------------------------
-# youtube_instruction wording: v2 contract is a list (0 or exactly 3 plans),
-# never a single nullable object - prompts must say so, not "null"/"a plan".
+# youtube_instruction wording: the contract is a list (empty, or as many plans
+# as were asked for), never a single nullable object - prompts must say so,
+# not "null"/"a plan".
 # --------------------------------------------------------------------------
 
 
-def test_build_suggestions_prompt_wants_three_youtube_plans():
-    prompt = build_suggestions_prompt(["line"], duration_sec=1500.0, want_youtube=True)
-    assert "3" in prompt and "YouTube" in prompt
+def test_build_suggestions_prompt_asks_for_the_youtube_plans_requested():
+    prompt = build_suggestions_prompt(["line"], duration_sec=1500.0, youtube=4)
+    assert "4 independent YouTube" in prompt
     assert "null" not in prompt.lower()
 
 
 def test_build_suggestions_prompt_sets_empty_list_when_not_wanted():
-    prompt = build_suggestions_prompt(["line"], duration_sec=100.0, want_youtube=False)
+    prompt = build_suggestions_prompt(["line"], duration_sec=100.0, youtube=0)
     assert "empty list" in prompt.lower()
     assert "null" not in prompt.lower()
+
+
+def test_a_long_video_asked_for_no_plans_is_told_so_rather_than_the_duration_reason():
+    """Zero is now a choice, not only a consequence of length. Telling a
+    40-minute video it is "under 20 minutes" would be a false statement in the
+    one place the model takes as ground truth."""
+    prompt = build_suggestions_prompt(["line"], duration_sec=2400.0, youtube=0)
+    assert "no YouTube plans were asked for" in prompt
+    assert "under 20 minutes" not in prompt
+
+
+def test_a_short_video_is_never_asked_for_plans_even_when_some_are_requested():
+    """The 20-minute gate is not the producer's to lift: a 10-minute plan
+    cannot be condensed out of a 15-minute video."""
+    prompt = build_suggestions_prompt(["line"], duration_sec=900.0, youtube=3)
+    assert "empty list" in prompt.lower()
+    assert "under 20 minutes" in prompt
+
+
+def test_the_request_names_the_number_of_shorts():
+    """The number used to live only in the system prompt, as a literal three.
+    It moved into the request because it now changes per request — and a
+    system prompt that stays identical across requests is one that can be
+    cached."""
+    assert "Return 5 shorts." in build_suggestions_prompt(["line"], 900.0, shorts=5)
+    assert "Return 1 short." in build_suggestions_prompt(["line"], 900.0, shorts=1)
+
+
+def test_the_request_allows_stopping_short_rather_than_padding():
+    prompt = build_suggestions_prompt(["line"], 900.0, shorts=8)
+    assert "never pad the count" in prompt
+
+
+def test_the_system_prompt_no_longer_carries_a_count():
+    """A count here would contradict the one in the request the moment they
+    differed, and the model has no way to know which to believe."""
+    assert "Return only the 3" not in SYSTEM_PROMPT
+    assert "exactly 3" not in SYSTEM_PROMPT
+    assert "The 3 plans" not in SYSTEM_PROMPT
 
 
 def test_build_candidates_prompt_youtube_wording():
@@ -97,12 +139,52 @@ def test_build_candidates_prompt_youtube_wording():
     assert "youtube" in build_candidates_prompt(["line"], 1500.0, want_youtube=True).lower()
 
 
-def test_build_pick_indices_prompt_wants_three_of_each_and_no_transcript():
-    prompt = build_pick_indices_prompt(["[0] cand"], ["[0] yt cand"], duration_sec=1500.0, want_youtube=True)
-    assert "3" in prompt
+def test_build_pick_indices_prompt_names_both_counts_and_sends_no_transcript():
+    prompt = build_pick_indices_prompt(
+        ["[0] cand"], ["[0] yt cand"], duration_sec=1500.0, shorts=6, youtube=2
+    )
+    assert "Choose 6 (by index)" in prompt
+    assert "choose 2 of the candidate YouTube plans" in prompt
     assert "[0] cand" in prompt and "[0] yt cand" in prompt
-    prompt_off = build_pick_indices_prompt(["[0] cand"], [], duration_sec=100.0, want_youtube=False)
+    prompt_off = build_pick_indices_prompt(["[0] cand"], [], duration_sec=100.0, shorts=3, youtube=0)
     assert "empty list" in prompt_off.lower()
+
+
+def test_the_picker_may_stop_short_rather_than_repeat_a_topic():
+    prompt = build_pick_indices_prompt(["[0] a"], [], duration_sec=900.0, shorts=5, youtube=0)
+    assert "never one that repeats a topic" in prompt
+
+
+def test_the_final_schema_allows_fewer_but_never_more():
+    """At least one and at most the number asked. `minItems` equal to the
+    count would FORCE the padding the prompt forbids — the provider enforces
+    the schema, not the prose."""
+    shorts = suggestions_schema(5, 0)["schema"]["properties"]["shorts"]
+    assert (shorts["minItems"], shorts["maxItems"]) == (1, 5)
+
+
+def test_a_candidates_schema_asks_for_an_exact_number():
+    """Candidates are allowed to be weaker; a later pass picks. The count is
+    exact so the pool is large enough to pick from."""
+    shorts = suggestions_schema(4, 0, exact=True)["schema"]["properties"]["shorts"]
+    assert (shorts["minItems"], shorts["maxItems"]) == (4, 4)
+
+
+def test_the_pick_schema_allows_fewer_but_never_more():
+    props = pick_schema(6, 2)["schema"]["properties"]
+    assert (props["short_indices"]["minItems"], props["short_indices"]["maxItems"]) == (1, 6)
+    assert props["youtube_indices"]["maxItems"] == 2
+
+
+def test_a_schema_never_bounds_an_array_at_zero():
+    """Not every provider's strict mode accepts `maxItems: 0`. None wanted is
+    said in the prompt and enforced by postprocessing instead."""
+    assert suggestions_schema(3, 0)["schema"]["properties"]["youtube"]["maxItems"] == 1
+    assert pick_schema(3, 0)["schema"]["properties"]["youtube_indices"]["maxItems"] == 1
+
+
+def test_a_candidates_prompt_names_its_own_number():
+    assert "suggest 5 candidate shorts" in build_candidates_prompt(["line"], 900.0, candidates=5)
 
 
 # --------------------------------------------------------------------------
@@ -313,18 +395,18 @@ def test_split_long_segments_holds_the_cap_when_the_span_divides_exactly():
 
 
 def test_nothing_is_claimed_about_speakers_when_nobody_has_looked():
-    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=0)
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, youtube=0, speakers=0)
     assert "speaker" not in prompt.lower()
 
 
 def test_a_conversation_is_told_not_to_split_an_exchange():
-    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=2)
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, youtube=0, speakers=2)
     assert "2 speakers" in prompt
     assert "question" in prompt
 
 
 def test_a_monologue_is_not_warned_about_exchanges():
-    prompt = build_suggestions_prompt(["[0] a"], 60.0, False, speakers=1)
+    prompt = build_suggestions_prompt(["[0] a"], 60.0, youtube=0, speakers=1)
     assert "One speaker" in prompt
     assert "question" not in prompt
 
@@ -365,7 +447,7 @@ def test_the_youtube_rule_asks_for_the_arithmetic_the_shorts_rule_asks_for():
 def test_the_request_itself_carries_the_range_not_just_the_system_prompt():
     """A rule stated once in a long system prompt and never again is the rule
     most likely to be dropped on a long transcript."""
-    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=1700.0, want_youtube=True)
+    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=1700.0, youtube=3)
     low = schema.YOUTUBE_TARGET_DURATION_SEC * (1 - schema.YOUTUBE_TARGET_TOLERANCE)
 
     assert f"{low:.0f}" in asked
@@ -373,6 +455,6 @@ def test_the_request_itself_carries_the_range_not_just_the_system_prompt():
 
 
 def test_a_short_video_is_told_to_skip_youtube_without_a_duration_rule():
-    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=300.0, want_youtube=False)
+    asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=300.0, youtube=0)
     assert "empty list" in asked
     assert "sum them and check" not in asked
