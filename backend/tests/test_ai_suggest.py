@@ -126,22 +126,39 @@ async def test_generate_suggestions_single_pass_short_transcript():
     assert result.youtube == []
 
 
+def _schema_of(request: httpx.Request) -> dict:
+    return json.loads(request.content)["response_format"]["json_schema"]["schema"]
+
+
+def _prompt_of(request: httpx.Request) -> str:
+    return json.loads(request.content)["messages"][-1]["content"]
+
+
+def _broken_short(title: str, offset: int = 0) -> dict:
+    """Shape-valid, rule-broken: the last cut is not the payoff."""
+    cuts = [
+        _cut_dict(offset, offset + 9, role="hook"),
+        _cut_dict(offset + 10, offset + 24, role="context"),
+        _cut_dict(offset + 25, offset + 39, role="proof"),
+    ]
+    return {**_short_dict(title, offset), "cuts": cuts}
+
+
 @pytest.mark.asyncio
-async def test_generate_suggestions_retries_once_on_wrong_short_count():
+async def test_more_shorts_than_asked_is_repaired_once():
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if _is_punctuation(request):
             return _punctuation_response(request)
         calls["n"] += 1
-        two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
         if calls["n"] == 1:
-            return _llm_response(two_shorts)
+            return _llm_response({"shorts": [*_three_shorts_dicts(), _short_dict("D", 0)], "youtube": []})
         return _llm_response({"shorts": _three_shorts_dicts(), "youtube": []})
 
     transcript = _transcript(150)
     client = _client(handler)
-    result = await generate_suggestions(client, transcript, duration_sec=150.0)
+    result = await generate_suggestions(client, transcript, duration_sec=150.0, shorts=3)
     await client.aclose()
 
     assert calls["n"] == 2
@@ -149,19 +166,162 @@ async def test_generate_suggestions_retries_once_on_wrong_short_count():
 
 
 @pytest.mark.asyncio
-async def test_generate_suggestions_fails_after_retry_still_wrong_count():
-    two_shorts = {"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []}
+async def test_fewer_shorts_than_asked_are_accepted_without_a_retry():
+    """The model is told to stop short rather than pad. Treating that as an
+    error would buy a second call whose only purpose is to demand the padding
+    the first was told to refuse."""
+    calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if _is_punctuation(request):
             return _punctuation_response(request)
-        return _llm_response(two_shorts)
+        calls["n"] += 1
+        return _llm_response({"shorts": [_short_dict("A", 0), _short_dict("B", 50)], "youtube": []})
+
+    transcript = _transcript(150)
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=150.0, shorts=3)
+    await client.aclose()
+
+    assert calls["n"] == 1
+    assert [s.title for s in result.shorts] == ["A", "B"]
+    assert result.requested_shorts == 3
+
+
+@pytest.mark.asyncio
+async def test_the_usable_shorts_survive_a_retry_that_still_has_a_broken_one():
+    """Every remaining problem after the retry used to fail the job, taking
+    the valid shorts down with the one that was not."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        return _llm_response(
+            {"shorts": [_short_dict("A", 0), _broken_short("bad", 50), _short_dict("C", 100)], "youtube": []}
+        )
+
+    transcript = _transcript(150)
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=150.0, shorts=3)
+    await client.aclose()
+
+    assert [s.title for s in result.shorts] == ["A", "C"]
+
+
+@pytest.mark.asyncio
+async def test_only_an_answer_with_nothing_usable_after_the_retry_fails():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        return _llm_response({"shorts": [_broken_short("x", 0), _broken_short("y", 50)], "youtube": []})
 
     transcript = _transcript(150)
     client = _client(handler)
     with pytest.raises(SuggestionValidationError):
         await generate_suggestions(client, transcript, duration_sec=150.0)
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_count_reaches_the_schema_the_provider_enforces():
+    """The schema is what made three unchangeable: the provider enforces it,
+    so no prompt could ask for five and receive five. Checked on the WIRE,
+    not on a helper — this is the request that is actually billed."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        seen["schema"] = _schema_of(request)
+        seen["prompt"] = _prompt_of(request)
+        shorts = [_short_dict(t, o) for t, o in zip("ABCDE", (0, 50, 100, 150, 200), strict=True)]
+        return _llm_response({"shorts": shorts, "youtube": []})
+
+    transcript = _transcript(300)
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=300.0, shorts=5)
+    await client.aclose()
+
+    asked = seen["schema"]["properties"]["shorts"]
+    assert (asked["minItems"], asked["maxItems"]) == (1, 5)
+    assert "Return 5 shorts." in seen["prompt"]
+    assert len(result.shorts) == 5
+    assert result.requested_shorts == 5
+
+
+@pytest.mark.asyncio
+async def test_a_chunked_request_for_more_asks_each_portion_for_more():
+    """Three candidates a portion made eight picks impossible on a video of
+    two portions — six candidates cannot yield eight."""
+    from app.ai.suggest import candidates_per_chunk
+
+    transcript = _transcript(600, text_len=80)  # forces chunking
+    asked: list[int] = []
+    portions = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        if _schema_name(request) == "candidates":
+            portions["n"] += 1
+            asked.append(_schema_of(request)["properties"]["shorts"]["minItems"])
+            cands = [_short_dict(f"p{portions['n']}-{j}", j * 50) for j in range(asked[-1])]
+            return _llm_response({"shorts": cands, "youtube": []})
+        return _llm_response({"short_indices": list(range(6)), "youtube_indices": []})
+
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=600.0, shorts=6)
+    await client.aclose()
+
+    assert portions["n"] > 1
+    assert set(asked) == {candidates_per_chunk(6, portions["n"])}
+    assert sum(asked) >= 6 + 2, "the pool has to leave the picker a choice"
+    assert len(result.shorts) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_pool_smaller_than_the_ask_is_used_whole_without_a_pick_call():
+    """Nothing to choose between means a paid ranking call that could change
+    nothing but the bill. And fewer than asked is the answer, not a failure:
+    it used to raise and throw every portion's work away."""
+    transcript = _transcript(600, text_len=80)  # forces chunking
+    calls = {"candidates": 0, "pick_best": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        if _schema_name(request) == "candidates":
+            calls["candidates"] += 1
+            return _llm_response({"shorts": [_short_dict(f"only-{calls['candidates']}", 0)], "youtube": []})
+        calls["pick_best"] += 1
+        return _llm_response({"short_indices": [0], "youtube_indices": []})
+
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=600.0, shorts=8)
+    await client.aclose()
+
+    assert calls["pick_best"] == 0
+    assert len(result.shorts) == calls["candidates"] < 8
+    assert result.requested_shorts == 8
+
+
+@pytest.mark.asyncio
+async def test_a_long_video_asked_for_no_plans_is_not_asked_for_any():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_punctuation(request):
+            return _punctuation_response(request)
+        seen["prompt"] = _prompt_of(request)
+        return _llm_response({"shorts": _three_shorts_dicts(), "youtube": _three_youtube_dicts()})
+
+    transcript = _transcript(500)
+    client = _client(handler)
+    result = await generate_suggestions(client, transcript, duration_sec=1500.0, shorts=3, youtube=0)
+    await client.aclose()
+
+    assert "no YouTube plans were asked for" in seen["prompt"]
+    assert result.youtube == []
+    assert result.requested_youtube == 0
 
 
 @pytest.mark.asyncio

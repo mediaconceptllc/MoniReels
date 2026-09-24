@@ -28,6 +28,7 @@ import { ProviderWarnings } from "@/components/ProviderWarnings";
 import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
 import { JobHistory } from "@/components/JobHistory";
+import { SuggestCounts, type Counts } from "@/components/SuggestCounts";
 import { JobProgress } from "@/components/JobProgress";
 import { OutputList } from "@/components/OutputList";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -48,6 +49,10 @@ export default function ProjectPage() {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Stage>("source");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The producer's choice, or null for "the default". Kept across the refresh
+  // every settled job triggers — a count chosen and then silently reset to
+  // three by the page reloading itself would be a choice that did not stick.
+  const [chosen, setChosen] = useState<Counts | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -194,11 +199,25 @@ export default function ProjectPage() {
     },
   ];
 
+  // Held to the server's range on every render, not only when chosen: the
+  // limits come with each read of the project, and a count chosen against an
+  // older read must not be sent past a newer one.
+  const limits = project.suggest_limits;
+  const counts: Counts = {
+    shorts: Math.min(chosen?.shorts ?? limits.shorts_default, limits.shorts_max),
+    youtube: Math.min(chosen?.youtube ?? limits.youtube_default, limits.youtube_max),
+  };
+
   // Read where `project` is still narrowed — a nested function declaration
   // loses that, and `project!` inside one is an assertion nobody rechecks.
   const suggestCost =
     project.spend.suggest_estimate_usd !== null
-      ? { usd: project.spend.suggest_estimate_usd, samples: project.spend.suggest_samples }
+      ? {
+          usd: project.spend.suggest_estimate_usd,
+          samples: project.spend.suggest_samples,
+          basisShorts: project.spend.suggest_basis_shorts,
+          askingShorts: counts.shorts,
+        }
       : undefined;
 
   // ONE action at a time, and it belongs to the stage that is OPEN — which
@@ -223,14 +242,24 @@ export default function ProjectPage() {
         return {
           label: hasSuggestions ? "Санал дахин авах" : "Санал боловсруулах",
           note: hasTranscript
-            ? `${segments} мөр текстээс богино видео, YouTube хураангуйн санал гаргана. Оролдлого тутам төлбөртэй.`
+            ? `${segments} мөр текстээс ${counts.shorts} богино видео${
+                counts.youtube ? ` ба ${counts.youtube} YouTube хураангуй` : ""
+              } санал болгоно. Материал хүрэлцэхгүй бол цөөнийг гаргана — сул санал нэмж тоог гүйцээхгүй. Оролдлого тутам төлбөртэй.`
             : "Эхлээд яриаг текст болгоно.",
+          control: hasTranscript ? (
+            <SuggestCounts
+              limits={limits}
+              value={counts}
+              onChange={setChosen}
+              disabled={running}
+            />
+          ) : undefined,
           // The only step whose price this system actually measures. The
           // recogniser bills per minute of audio and nothing here counts it,
           // so "Яриаг текст болгох" deliberately carries no figure rather
           // than a confident wrong one.
           cost: suggestCost,
-          onRun: () => void run(() => api.suggest(projectId)),
+          onRun: () => void run(() => api.suggest(projectId, counts)),
           disabled: !hasTranscript || running,
           loading: busy,
         };

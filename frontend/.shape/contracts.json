@@ -212,6 +212,7 @@
       "priced_jobs": 0,
       "spent_usd": 0.0,
       "stt_measured": false,
+      "suggest_basis_shorts": null,
       "suggest_estimate_usd": null,
       "suggest_samples": 0
     },
@@ -226,7 +227,15 @@
       "primary_color": "",
       "shadow": 0.0
     },
+    "suggest_limits": {
+      "shorts_default": 0,
+      "shorts_max": 0,
+      "youtube_default": 0,
+      "youtube_max": 0
+    },
     "suggestions": {
+      "requested_shorts": 0,
+      "requested_youtube": 0,
       "shorts": [
         {
           "b_roll": [
@@ -377,6 +386,8 @@
       "shadow": 0.0
     },
     "suggestions": {
+      "requested_shorts": 0,
+      "requested_youtube": 0,
       "shorts": [
         {
           "b_roll": [

@@ -12,8 +12,11 @@ import re
 from app.ai.boundaries import snap_cut
 from app.ai.schema import (
     CUT_PAD_SEC,
+    DEFAULT_SHORT_COUNT,
+    DEFAULT_YOUTUBE_COUNT,
     MAX_SHORT_DURATION,
     MIN_SHORT_DURATION,
+    YOUTUBE_MIN_VIDEO_DURATION_SEC,
     YOUTUBE_TARGET_DURATION_SEC,
     YOUTUBE_TARGET_TOLERANCE,
 )
@@ -74,7 +77,7 @@ not summaries.
 - Start on the first word of a real sentence and end on the last word of one.
 
 ## Content rules
-- The shorts must be about MEANINGFULLY DIFFERENT topics from each other. Three angles
+- The shorts must be about MEANINGFULLY DIFFERENT topics from each other. Several angles
   on the same story is a failure.
 - Rank candidates higher when they have: a concrete conflict or reversal, a number a
   viewer can picture, or direct local relevance to the audience described below.
@@ -88,17 +91,19 @@ not summaries.
 
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.
-2. Draft 5 candidate shorts across those stories. For each, sum the mm:ss span of
-   every cut and adjust cuts until that sum is in range — a candidate whose cuts
-   don't actually add up in-range is not a valid candidate yet.
+2. Draft at least two more candidate shorts than the request asks for, across those
+   stories. For each, sum the mm:ss span of every cut and adjust cuts until that sum is
+   in range — a candidate whose cuts don't actually add up in-range is not a valid
+   candidate yet.
 3. Score each 1-10 on: hook strength, ease of sourcing b-roll, audience relevance.
-4. Return only the 3 highest-scoring. Put the three scores in `why_it_works`.
+4. Return the highest-scoring, as many as the request asks for. Put each one's three
+   scores in `why_it_works`.
 
 ## YouTube plans
-When requested, produce exactly 3 independent long-form highlight plans. Each selects
-multiple non-overlapping keep-ranges (by segment index) that together form a coherent
-condensed version. The 3 plans must take meaningfully different throughlines — not
-near-duplicates.
+When requested, produce as many independent long-form highlight plans as the request
+asks for. Each selects multiple non-overlapping keep-ranges (by segment index) that
+together form a coherent condensed version. The plans must take meaningfully different
+throughlines — not near-duplicates.
 
 - Total duration across all keep-ranges of one plan:
   {_YT_LOW:.0f}-{_YT_HIGH:.0f} seconds. This is a RANGE to land inside, not a number
@@ -150,19 +155,37 @@ SHORT_SCHEMA = {
     },
 }
 
-PICK_SCHEMA: dict = {
-    "name": "pick_best",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["short_indices", "youtube_indices"],
-        "properties": {
-            "short_indices": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer"}},
-            "youtube_indices": {"type": "array", "maxItems": 3, "items": {"type": "integer"}},
+def pick_schema(shorts: int, youtube: int) -> dict:
+    """Up to `shorts` indices, and at least one.
+
+    Not exactly `shorts`: the picker is told to stop short of the number rather
+    than choose a candidate that repeats a topic already chosen, and a schema
+    demanding the full count would force exactly the duplicate it was told to
+    refuse.
+    """
+    return {
+        "name": "pick_best",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["short_indices", "youtube_indices"],
+            "properties": {
+                "short_indices": {
+                    "type": "array", "minItems": 1, "maxItems": shorts,
+                    "items": {"type": "integer"},
+                },
+                "youtube_indices": {
+                    # Never 0: a zero-length array bound is not something every
+                    # provider's strict mode accepts. The prompt asks for an
+                    # empty list when none are wanted, and postprocessing drops
+                    # any the model sends anyway.
+                    "type": "array", "maxItems": max(1, youtube),
+                    "items": {"type": "integer"},
+                },
+            },
         },
-    },
-}
+    }
 
 YOUTUBE_PLAN_SCHEMA = {
     "type": "object",
@@ -187,19 +210,36 @@ YOUTUBE_PLAN_SCHEMA = {
     },
 }
 
-SUGGESTIONS_SCHEMA: dict = {
-    "name": "suggestions",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["shorts", "youtube"],
-        "properties": {
-            "shorts": {"type": "array", "minItems": 3, "maxItems": 3, "items": SHORT_SCHEMA},
-            "youtube": {"type": "array", "maxItems": 3, "items": YOUTUBE_PLAN_SCHEMA},
+def suggestions_schema(shorts: int, youtube: int, *, exact: bool = False) -> dict:
+    """The strict schema for one answer.
+
+    It was a module constant with `minItems: 3, maxItems: 3`, which is what made
+    the count impossible to change: the provider enforces the schema, so no
+    prompt could ask for five and receive five.
+
+    `exact` is for the chunked pipeline's CANDIDATES, where a portion is asked
+    for a fixed number and a weaker one is fine because a later pass chooses.
+    The final answer is at least one and at most `shorts`: the model is told to
+    return fewer rather than pad, and a schema demanding the full count would
+    force the padding it was told to refuse.
+    """
+    return {
+        "name": "suggestions",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["shorts", "youtube"],
+            "properties": {
+                "shorts": {
+                    "type": "array", "minItems": shorts if exact else 1, "maxItems": shorts,
+                    "items": SHORT_SCHEMA,
+                },
+                # See pick_schema for why this is never 0.
+                "youtube": {"type": "array", "maxItems": max(1, youtube), "items": YOUTUBE_PLAN_SCHEMA},
+            },
         },
-    },
-}
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -340,27 +380,58 @@ def _speaker_block(speakers: int) -> str:
     )
 
 
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def shorts_instruction(shorts: int) -> str:
+    """The count, and the permission to fall short of it.
+
+    Said in the REQUEST rather than the system prompt: the count changes per
+    request, and a system prompt that stays byte-identical is one a provider
+    can cache.
+    """
+    return (
+        f"Return {_plural(shorts, 'short', 'shorts')}. If this video does not hold "
+        f"{shorts} distinct stories that meet every rule, return only the ones it does — "
+        "never pad the count with a weak short or a near-duplicate of one you already chose."
+    )
+
+
+def youtube_instruction(youtube: int, duration_sec: float) -> str:
+    if duration_sec <= YOUTUBE_MIN_VIDEO_DURATION_SEC:
+        return "Set `youtube` to an empty list — this video is under 20 minutes long."
+    if youtube <= 0:
+        return "Set `youtube` to an empty list — no YouTube plans were asked for."
+    plans = _plural(
+        youtube,
+        "independent YouTube long-form highlight plan",
+        "independent YouTube long-form highlight plans",
+    )
+    return (
+        f"Also produce {plans} "
+        "(`youtube`), since this video is longer than 20 minutes. Each plan's keep-ranges "
+        f"must add up to between {_YT_LOW:.0f} and {_YT_HIGH:.0f} seconds — sum them and "
+        "check before you return it."
+    )
+
+
 def build_suggestions_prompt(
     lines: list[str],
     duration_sec: float,
-    want_youtube: bool,
+    *,
+    shorts: int = DEFAULT_SHORT_COUNT,
+    youtube: int = DEFAULT_YOUTUBE_COUNT,
     audience: str | None = None,
     speakers: int = 0,
 ) -> str:
-    youtube_instruction = (
-        "Also produce exactly 3 independent YouTube long-form highlight plans (`youtube`), "
-        "since this video is longer than 20 minutes. Each plan's keep-ranges must add up "
-        f"to between {_YT_LOW:.0f} and {_YT_HIGH:.0f} seconds — sum them and check before "
-        "you return it."
-        if want_youtube
-        else "Set `youtube` to an empty list — this video is under 20 minutes long."
-    )
     transcript_block = "\n".join(lines)
     return (
         f"Video duration: {duration_sec:.1f} seconds.\n"
         f"{_audience_block(audience)}"
         f"{_speaker_block(speakers)}"
-        f"{youtube_instruction}\n\n"
+        f"{shorts_instruction(shorts)}\n"
+        f"{youtube_instruction(youtube, duration_sec)}\n\n"
         f"Transcript segments:\n{transcript_block}"
     )
 
@@ -368,23 +439,30 @@ def build_suggestions_prompt(
 def build_candidates_prompt(
     lines: list[str],
     duration_sec: float,
-    want_youtube: bool,
+    *,
+    candidates: int = DEFAULT_SHORT_COUNT,
+    want_youtube: bool = False,
     audience: str | None = None,
 ) -> str:
     transcript_block = "\n".join(lines)
-    youtube_instruction = (
+    youtube_part = (
         "Also suggest candidate keep-ranges for YouTube highlight reels from this portion "
         "of the video (these will be combined with candidates from other portions later, "
         "so a `youtube` list here is just candidates, not final)."
         if want_youtube
         else "Set `youtube` to an empty list."
     )
+    # "Suggest N", not "up to N": the schema for this call demands exactly N,
+    # and the two used to disagree. Candidates are allowed to be weaker than a
+    # final answer — the pick that follows is where the bar is held.
     return (
         f"This is one portion of a longer video (total duration {duration_sec:.1f}s). "
-        f"Identify the distinct stories in THIS PORTION and suggest up to 3 candidate "
-        f"shorts from them, following the cutting rules.\n"
+        f"Identify the distinct stories in THIS PORTION and suggest "
+        f"{_plural(candidates, 'candidate short', 'candidate shorts')} from them, following "
+        "the cutting rules. These are candidates, not the final choice: a weaker one is "
+        "acceptable here, because a later pass picks the best across every portion.\n"
         f"{_audience_block(audience)}"
-        f"{youtube_instruction}\n\n"
+        f"{youtube_part}\n\n"
         f"Transcript segments (this portion):\n{transcript_block}"
     )
 
@@ -393,7 +471,9 @@ def build_pick_indices_prompt(
     short_summaries: list[str],
     youtube_summaries: list[str],
     duration_sec: float,
-    want_youtube: bool,
+    *,
+    shorts: int = DEFAULT_SHORT_COUNT,
+    youtube: int = 0,
     audience: str | None = None,
 ) -> str:
     """Selection only, from already-built candidates - deliberately does NOT
@@ -408,11 +488,11 @@ def build_pick_indices_prompt(
     already cut against the real transcript keeps requests small regardless
     of video length, at the cost of no further re-cutting in this pass.
     """
-    youtube_instruction = (
-        "Also choose exactly 3 of the candidate YouTube plans below (by index) - the 3 "
-        "that together take the most meaningfully different throughlines. List their "
-        "indices, in your preferred order, in `youtube_indices`."
-        if want_youtube
+    youtube_part = (
+        f"Also choose {youtube} of the candidate YouTube plans "
+        "below (by index) — the ones that together take the most meaningfully different "
+        "throughlines. List their indices, in your preferred order, in `youtube_indices`."
+        if youtube > 0
         else "Set `youtube_indices` to an empty list."
     )
     shorts_block = "\n".join(short_summaries) or "(none)"
@@ -420,11 +500,12 @@ def build_pick_indices_prompt(
     return (
         f"Video duration: {duration_sec:.1f} seconds. Below are candidate shorts gathered "
         f"from different portions of the video - each already cut and ready to use. Choose "
-        f"exactly 3 (by index) that are the strongest and about MEANINGFULLY DIFFERENT "
-        f"topics from each other. List their indices, in your preferred order, in "
-        f"`short_indices`.\n"
+        f"{shorts} (by index) that are the strongest and about MEANINGFULLY DIFFERENT "
+        f"topics from each other. If fewer than {shorts} of them are about different topics, "
+        "choose only those — never one that repeats a topic already chosen. List their "
+        "indices, in your preferred order, in `short_indices`.\n"
         f"{_audience_block(audience)}"
-        f"{youtube_instruction}\n\n"
+        f"{youtube_part}\n\n"
         f"Candidate shorts:\n{shorts_block}\n\n"
         f"Candidate YouTube plans:\n{youtube_block}"
     )

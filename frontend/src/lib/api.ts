@@ -195,7 +195,14 @@ export const api = {
   transcribe: (id: string) =>
     request<{ job_id: string }>(`/projects/${id}/transcribe`, { method: "POST" }),
 
-  suggest: (id: string) => request<{ job_id: string }>(`/projects/${id}/suggest`, { method: "POST" }),
+  /** Asks for `counts` ideas; omit them and the server applies what the
+   *  button always meant. A count the video cannot hold is refused with 422,
+   *  never quietly lowered. */
+  suggest: (id: string, counts?: { shorts: number; youtube: number }) =>
+    request<{ job_id: string }>(`/projects/${id}/suggest`, {
+      method: "POST",
+      ...(counts ? { body: JSON.stringify(counts) } : {}),
+    }),
 
   /** Renders the model's ideas. `pick` names WHICH ones — omit it and every
    *  idea is rendered, which is what this did before there was a choice. */

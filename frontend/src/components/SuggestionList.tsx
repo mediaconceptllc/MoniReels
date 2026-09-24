@@ -42,6 +42,19 @@ function Tick({ on }: { on: boolean }) {
   );
 }
 
+/** Said where the ideas are, not in a toast that is gone before anyone reads
+ *  it. "Fewer than asked" is the design working — the model stopped rather
+ *  than pad the count with a weak idea — and that is worth one line, because
+ *  unexplained it reads as something having gone wrong. */
+function Shortfall({ requested, got }: { requested?: number | null; got: number }) {
+  if (!requested || got >= requested) return null;
+  return (
+    <p className="text-[13px] text-ink-3">
+      {requested} хүссэнээс {got} нь шалгуурт тэнцэв — сул санал нэмж тоог гүйцээгээгүй.
+    </p>
+  );
+}
+
 export function SuggestionList({
   suggestions,
   sourceUrl,
@@ -108,9 +121,12 @@ export function SuggestionList({
       </div>
 
       <section className="flex flex-col gap-3">
-        <h3 className="font-display text-base font-semibold">
-          Богино видео <span className="text-ink-3">({suggestions.shorts.length})</span>
-        </h3>
+        <div className="flex flex-col gap-1">
+          <h3 className="font-display text-base font-semibold">
+            Богино видео <span className="text-ink-3">({suggestions.shorts.length})</span>
+          </h3>
+          <Shortfall requested={suggestions.requested_shorts} got={suggestions.shorts.length} />
+        </div>
         <div className="grid gap-3 lg:grid-cols-3">
           {suggestions.shorts.map((short) => {
             const seconds = totalCutSeconds(short.cuts);
@@ -181,11 +197,16 @@ export function SuggestionList({
         </div>
       </section>
 
-      {suggestions.youtube.length > 0 && (
+      {/* Drawn when plans were ASKED for too, so that "3 asked, none held up"
+          is said rather than the section silently not being there. */}
+      {(suggestions.youtube.length > 0 || (suggestions.requested_youtube ?? 0) > 0) && (
         <section className="flex flex-col gap-3">
-          <h3 className="font-display text-base font-semibold">
-            YouTube хураангуй <span className="text-ink-3">({suggestions.youtube.length})</span>
-          </h3>
+          <div className="flex flex-col gap-1">
+            <h3 className="font-display text-base font-semibold">
+              YouTube хураангуй <span className="text-ink-3">({suggestions.youtube.length})</span>
+            </h3>
+            <Shortfall requested={suggestions.requested_youtube} got={suggestions.youtube.length} />
+          </div>
           <div className="grid gap-3 lg:grid-cols-3">
             {suggestions.youtube.map((plan, index) => {
               const on = plans.includes(index);

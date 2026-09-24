@@ -40,8 +40,16 @@ export interface RailAction {
   note?: string;
   /** What it is likely to charge, with the number of past runs that figure
    *  was measured from. Absent when nothing has been measured yet — a made-up
-   *  number beside a paid button is worse than no number at all. */
-  cost?: { usd: number; samples: number };
+   *  number beside a paid button is worse than no number at all.
+   *
+   *  `basisShorts` is how many shorts those runs were asked for and
+   *  `askingShorts` how many this click asks for. When they differ the hint
+   *  says so: the bill follows the count, and a figure measured on three is
+   *  not a price for eight. */
+  cost?: { usd: number; samples: number; basisShorts?: number | null; askingShorts?: number };
+  /** Set BEFORE the click, in the rail rather than a dialog after it: what
+   *  the action will ask for is part of deciding whether to press it. */
+  control?: ReactNode;
   onRun: () => void;
   disabled?: boolean;
   loading?: boolean;
@@ -58,6 +66,9 @@ function CostHint({ cost }: { cost: NonNullable<RailAction["cost"]> }) {
       <span className="tabular text-sm font-medium text-ink">≈ {usd(cost.usd)}</span>
       <span className="text-[11px] text-ink-3">
         өмнөх {cost.samples} гүйлтийн хэмжилтээр
+        {cost.basisShorts && cost.askingShorts && cost.basisShorts !== cost.askingShorts
+          ? ` (${cost.basisShorts} саналтай)`
+          : ""}
       </span>
     </span>
   );
@@ -95,20 +106,23 @@ function Marker({ state, index }: { state: StageDef["state"]; index: number }) {
  *  with the button rather than being left behind. */
 function ActionBar({ action }: { action: RailAction }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <Button
-        tone="primary"
-        className="text-[15px]"
-        disabled={action.disabled}
-        loading={action.loading}
-        onClick={action.onRun}
-      >
-        {action.label}
-      </Button>
-      {action.cost && !action.disabled && <CostHint cost={action.cost} />}
-      {action.note && (
-        <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action.note}</p>
-      )}
+    <div className="flex flex-col gap-3">
+      {action.control}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <Button
+          tone="primary"
+          className="text-[15px]"
+          disabled={action.disabled}
+          loading={action.loading}
+          onClick={action.onRun}
+        >
+          {action.label}
+        </Button>
+        {action.cost && !action.disabled && <CostHint cost={action.cost} />}
+        {action.note && (
+          <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action.note}</p>
+        )}
+      </div>
     </div>
   );
 }

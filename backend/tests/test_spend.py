@@ -132,7 +132,7 @@ def test_the_rate_is_per_character_not_per_run(db, owner):
     run behind that average."""
     project = _project(db, owner)
     _job(db, project, output=_llm(0.03, characters=10_000))
-    rate, samples = spend.suggest_rate(db, owner.id)
+    rate, samples, _ = spend.suggest_rate(db, owner.id)
     assert rate == pytest.approx(0.03 / 10_000)
     assert samples == 1
 
@@ -141,7 +141,7 @@ def test_the_median_is_used_so_one_expensive_run_cannot_set_the_rate(db, owner):
     project = _project(db, owner)
     for cost in (0.01, 0.012, 0.011, 2.50):
         _job(db, project, output=_llm(cost, characters=10_000))
-    rate, samples = spend.suggest_rate(db, owner.id)
+    rate, samples, _ = spend.suggest_rate(db, owner.id)
     assert samples == 4
     # The mean of those four is ~0.63/10k. The median is not dragged there.
     assert rate == pytest.approx(0.0115 / 10_000)
@@ -154,7 +154,7 @@ def test_runs_from_the_owners_other_projects_count(db, owner):
     second = _project(db, owner, "spendB")
     _job(db, first, output=_llm(0.03, characters=10_000))
     _job(db, second, output=_llm(0.03, characters=10_000))
-    assert spend.suggest_rate(db, owner.id)[1] == 2
+    assert spend.suggest_rate(db, owner.id).samples == 2
 
 
 def test_another_owners_runs_do_not_count(db, owner):
@@ -254,3 +254,35 @@ def test_the_view_states_that_speech_to_text_is_unmeasured(db, owner):
     project = _project(db, owner)
     view = spend.view(db, project_id=project.id, owner_id=owner.id, characters=0, keep_days=30)
     assert view["stt_measured"] is False
+
+
+# --------------------------------------------------------------------------
+# Which count the estimate was measured on
+# --------------------------------------------------------------------------
+
+def test_the_rate_says_how_many_shorts_its_runs_were_asked_for(db, owner):
+    """The model writes out every short it is told to, so the bill follows
+    the count. An estimate from runs of three presented beside a request for
+    eight would state a price nobody measured."""
+    project = _project(db, owner)
+    for asked in (5, 5, 3):
+        _job(db, project, output={**_llm(0.03, characters=10_000), "requested_shorts": asked})
+    assert spend.suggest_rate(db, owner.id).basis_shorts == 5
+
+
+def test_runs_from_before_the_choice_count_as_the_three_they_were(db, owner):
+    """Rows written before `requested_shorts` existed record only what came
+    back — and what came back was what had been asked, always three."""
+    project = _project(db, owner)
+    _job(db, project, output=_llm(0.03, characters=10_000))  # "shorts": 3
+    assert spend.suggest_rate(db, owner.id).basis_shorts == 3
+
+
+def test_the_view_names_the_basis_and_nothing_when_there_is_none(db, owner):
+    project = _project(db, owner)
+    empty = spend.view(db, project_id=project.id, owner_id=owner.id, characters=10_000, keep_days=30)
+    assert empty["suggest_basis_shorts"] is None
+
+    _job(db, project, output={**_llm(0.03, characters=10_000), "requested_shorts": 6})
+    view = spend.view(db, project_id=project.id, owner_id=owner.id, characters=10_000, keep_days=30)
+    assert view["suggest_basis_shorts"] == 6

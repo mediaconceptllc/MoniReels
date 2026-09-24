@@ -88,8 +88,25 @@ export interface YoutubePlan {
 }
 
 export interface Suggestions {
+  /** Between 1 and `requested_shorts` — fewer when some did not hold up,
+   *  never padded up to the number with a weaker one. */
   shorts: ShortIdea[];
   youtube: YoutubePlan[];
+  /** What the producer asked for, kept beside what came back so a shortfall
+   *  can be SAID. Null on sets made before there was a choice — those were
+   *  always asked for three. */
+  requested_shorts?: number | null;
+  requested_youtube?: number | null;
+}
+
+/** The range the count picker may offer, from the same rule the server
+ *  enforces. Never worked out here: a second copy of the rule is how a number
+ *  reaches the page that the server then refuses. */
+export interface SuggestLimits {
+  shorts_max: number;
+  youtube_max: number;
+  shorts_default: number;
+  youtube_default: number;
 }
 
 export type LogoPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -225,6 +242,10 @@ export interface ProjectSpend {
    *  beside a paid button is a promise. */
   suggest_estimate_usd: number | null;
   suggest_samples: number;
+  /** How many shorts the measured runs were asked for. The model writes out
+   *  every short it is told to, so a figure measured on three is not a price
+   *  for eight — the page says which it was. Null when nothing measured. */
+  suggest_basis_shorts: number | null;
   /** Speech-to-text is billed per minute by the recogniser and NOTHING here
    *  counts it, so a transcribe job's cost is unknown rather than nil. */
   stt_measured: boolean;
@@ -289,6 +310,7 @@ export interface Project extends ProjectDocument {
    *  the project's whole history. */
   job_history_limit: number;
   spend: ProjectSpend;
+  suggest_limits: SuggestLimits;
 }
 
 export interface Output {

@@ -1298,3 +1298,99 @@ def test_the_job_history_is_deeper_than_one_afternoon(client, db):
     data = client.get(f"/projects/{row.id}", headers=_auth(client, "historyreader")).json()
     assert len(data["jobs"]) == 15
     assert data["job_history_limit"] == JOB_HISTORY_LIMIT >= 15
+
+
+# ---------------------------------------------------------------------------
+# How many ideas to ask for
+# ---------------------------------------------------------------------------
+
+def _suggestable(db, monkeypatch, username: str, duration_sec: float) -> Project:
+    """A project the suggest route will accept, with the LLM configured."""
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={"openrouter_api_key": "sk-or-test"})
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+
+    owner = _user(db, username)
+    row = _project_with_video(db, owner)
+    row.doc = {
+        **row.doc,
+        "video": {**row.doc["video"], "duration_sec": duration_sec},
+        "transcript": {
+            "language": "mn", "full_text": "яриа",
+            "segments": [{"id": "s", "start": 0.0, "end": 2.0, "text": "яриа", "words": []}],
+        },
+    }
+    db.commit()
+    return row
+
+
+def _queued_payload(db, job_id: str) -> dict:
+    from app.dbmodels import Job
+
+    db.expire_all()
+    return queue.payload_of(db.get(Job, job_id))
+
+
+def test_the_chosen_counts_travel_to_the_job(client, db, monkeypatch):
+    row = _suggestable(db, monkeypatch, "chooser", duration_sec=1800.0)
+    response = client.post(
+        f"/projects/{row.id}/suggest", json={"shorts": 6, "youtube": 2},
+        headers=_auth(client, "chooser"),
+    )
+    assert response.status_code == 200
+    assert _queued_payload(db, response.json()["job_id"]) == {"shorts": 6, "youtube": 2}
+
+
+def test_no_body_still_means_what_the_button_always_meant(client, db, monkeypatch):
+    """A client from before the choice must keep working unchanged."""
+    row = _suggestable(db, monkeypatch, "oldclient", duration_sec=1800.0)
+    response = client.post(f"/projects/{row.id}/suggest", headers=_auth(client, "oldclient"))
+    assert response.status_code == 200
+    assert _queued_payload(db, response.json()["job_id"]) == {"shorts": 3, "youtube": 3}
+
+
+def test_more_shorts_than_the_video_can_hold_is_refused_not_clamped(client, db, monkeypatch):
+    """A silent clamp turns "8" into "2" AFTER the click; the producer finds
+    out only when fewer come back than they paid to ask for."""
+    row = _suggestable(db, monkeypatch, "greedy", duration_sec=100.0)  # holds 2
+    response = client.post(
+        f"/projects/{row.id}/suggest", json={"shorts": 8, "youtube": 0},
+        headers=_auth(client, "greedy"),
+    )
+    assert response.status_code == 422
+    assert "2" in response.json()["detail"]
+
+
+def test_plans_for_a_video_under_twenty_minutes_are_refused(client, db, monkeypatch):
+    row = _suggestable(db, monkeypatch, "shortvid", duration_sec=900.0)
+    response = client.post(
+        f"/projects/{row.id}/suggest", json={"shorts": 3, "youtube": 3},
+        headers=_auth(client, "shortvid"),
+    )
+    assert response.status_code == 422
+    assert "20 минут" in response.json()["detail"]
+
+
+def test_counts_outside_the_absolute_range_never_reach_the_route(client, db, monkeypatch):
+    """Zero shorts would be a paid call for nothing; nine exceeds any video."""
+    row = _suggestable(db, monkeypatch, "bounds", duration_sec=3600.0)
+    auth = _auth(client, "bounds")
+    for body in ({"shorts": 0}, {"shorts": 9}, {"youtube": -1}, {"youtube": 6}):
+        assert client.post(f"/projects/{row.id}/suggest", json=body, headers=auth).status_code == 422
+
+
+def test_the_project_says_what_range_the_picker_may_offer(client, db, monkeypatch):
+    """The page draws its picker from this, never from its own copy of the
+    rule — a second copy is how a number reaches the page that the server
+    then refuses."""
+    row = _suggestable(db, monkeypatch, "limits", duration_sec=1800.0)
+    limits = client.get(f"/projects/{row.id}", headers=_auth(client, "limits")).json()["suggest_limits"]
+    assert limits == {"shorts_max": 8, "youtube_max": 5, "shorts_default": 3, "youtube_default": 3}
+
+
+def test_a_short_video_is_offered_what_it_can_hold(client, db, monkeypatch):
+    row = _suggestable(db, monkeypatch, "shortlimits", duration_sec=100.0)
+    limits = client.get(f"/projects/{row.id}", headers=_auth(client, "shortlimits")).json()["suggest_limits"]
+    assert limits == {"shorts_max": 2, "youtube_max": 0, "shorts_default": 2, "youtube_default": 0}

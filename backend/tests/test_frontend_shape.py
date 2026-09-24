@@ -291,6 +291,10 @@ def _filled_project(db, owner_id: str) -> Project:
             )
             for i in range(3)
         ],
+        # Numbers, not null: `number | null` is only checked on the side the
+        # fixture actually carries, and null is the side old documents have.
+        requested_shorts=3,
+        requested_youtube=3,
     )
     project.clips = [
         Clip(id="c1", source_path="sources/shape/source.mp4", start=0.0, end=12.0, order=0),

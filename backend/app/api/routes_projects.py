@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import providers, r2, security, spend
+from app.ai.schema import count_limits, default_counts
 from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
@@ -32,6 +33,7 @@ from app.schemas import (
     OutputOut,
     SelectRangesIn,
     SubtitleTemplateIn,
+    SuggestIn,
     UpdateProjectIn,
     UpdateTranscriptIn,
     UploadCompleteOut,
@@ -192,6 +194,19 @@ def get_project(
     # what did it cost" — needs more than the last afternoon.
     data["jobs"] = queue.list_for_project(project_id, limit=JOB_HISTORY_LIMIT)
     data["job_history_limit"] = JOB_HISTORY_LIMIT
+    # The range the picker offers, from the same rule the route enforces. A
+    # client that worked it out for itself would be a second copy of the rule,
+    # and the first change to either would put a number on the page that the
+    # server then refuses.
+    duration = (data.get("video") or {}).get("duration_sec") or 0.0
+    shorts_max, youtube_max = count_limits(duration)
+    shorts_default, youtube_default = default_counts(duration)
+    data["suggest_limits"] = {
+        "shorts_max": shorts_max,
+        "youtube_max": youtube_max,
+        "shorts_default": shorts_default,
+        "youtube_default": youtube_default,
+    }
     transcript = (data.get("transcript") or {}).get("full_text") or ""
     data["spend"] = spend.view(
         db,
@@ -378,15 +393,51 @@ def transcribe(
 @router.post("/{project_id}/suggest")
 def suggest(
     project_id: str,
+    body: SuggestIn | None = None,
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
+    """Ask the model for ideas — as many as the producer chose.
+
+    A count this video cannot hold is REFUSED, not clamped: a silent clamp
+    turns "8" into "4" after the click, and the producer finds out only when
+    fewer come back than they paid to ask for.
+
+    The count is not part of the dedupe key, on purpose. The result replaces
+    the project's suggestions, so two runs at once would race to overwrite
+    each other; a second click while one is running gets that one's id.
+    """
     project = _require_project(db, project_id, principal)
     if project.transcript is None or not project.transcript.segments:
         raise HTTPException(status_code=400, detail="Эхлээд яриаг таниулна уу.")
     _require_provider(db, providers.LLM)
+
+    duration = project.video.duration_sec if project.video else 0.0
+    shorts_max, youtube_max = count_limits(duration)
+    shorts_default, youtube_default = default_counts(duration)
+    shorts = body.shorts if body and body.shorts is not None else shorts_default
+    youtube = body.youtube if body and body.youtube is not None else youtube_default
+    if shorts > shorts_max:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Энэ видеоноос дээд тал нь {shorts_max} богино видео гаргах боломжтой.",
+        )
+    if youtube > youtube_max:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "20 минутаас богино видеонд YouTube хураангуй гаргахгүй."
+                if youtube_max == 0
+                else f"Дээд тал нь {youtube_max} YouTube хураангуй гаргах боломжтой."
+            ),
+        )
     return {
-        "job_id": queue.enqueue("suggest", project_id=project_id, dedupe_key=f"suggest:{project_id}")
+        "job_id": queue.enqueue(
+            "suggest",
+            project_id=project_id,
+            payload={"shorts": shorts, "youtube": youtube},
+            dedupe_key=f"suggest:{project_id}",
+        )
     }
 
 
