@@ -29,6 +29,7 @@ import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
 import { JobProgress } from "@/components/JobProgress";
 import { OutputList } from "@/components/OutputList";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Shell } from "@/components/Shell";
 import { SuggestionList } from "@/components/SuggestionList";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
@@ -45,6 +46,7 @@ export default function ProjectPage() {
   const [activeJob, setActiveJob] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Stage>("source");
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -96,12 +98,11 @@ export default function ProjectPage() {
   }
 
   async function remove() {
-    if (!project) return;
-    if (!window.confirm(`«${project.name}» төслийг бүхэлд нь устгах уу? Буцаах боломжгүй.`)) return;
     try {
       await api.deleteProject(projectId);
       router.push("/");
     } catch (err) {
+      setConfirmDelete(false);
       setError(errorMessage(err));
     }
   }
@@ -240,7 +241,7 @@ export default function ProjectPage() {
                 : "Видео боловсруулагдаж байна…"}
             </p>
           </div>
-          <Button tone="danger" onClick={remove}>
+          <Button tone="danger" className="min-h-[44px]" onClick={() => setConfirmDelete(true)}>
             Төсөл устгах
           </Button>
         </header>
@@ -311,6 +312,7 @@ export default function ProjectPage() {
               projectId={projectId}
               segments={project.transcript!.segments}
               timingsEstimated={project.transcript!.timings_estimated}
+              sourceUrl={project.media.source_url}
               onSaved={() => void refresh()}
             />
           ) : (
@@ -341,6 +343,23 @@ export default function ProjectPage() {
 
         {project.transcript?.timings_estimated && tab === "source" && (
           <Badge tone="warn">Зарим хугацаа ойролцоо</Badge>
+        )}
+
+        {/* Counted, not implied: a project is hours of work and real money,
+            and `window.confirm` could say neither. */}
+        {confirmDelete && (
+          <ConfirmDialog
+            title={`«${project.name}» төслийг бүхэлд нь устгах уу?`}
+            lose={[
+              hasTranscript ? `${segments} мөр хадмал текст` : "",
+              hasSuggestions ? `${shorts} богино · ${plans} хураангуйн санал` : "",
+              outputs.length ? `${outputs.length} бэлэн видео` : "",
+              "Эх видео",
+            ].filter(Boolean)}
+            confirmLabel="Устгах"
+            onConfirm={() => void remove()}
+            onCancel={() => setConfirmDelete(false)}
+          />
         )}
       </div>
     </Shell>

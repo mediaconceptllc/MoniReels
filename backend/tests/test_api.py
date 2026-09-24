@@ -1095,3 +1095,83 @@ def test_clearing_the_model_is_not_a_model_to_check(client, db):
 
     assert response.status_code == 200
     assert response.json()["model_check"] is None
+
+
+# ---------------------------------------------------------------------------
+# The list carries each project's thumbnail
+# ---------------------------------------------------------------------------
+
+
+def test_the_list_signs_a_thumbnail_for_each_project(client, db):
+    """Import has always made one and the detail page has always signed one;
+    the list never asked, so a wall of VIDEO projects read as a wall of text.
+
+    Signed per request, like every other media URL here — never stored, so a
+    URL cannot outlive its own expiry inside a page left open."""
+    user = _user(db, "thumbowner")
+    row = Project(
+        owner_id=user.id, name="with a thumbnail", doc={},
+        video_key="sources/x/source.mp4", thumbnail_key="thumbnails/x/thumb.jpg",
+    )
+    db.add(row)
+    db.commit()
+
+    listed = client.get("/projects", headers=_auth(client, "thumbowner"))
+    assert listed.status_code == 200, listed.text
+    card = next(p for p in listed.json() if p["id"] == row.id)
+    assert card["thumbnail_url"], "the list must sign the thumbnail it already has"
+    assert "thumbnails/x/thumb.jpg" in card["thumbnail_url"]
+
+
+def test_a_project_with_no_thumbnail_yet_says_null(client, db):
+    """Null, not a missing key and not a broken URL: the import is still
+    running, and the card draws its own frame rather than going ragged."""
+    user = _user(db, "nothumb")
+    db.add(Project(owner_id=user.id, name="still importing", doc={}))
+    db.commit()
+
+    listed = client.get("/projects", headers=_auth(client, "nothumb"))
+    card = listed.json()[0]
+    assert "thumbnail_url" in card
+    assert card["thumbnail_url"] is None
+
+
+def test_the_thumbnail_url_is_never_stored(client, db):
+    """A signed URL expires; a stored one would keep being handed out after it
+    had. Two reads of the same row must produce two fresh signatures."""
+    user = _user(db, "freshsig")
+    row = Project(
+        owner_id=user.id, name="p", doc={},
+        video_key="sources/y/source.mp4", thumbnail_key="thumbnails/y/thumb.jpg",
+    )
+    db.add(row)
+    db.commit()
+    auth = _auth(client, "freshsig")
+
+    first = client.get("/projects", headers=auth).json()[0]["thumbnail_url"]
+    db.expire_all()
+    assert db.get(Project, row.id).doc == {}, "the signature must not land in the document"
+    assert first and "X-Amz-Signature" in first
+
+
+def test_storage_off_yields_null_rather_than_the_raw_key(client, db, monkeypatch):
+    """The case the null branch really guards.
+
+    A project can hold a thumbnail key while storage is unconfigured — the row
+    outlives the setting. Handing the KEY back in a field the browser puts in
+    an `src` would render a broken image AND publish the object's path, and
+    both are worse than the frame the card draws for itself.
+    """
+    from app import r2
+
+    monkeypatch.setattr(r2, "enabled", lambda: False)
+    user = _user(db, "nostorage")
+    db.add(Project(
+        owner_id=user.id, name="p", doc={},
+        video_key="sources/z/source.mp4", thumbnail_key="thumbnails/z/thumb.jpg",
+    ))
+    db.commit()
+
+    card = client.get("/projects", headers=_auth(client, "nostorage")).json()[0]
+    assert card["thumbnail_url"] is None
+    assert "thumbnails/z" not in str(card)

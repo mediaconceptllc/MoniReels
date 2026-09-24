@@ -3,6 +3,7 @@
 /** Shared primitives. Everything takes its colour from the tokens in
  *  globals.css, so both themes stay correct without per-component overrides. */
 
+import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 
 type Tone = "default" | "primary" | "danger" | "quiet";
@@ -15,17 +16,16 @@ const TONE_CLASS: Record<Tone, string> = {
   quiet: "bg-transparent text-ink-2 border-transparent hover:bg-surface-2",
 };
 
-export function Button({
-  tone = "default",
-  loading = false,
-  children,
-  className = "",
-  disabled,
-  ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: Tone; loading?: boolean }) {
+/** Forwards its ref so a dialog can put focus on the way OUT rather than on
+ *  the destructive button — a stray Enter must not delete anything. */
+export const Button = forwardRef<
+  HTMLButtonElement,
+  ButtonHTMLAttributes<HTMLButtonElement> & { tone?: Tone; loading?: boolean }
+>(function Button({ tone = "default", loading = false, children, className = "", disabled, ...rest }, ref) {
   return (
     <button
       {...rest}
+      ref={ref}
       disabled={disabled || loading}
       className={`inline-flex items-center justify-center gap-2 rounded-md border px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]} ${className}`}
     >
@@ -33,7 +33,7 @@ export function Button({
       {children}
     </button>
   );
-}
+});
 
 export function Spinner() {
   return (

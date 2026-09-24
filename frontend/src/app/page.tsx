@@ -74,22 +74,45 @@ export default function ProjectsPage() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {projects?.map((project) => (
               <Link key={project.id} href={`/projects/${project.id}`} className="block">
-                <Card className="h-full p-4 transition-colors hover:border-accent">
-                  <p className="font-display text-[15px] font-medium leading-snug text-ink">
-                    {project.name}
-                  </p>
-                  <p className="tabular mt-1 text-xs text-ink-3">
-                    {duration(project.duration_sec)} · {relativeTime(project.updated_at)}
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    <Badge tone={project.has_video ? "fit" : "default"}>
-                      {project.has_video ? "Видео" : "Видеогүй"}
-                    </Badge>
-                    {project.has_transcript && <Badge tone="fit">Текст</Badge>}
-                    {project.has_suggestions && <Badge tone="accent">Санал</Badge>}
-                    {project.n_outputs > 0 && (
-                      <Badge tone="accent">{project.n_outputs} бэлэн</Badge>
+                <Card className="flex h-full flex-col overflow-hidden transition-colors hover:border-accent">
+                  {/* Import has always made a thumbnail; the list never asked
+                      for one, so a wall of VIDEO projects read as a wall of
+                      text. The frame is drawn either way so the grid does not
+                      go ragged while an import is still running. */}
+                  <div className="relative aspect-video bg-ink/90">
+                    {project.thumbnail_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={project.thumbnail_url}
+                        alt=""
+                        loading="lazy"
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <span className="flex h-full items-center justify-center text-xs text-paper/60">
+                        {project.has_video ? "Хальс бэлдэж байна" : "Видеогүй"}
+                      </span>
                     )}
+                    {project.duration_sec > 0 && (
+                      <span className="tabular absolute bottom-1.5 right-1.5 rounded bg-ink/75 px-1.5 py-0.5 font-mono text-[11px] text-paper">
+                        {duration(project.duration_sec)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-1 flex-col gap-2 p-3.5">
+                    <p className="font-display text-[15px] font-medium leading-snug text-ink">
+                      {project.name}
+                    </p>
+                    {/* One state, not four badges of equal weight competing to
+                        be read. The furthest stage reached is the answer to
+                        "where is this project", which is the only question a
+                        list card is asked. */}
+                    <div className="mt-auto flex items-center gap-2">
+                      <Badge tone={stateTone(project)}>{stateLabel(project)}</Badge>
+                      <span className="tabular text-xs text-ink-3">
+                        {relativeTime(project.updated_at)}
+                      </span>
+                    </div>
                   </div>
                 </Card>
               </Link>
@@ -99,4 +122,25 @@ export default function ProjectsPage() {
       </div>
     </Shell>
   );
+}
+
+/** The furthest stage a project has reached, said once.
+ *
+ * Four badges of equal weight ("Видео", "Текст", "Санал", "3 бэлэн") made the
+ * reader assemble the answer themselves, and the pipeline is strictly ordered
+ * — so the last stage reached IS the state. */
+function stateLabel(p: ProjectSummary): string {
+  if (p.n_outputs > 0) return `${p.n_outputs} видео бэлэн`;
+  if (p.has_suggestions) return "Санал бэлэн";
+  if (p.has_transcript) return "Текст бэлэн";
+  if (p.has_video) return "Видео орсон";
+  return "Видеогүй";
+}
+
+function stateTone(p: ProjectSummary): "fit" | "accent" | "default" | "warn" {
+  if (p.n_outputs > 0) return "fit";
+  if (p.has_suggestions) return "accent";
+  if (p.has_transcript) return "accent";
+  if (p.has_video) return "default";
+  return "warn";
 }
