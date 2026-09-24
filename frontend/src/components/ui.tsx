@@ -158,15 +158,23 @@ export function ProgressBar({ value, tone = "accent" }: { value: number; tone?: 
 export function Field({
   label,
   hint,
+  aside,
   children,
 }: {
   label: string;
   hint?: string;
+  /** Rendered beside the label — a live status, a count. It stays INSIDE the
+   *  label element: hand-rolling the row outside it is how a field loses its
+   *  `<label>`, and with it the click that focuses the control. */
+  aside?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[13px] font-medium text-ink-2">{label}</span>
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-medium text-ink-2">{label}</span>
+        {aside}
+      </span>
       {children}
       {hint && <span className="text-xs text-ink-3">{hint}</span>}
     </label>

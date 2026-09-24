@@ -5,23 +5,41 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
-import { Alert, Button, Card, Field, Loading, Skeleton, TextInput } from "@/components/ui";
+import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
 import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
 
 type SecretName = "openrouter_api_key" | "duudlaga_api_key" | "elevenlabs_api_key";
 
-const SECRETS: { name: SecretName; label: string; hint: string }[] = [
+/**
+ * Which capability each key actually switches on.
+ *
+ * `stt` is the one that cannot be read off the key alone: two recognisers can
+ * both hold a key and only the SELECTED one runs anything, so a key for the
+ * other must not report "working" — that is exactly the state an operator
+ * comes to this page to untangle.
+ */
+const SECRETS: {
+  name: SecretName;
+  label: string;
+  hint: string;
+  capability: Capability["name"];
+  /** Set when this key belongs to one recogniser among several. */
+  sttProvider?: string;
+}[] = [
   {
     name: "openrouter_api_key",
     label: "OpenRouter API түлхүүр",
     hint: "Санал боловсруулах бүх ажил үүгээр явна.",
+    capability: "llm",
   },
   {
     name: "duudlaga_api_key",
     label: "duudlaga.dev API түлхүүр",
     hint: "Яриаг текст болгоход хэрэглэгдэнэ. Түлхүүр дээрээ өдрийн зарлагын хязгаар тавихыг зөвлөж байна.",
+    capability: "stt",
+    sttProvider: "duudlaga",
   },
   {
     name: "elevenlabs_api_key",
@@ -30,8 +48,37 @@ const SECRETS: { name: SecretName; label: string; hint: string }[] = [
     // because a stored key that half the page reads must not look like it
     // powers the other half too.
     hint: "Яриа таних (Scribe) хэсэгт ашиглагдана. Дуу оруулах (TTS) хараахан хэрэгжээгүй.",
+    capability: "stt",
+    sttProvider: "elevenlabs",
   },
 ];
+
+/** The live state of what this key switches on, beside the key itself.
+ *
+ *  The table further down already said all of this, and the operator who came
+ *  here because something is not working had to read the field, scroll, find
+ *  the matching row, and carry one back to the other. */
+function KeyState({
+  secret,
+  capabilities,
+  sttProvider,
+}: {
+  secret: (typeof SECRETS)[number];
+  capabilities: Capability[];
+  sttProvider: string;
+}) {
+  // Nothing is claimed when the status read failed — the keys are still
+  // editable, and a badge invented from no data is worse than no badge.
+  if (capabilities.length === 0) return null;
+
+  if (secret.sttProvider && sttProvider && secret.sttProvider !== sttProvider) {
+    return <Badge>Сонгогдоогүй</Badge>;
+  }
+  const capability = capabilities.find((c) => c.name === secret.capability);
+  if (!capability) return null;
+  if (capability.ready) return <Badge tone="fit">Ажиллаж байна</Badge>;
+  return <Badge tone="warn">Тохируулаагүй</Badge>;
+}
 
 function sourceLabel(field: ProviderSettings[SecretName] | undefined): string {
   if (!field?.set) return "Тавигдаагүй";
@@ -152,7 +199,32 @@ export default function AdminPage() {
           </Alert>
         )}
 
-        <Card>
+        {/* What is running comes FIRST. This page is opened far more often
+            to answer "why did that fail" than to type a new key, and the
+            answer used to be below three password fields. */}
+        {capabilities.length > 0 && (
+          <CapabilityTable
+            capabilities={capabilities}
+            sttProvider={sttProvider}
+            sttProviders={sttProviders}
+            onSttProvider={(name) => {
+              // Applied immediately rather than left in the draft with the
+              // keys: this is one click, and a recogniser that looks selected
+              // but is not saved is how a job runs on the wrong vendor.
+              setSttProvider(name);
+              void (async () => {
+                try {
+                  await api.saveProviderSettings({ stt_provider: name });
+                  await load();
+                } catch (err) {
+                  setError(errorMessage(err));
+                }
+              })();
+            }}
+          />
+        )}
+
+        <Card className="p-5">
           <div className="flex flex-col gap-5">
             <div>
               <h2 className="font-display text-lg font-semibold text-ink">API түлхүүрүүд</h2>
@@ -160,15 +232,26 @@ export default function AdminPage() {
                 Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана.
               </p>
             </div>
-            {SECRETS.map(({ name, label, hint }) => (
-              <Field key={name} label={label} hint={hint}>
+            {SECRETS.map((secret) => (
+              <Field
+                key={secret.name}
+                label={secret.label}
+                hint={secret.hint}
+                aside={
+                  <KeyState
+                    secret={secret}
+                    capabilities={capabilities}
+                    sttProvider={sttProvider}
+                  />
+                }
+              >
                 <TextInput
                   type="password"
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder={sourceLabel(settings?.[name])}
-                  value={drafts[name] ?? ""}
-                  onChange={(e) => setDrafts((d) => ({ ...d, [name]: e.target.value }))}
+                  placeholder={sourceLabel(settings?.[secret.name])}
+                  value={drafts[secret.name] ?? ""}
+                  onChange={(e) => setDrafts((d) => ({ ...d, [secret.name]: e.target.value }))}
                 />
               </Field>
             ))}
@@ -197,28 +280,6 @@ export default function AdminPage() {
             </div>
           </div>
         </Card>
-
-        {capabilities.length > 0 && (
-          <CapabilityTable
-            capabilities={capabilities}
-            sttProvider={sttProvider}
-            sttProviders={sttProviders}
-            onSttProvider={(name) => {
-              // Applied immediately rather than left in the draft with the
-              // keys: this is one click, and a recogniser that looks selected
-              // but is not saved is how a job runs on the wrong vendor.
-              setSttProvider(name);
-              void (async () => {
-                try {
-                  await api.saveProviderSettings({ stt_provider: name });
-                  await load();
-                } catch (err) {
-                  setError(errorMessage(err));
-                }
-              })();
-            }}
-          />
-        )}
 
         <BrandAssetsCard />
 

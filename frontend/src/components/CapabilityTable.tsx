@@ -28,7 +28,7 @@ export function CapabilityTable({
   onSttProvider?: (name: string) => void;
 }) {
   return (
-    <Card>
+    <Card className="p-5">
       <div className="flex flex-col gap-4">
         <div>
           <h2 className="font-display text-lg font-semibold text-ink">Юу юуг ажиллуулж байна</h2>

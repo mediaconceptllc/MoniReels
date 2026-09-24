@@ -84,7 +84,7 @@ export function BrandAssetsCard() {
   }
 
   return (
-    <Card>
+    <Card className="p-5">
       <div className="flex flex-col gap-5">
         <div>
           <h2 className="font-display text-lg font-semibold text-ink">Брэндийн материал</h2>
