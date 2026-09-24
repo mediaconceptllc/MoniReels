@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration } from "@/lib/format";
 import type { Output, Project } from "@/lib/types";
-import { Alert, Badge, Button, Card, Empty, Loading, Skeleton } from "@/components/ui";
+import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
 import {
   PipelineRail,
   PipelineRailSkeleton,
@@ -113,19 +113,21 @@ export default function ProjectPage() {
     // the rail still lets the other two appear as a jump.
     return (
       <Shell>
+        {/* One `role="status"` for the page — the rail's. Three regions all
+            named "Ачаалж байна" would be announced three times for one wait. */}
         <div className="flex flex-col gap-6">
-          <Loading className="flex items-start justify-between gap-4">
+          <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-2">
               <Skeleton className="h-8 w-64" />
               <Skeleton className="h-4 w-40" />
             </div>
             <Skeleton className="h-11 w-32 rounded-md" />
-          </Loading>
+          </div>
           <PipelineRailSkeleton />
-          <Loading className="flex flex-col gap-4">
+          <div className="flex flex-col gap-4">
             <Skeleton className="aspect-video w-full max-w-3xl rounded-lg" />
             <Skeleton className="h-40 rounded-lg" />
-          </Loading>
+          </div>
         </div>
       </Shell>
     );
