@@ -121,8 +121,10 @@ export function SpeakerVoices({
       {error && <Alert>{error}</Alert>}
       {data?.error && <Alert tone="warn">{data.error}</Alert>}
       {gone.map((s) => (
+        // No case ending on the number: the right one depends on how the
+        // number is read (1-д, 3-т), so the name stands alone.
         <Alert key={s.id} tone="warn">
-          Илтгэгч {speakers.indexOf(s) + 1}-д оноосон хоолой ElevenLabs-ийн жагсаалтад алга.
+          Илтгэгч {speakers.indexOf(s) + 1}: оноосон хоолой ElevenLabs-ийн жагсаалтад алга.
           Экспорт энэ илтгэгчийн мөр дээр зогсоно — өөр хоолой сонгоно уу.
         </Alert>
       ))}
@@ -156,7 +158,7 @@ export function SpeakerVoices({
                 </div>
                 <div className="flex items-center gap-2 sm:w-80 sm:shrink-0">
                   <Select
-                    aria-label={`${name}-ийн хоолой`}
+                    aria-label={`${name} — хоолой`}
                     value={chosen}
                     onChange={(e) => choose(speaker.id, e.target.value)}
                     className="min-w-0 flex-1"
