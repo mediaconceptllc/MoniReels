@@ -11,13 +11,16 @@ hand instead, so the routes see exactly what they see in production.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.dbmodels import Project, User
 from app.jobs import queue
+from app.models import Segment, Transcript
 from app.security import hash_password
+from app.store import load, save
 from app.video.capabilities import Capabilities
 from tests.conftest import requires_db
 
@@ -1175,3 +1178,123 @@ def test_storage_off_yields_null_rather_than_the_raw_key(client, db, monkeypatch
     card = client.get("/projects", headers=_auth(client, "nostorage")).json()[0]
     assert card["thumbnail_url"] is None
     assert "thumbnails/z" not in str(card)
+
+
+# ---------------------------------------------------------------------------
+# What a project has cost, and what the next paid run will cost
+# ---------------------------------------------------------------------------
+
+def _priced_suggest(db, project_id: str, *, cost: float, characters: int, jid: str) -> None:
+    from app.dbmodels import Job
+
+    db.add(Job(
+        id=jid, project_id=project_id, kind="suggest", state="done",
+        progress=1.0, stage="done",
+        result={"payload": {}, "output": {
+            "shorts": 3, "youtube": 2, "characters": characters, "elapsed_sec": 11.0,
+            "llm": {"calls": 2, "prompt_tokens": 9000, "completion_tokens": 800,
+                    "cost_usd": cost, "models": ["example/model"]},
+        }},
+        created_at=time.time(), finished_at=time.time(),
+    ))
+    db.commit()
+
+
+def test_the_project_reports_what_it_has_spent(client, db):
+    """The figure was metered from the first day and reachable only through
+    the database. The page that asks for a paid run is the page that should
+    be able to say what the last one cost."""
+    user = _user(db, "spendreader")
+    row = Project(owner_id=user.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    _priced_suggest(db, row.id, cost=0.0312, characters=9000, jid="apispend1")
+
+    data = client.get(f"/projects/{row.id}", headers=_auth(client, "spendreader")).json()
+    assert data["spend"]["spent_usd"] == pytest.approx(0.0312)
+    assert data["spend"]["priced_jobs"] == 1
+    # The jobs behind the total are pruned, so the window travels with it.
+    assert data["spend"]["keep_days"] > 0
+
+
+def test_the_estimate_is_scaled_to_this_projects_transcript(client, db):
+    user = _user(db, "spendscaler")
+    row = Project(owner_id=user.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    project = load(db, row.id)
+    project.transcript = Transcript(
+        language="mn",
+        segments=[Segment(id="s1", start=0.0, end=4.0, text="ү" * 18_000)],
+        full_text="ү" * 18_000,
+    )
+    save(db, project)
+    _priced_suggest(db, row.id, cost=0.03, characters=9000, jid="apispend2")
+
+    spend = client.get(f"/projects/{row.id}", headers=_auth(client, "spendscaler")).json()["spend"]
+    # Twice the transcript of the measured run, so twice the bill.
+    assert spend["suggest_estimate_usd"] == pytest.approx(0.06)
+    assert spend["suggest_samples"] == 1
+
+
+def test_a_project_with_nothing_measured_offers_no_estimate(client, db):
+    """Null rather than 0.00: a zero next to a paid button is a promise, and
+    the very first run is when the question is actually being asked."""
+    user = _user(db, "spendfirst")
+    row = Project(owner_id=user.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+
+    spend = client.get(f"/projects/{row.id}", headers=_auth(client, "spendfirst")).json()["spend"]
+    assert spend["suggest_estimate_usd"] is None
+    assert spend["spent_usd"] == 0.0
+    # Speech-to-text is billed per minute by the recogniser and nothing here
+    # counts it, which the payload says rather than the page assuming.
+    assert spend["stt_measured"] is False
+
+
+def test_another_owners_runs_never_price_this_one(client, db):
+    """The rate is owner-scoped. Reading it across accounts would leak how
+    much somebody else's work costs — and, on a shared instance, roughly how
+    much of it there is."""
+    mine = _user(db, "spendmine")
+    theirs = _user(db, "spendtheirs")
+    ours = Project(owner_id=mine.id, name="mine", doc={})
+    hers = Project(owner_id=theirs.id, name="theirs", doc={})
+    db.add_all([ours, hers])
+    db.commit()
+    project = load(db, ours.id)
+    project.transcript = Transcript(
+        language="mn",
+        segments=[Segment(id="s1", start=0.0, end=4.0, text="ү" * 9000)],
+        full_text="ү" * 9000,
+    )
+    save(db, project)
+    _priced_suggest(db, hers.id, cost=4.00, characters=9000, jid="apispend3")
+
+    spend = client.get(f"/projects/{ours.id}", headers=_auth(client, "spendmine")).json()["spend"]
+    assert spend["suggest_estimate_usd"] is None
+
+
+def test_the_job_history_is_deeper_than_one_afternoon(client, db):
+    """Ten rows is three exports and a retry. The question this answers —
+    what ran, how long it took, what it cost — needs more than that, and the
+    page is told the limit so a short list does not read as a quiet project."""
+    from app.api.routes_projects import JOB_HISTORY_LIMIT
+    from app.dbmodels import Job
+
+    user = _user(db, "historyreader")
+    row = Project(owner_id=user.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    for i in range(15):
+        db.add(Job(
+            id=f"apihist{i}", project_id=row.id, kind="export", state="done",
+            result={"payload": {}, "output": {"elapsed_sec": 1.0}},
+            created_at=time.time() + i,
+        ))
+    db.commit()
+
+    data = client.get(f"/projects/{row.id}", headers=_auth(client, "historyreader")).json()
+    assert len(data["jobs"]) == 15
+    assert data["job_history_limit"] == JOB_HISTORY_LIMIT >= 15

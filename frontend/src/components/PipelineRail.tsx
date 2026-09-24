@@ -18,6 +18,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { usd } from "@/lib/format";
 import { Button, Loading, Skeleton } from "@/components/ui";
 
 export type Stage = "source" | "transcript" | "suggestions" | "outputs";
@@ -37,9 +38,29 @@ export interface RailAction {
   /** Said BEFORE the click, not discovered after: what it will do, how long
    *  it takes, and whether it costs money. */
   note?: string;
+  /** What it is likely to charge, with the number of past runs that figure
+   *  was measured from. Absent when nothing has been measured yet — a made-up
+   *  number beside a paid button is worse than no number at all. */
+  cost?: { usd: number; samples: number };
   onRun: () => void;
   disabled?: boolean;
   loading?: boolean;
+}
+
+/** The estimate and the evidence for it, together.
+ *
+ *  The sample count is not a footnote: "≈ $0.03 from one run" and the same
+ *  figure from twenty are different claims, and a screen that prints only the
+ *  dollars says they are the same. */
+function CostHint({ cost }: { cost: NonNullable<RailAction["cost"]> }) {
+  return (
+    <span className="flex flex-col leading-tight">
+      <span className="tabular text-sm font-medium text-ink">≈ {usd(cost.usd)}</span>
+      <span className="text-[11px] text-ink-3">
+        өмнөх {cost.samples} гүйлтийн хэмжилтээр
+      </span>
+    </span>
+  );
 }
 
 function Marker({ state, index }: { state: StageDef["state"]; index: number }) {
@@ -84,6 +105,7 @@ function ActionBar({ action }: { action: RailAction }) {
       >
         {action.label}
       </Button>
+      {action.cost && !action.disabled && <CostHint cost={action.cost} />}
       {action.note && (
         <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action.note}</p>
       )}
@@ -182,16 +204,19 @@ export function PipelineRail({
           rail's `overflow-hidden` because it is positioned against the
           viewport rather than against any ancestor here. */}
       {offscreen && action && !children && (
-        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-rule bg-surface px-4 py-3 sm:hidden">
+        <div className="fixed inset-x-0 bottom-0 z-30 flex items-center gap-3 border-t border-rule bg-surface px-4 py-3 sm:hidden">
           <Button
             tone="primary"
-            className="w-full text-[15px]"
+            className="flex-1 text-[15px]"
             disabled={action.disabled}
             loading={action.loading}
             onClick={action.onRun}
           >
             {action.label}
           </Button>
+          {/* The price travels with the button. A pinned copy without it
+              would be the one click in the app that costs money silently. */}
+          {action.cost && !action.disabled && <CostHint cost={action.cost} />}
         </div>
       )}
     </div>

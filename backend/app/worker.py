@@ -242,7 +242,14 @@ async def handle_suggest(handle: JobHandle) -> dict:
         project.suggestions = suggestions
         save(db, project)
 
-    return {"shorts": len(suggestions.shorts), "youtube": len(suggestions.youtube)}
+    return {
+        "shorts": len(suggestions.shorts),
+        "youtube": len(suggestions.youtube),
+        # What went INTO the prompt, recorded beside what came out of it. The
+        # bill scales with this, so a cost without it can be reported but not
+        # projected onto the next run (see app.spend.suggest_rate).
+        "characters": len(project.transcript.full_text),
+    }
 
 
 async def handle_export_all(handle: JobHandle) -> dict:
@@ -446,6 +453,10 @@ async def _heartbeat_loop(handle: JobHandle) -> None:
         pass
 
 
+def _elapsed(started: float) -> float:
+    return round(time.time() - started, 1)
+
+
 async def _run_job(job) -> None:
     handle = JobHandle(job.id, job.kind, job.project_id, queue.payload_of(job))
     usage = llm_usage.start()
@@ -463,7 +474,7 @@ async def _run_job(job) -> None:
             return
 
         output = dict(result or {})
-        output["elapsed_sec"] = round(time.time() - started, 1)
+        output["elapsed_sec"] = _elapsed(started)
         # Only present when the job actually spent money — an absent field
         # says "no paid call", which a zero would not.
         if usage.calls:
@@ -471,13 +482,25 @@ async def _run_job(job) -> None:
         await asyncio.to_thread(queue.finish, job.id, state="done", output=output)
 
     except JobCancelled:
-        await asyncio.to_thread(queue.finish, job.id, state="canceled")
+        await asyncio.to_thread(
+            queue.finish, job.id, state="canceled", output={"elapsed_sec": _elapsed(started)}
+        )
     except OutOfSpace as e:
         logger.warning("Job %s (%s) deferred: %s", job.id, job.kind, e)
-        await asyncio.to_thread(queue.finish, job.id, state="failed", error=str(e))
+        await asyncio.to_thread(
+            queue.finish,
+            job.id,
+            state="failed",
+            error=str(e),
+            output={"elapsed_sec": _elapsed(started)},
+        )
     except ProjectNotFound:
         await asyncio.to_thread(
-            queue.finish, job.id, state="failed", error="The project was deleted"
+            queue.finish,
+            job.id,
+            state="failed",
+            error="The project was deleted",
+            output={"elapsed_sec": _elapsed(started)},
         )
     except Exception as e:  # noqa: BLE001 - a failing job must be recorded, not crash the loop
         logger.exception("Job %s (%s) failed", job.id, job.kind)
@@ -487,6 +510,11 @@ async def _run_job(job) -> None:
             job.id,
             state="failed" if last_attempt else "queued",
             error=f"{type(e).__name__}: {e}",
+            # How long it ran before it broke. Recorded for every settlement,
+            # not just the successful one: "it failed after four minutes" and
+            # "it failed instantly" point at completely different causes, and
+            # the history could tell them apart only for jobs that worked.
+            output={"elapsed_sec": _elapsed(started)},
         )
     finally:
         beat.cancel()

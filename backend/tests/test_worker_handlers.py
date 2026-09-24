@@ -535,9 +535,16 @@ def test_suggestions_are_stored_and_counted(world, project, db):
 
     db.expire_all()
     stored = load(db, project.id).suggestions
-    assert result == {"shorts": 3, "youtube": 0}
     assert [s.title for s in stored.shorts] == ["Short 0", "Short 1", "Short 2"]
     assert world.llm_closed
+    # The input size is recorded WITH the counts, because the bill for this
+    # kind scales with it — without it a past cost can be reported but not
+    # projected onto the next run (app.spend.suggest_rate).
+    assert result == {
+        "shorts": 3,
+        "youtube": 0,
+        "characters": len(world.transcript.full_text),
+    }
 
 
 # ==========================================================================
@@ -771,6 +778,45 @@ def test_a_billed_kind_that_fails_is_not_queued_again(world, project, db, monkey
     failed = db.get(Job, job.id)
     assert failed.state == "failed"
     assert "the model refused" in failed.error
+
+
+def test_a_failed_job_records_how_long_it_ran(world, project, db, monkeypatch):
+    """"It failed after four minutes" and "it failed instantly" point at
+    completely different causes — a provider timeout versus a bad key — and
+    the history could tell them apart only for jobs that WORKED. Elapsed time
+    was written on the success path alone."""
+    from app import worker
+
+    async def boom(handle):
+        raise RuntimeError("the model refused")
+
+    monkeypatch.setitem(worker.HANDLERS, "suggest", boom)
+    job = _running_job(db, project.id, "suggest")
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    failed = db.get(Job, job.id)
+    assert failed.state == "failed"
+    assert isinstance(failed.result["output"]["elapsed_sec"], float)
+
+
+def test_a_cancelled_job_records_how_long_it_ran(world, project, db, monkeypatch):
+    from app import worker
+    from app.jobs.queue import JobCancelled
+
+    async def stop(handle):
+        raise JobCancelled()
+
+    monkeypatch.setitem(worker.HANDLERS, "export", stop)
+    job = _running_job(db, project.id, "export")
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    cancelled = db.get(Job, job.id)
+    assert cancelled.state == "canceled"
+    assert isinstance(cancelled.result["output"]["elapsed_sec"], float)
 
 
 def test_a_retryable_kind_goes_back_to_the_queue(world, project, db, monkeypatch):

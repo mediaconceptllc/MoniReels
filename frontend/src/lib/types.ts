@@ -162,6 +162,33 @@ export interface TransitionSetting {
 
 export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
 
+/**
+ * What a handler returned, with the two fields every kind carries named.
+ *
+ * It was `Record<string, unknown>`, which is why nothing ever read it: the
+ * worker has metered `llm.cost_usd` since the first day and put it here, and
+ * the only way to see a bill was to open the database. The rest of the object
+ * is genuinely per-kind — `segments` for a transcription, `shorts` for a
+ * suggestion — so the index signature stays, but the parts that ARE a
+ * contract are declared and checked by `npm run verify-shape`.
+ */
+export interface JobResult {
+  /** How long the job RAN, excluding the time it waited in the queue.
+   *  Recorded for failures too: "it broke after four minutes" and "it broke
+   *  instantly" point at different causes. */
+  elapsed_sec?: number;
+  /** Present only when the job actually spent money at the model provider.
+   *  Absent means no paid call — which is not the same as a zero. */
+  llm?: {
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    cost_usd: number;
+    models: string[];
+  };
+  [field: string]: unknown;
+}
+
 export interface Job {
   job_id: string;
   kind: string;
@@ -170,12 +197,37 @@ export interface Job {
   progress: number;
   stage: string;
   message: string;
-  result: Record<string, unknown> | null;
+  result: JobResult | null;
   error: string | null;
   attempts: number;
   created_at: number;
   updated_at: number;
   finished_at: number | null;
+}
+
+/**
+ * What this project has cost, and what the next paid run is likely to cost.
+ *
+ * The two numbers are different in kind and are never merged: `spent_usd` is
+ * what the provider actually charged, `suggest_estimate_usd` is this owner's
+ * own measured rate applied to this transcript. The estimate arrives with the
+ * number of runs behind it, because "≈ $0.03 from one run" and "≈ $0.03 from
+ * twenty" are not the same claim.
+ */
+export interface ProjectSpend {
+  spent_usd: number;
+  /** How many jobs reported a charge. Fewer than the jobs that ran. */
+  priced_jobs: number;
+  /** Jobs older than this are pruned, so the total is short by whatever was
+   *  deleted — which the page says rather than presenting it as complete. */
+  keep_days: number;
+  /** Null until something has been measured. Never 0 as a stand-in: a zero
+   *  beside a paid button is a promise. */
+  suggest_estimate_usd: number | null;
+  suggest_samples: number;
+  /** Speech-to-text is billed per minute by the recogniser and NOTHING here
+   *  counts it, so a transcribe job's cost is unknown rather than nil. */
+  stt_measured: boolean;
 }
 
 export interface ProjectSummary {
@@ -232,6 +284,11 @@ export interface Project extends ProjectDocument {
     expires_in_s: number;
   };
   jobs: Job[];
+  /** How far back `jobs` reaches. A list at exactly this length is truncated,
+   *  not complete — the page says so instead of letting a full list read as
+   *  the project's whole history. */
+  job_history_limit: number;
+  spend: ProjectSpend;
 }
 
 export interface Output {

@@ -37,6 +37,21 @@ export function fileSize(bytes: number): string {
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
+/** Dollars, at the precision the number actually has.
+ *
+ *  Two decimal places would print "$0.00" for a real charge: a suggestion run
+ *  on a cheap model lands at a fraction of a cent, and the backend keeps six
+ *  places for exactly that reason. Rounding a bill to zero is the one error
+ *  that reads as good news. */
+export function usd(amount: number): string {
+  if (!Number.isFinite(amount) || amount < 0) return "—";
+  if (amount === 0) return "$0";
+  if (amount >= 1) return `$${amount.toFixed(2)}`;
+  if (amount >= 0.01) return `$${amount.toFixed(3)}`;
+  if (amount >= 0.0001) return `$${amount.toFixed(4)}`;
+  return "<$0.0001";
+}
+
 const RELATIVE = new Intl.RelativeTimeFormat("mn", { numeric: "auto" });
 
 export function relativeTime(epochSeconds: number): string {

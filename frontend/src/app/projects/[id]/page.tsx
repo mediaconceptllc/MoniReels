@@ -27,6 +27,7 @@ import {
 import { ProviderWarnings } from "@/components/ProviderWarnings";
 import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
+import { JobHistory } from "@/components/JobHistory";
 import { JobProgress } from "@/components/JobProgress";
 import { OutputList } from "@/components/OutputList";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -193,6 +194,13 @@ export default function ProjectPage() {
     },
   ];
 
+  // Read where `project` is still narrowed — a nested function declaration
+  // loses that, and `project!` inside one is an assertion nobody rechecks.
+  const suggestCost =
+    project.spend.suggest_estimate_usd !== null
+      ? { usd: project.spend.suggest_estimate_usd, samples: project.spend.suggest_samples }
+      : undefined;
+
   // ONE action at a time, and it belongs to the stage that is OPEN — which
   // is what restores re-running a finished step. Three buttons where two are
   // disabled is a menu of things you cannot do; one button for the stage you
@@ -217,6 +225,11 @@ export default function ProjectPage() {
           note: hasTranscript
             ? `${segments} мөр текстээс богино видео, YouTube хураангуйн санал гаргана. Оролдлого тутам төлбөртэй.`
             : "Эхлээд яриаг текст болгоно.",
+          // The only step whose price this system actually measures. The
+          // recogniser bills per minute of audio and nothing here counts it,
+          // so "Яриаг текст болгох" deliberately carries no figure rather
+          // than a confident wrong one.
+          cost: suggestCost,
           onRun: () => void run(() => api.suggest(projectId)),
           disabled: !hasTranscript || running,
           loading: busy,
@@ -359,6 +372,14 @@ export default function ProjectPage() {
         {project.transcript?.timings_estimated && tab === "source" && (
           <Badge tone="warn">Зарим хугацаа ойролцоо</Badge>
         )}
+
+        {/* What ran, how long it took, what it cost — and the error text of
+            anything that failed, which used to survive one page view. */}
+        <JobHistory
+          jobs={project.jobs}
+          spend={project.spend}
+          limit={project.job_history_limit}
+        />
 
         {/* Counted, not implied: a project is hours of work and real money,
             and `window.confirm` could say neither. */}
