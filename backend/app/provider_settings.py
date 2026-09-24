@@ -30,7 +30,7 @@ from app.config import Settings, get_settings
 from app.dbmodels import Setting
 
 SECRETS = ("openrouter_api_key", "duudlaga_api_key", "elevenlabs_api_key")
-PLAIN = ("openrouter_model", "stt_provider")
+PLAIN = ("openrouter_model", "stt_provider", "elevenlabs_tts_model", "elevenlabs_tts_voice_id")
 EDITABLE = SECRETS + PLAIN
 
 

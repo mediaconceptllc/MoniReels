@@ -40,6 +40,31 @@ def build_audio_filter(sample_rate: int, channel_layout: str) -> str:
     return f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}"
 
 
+def build_voice_mix(audio_filter: str, original_volume: float, has_audio: bool) -> str:
+    """The clip's sound with a voice-over on top — input 0 the source, input
+    1 the voice track, the result at `[vo_mix]`.
+
+    The original stays under the voice at `original_volume` for the whole
+    clip rather than ducking only while a line plays: between two Mongolian
+    lines the original would come back up in the source language, which
+    reads as a gap in the dubbing, not as ambience.
+
+    Summed without normalising (amix would otherwise halve both) and then
+    limited, so a loud line over a loud scene never clips. The limiter's own
+    auto-level is off — it would lift a quiet mix to full scale — and its
+    lookahead is compensated, so the voice stays where it was placed.
+    """
+    voice = f"[1:a]{audio_filter}"
+    if not has_audio:
+        return f"{voice}[vo_mix]"
+    return (
+        f"[0:a]{audio_filter},volume={original_volume:.3f}[vo_bed];"
+        f"{voice}[vo_line];"
+        "[vo_bed][vo_line]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "alimiter=limit=0.95:level=0:latency=1[vo_mix]"
+    )
+
+
 def validate_portrait_fill(value: str) -> None:
     if value not in VALID_PORTRAIT_FILLS:
         raise ValueError(f"Invalid portrait_fill: {value!r}, must be one of {VALID_PORTRAIT_FILLS}")

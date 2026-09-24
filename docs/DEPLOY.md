@@ -86,9 +86,10 @@ DUUDLAGA_BASE_URL=https://api.duudlaga.dev/v1
 ELEVENLABS_API_KEY=...
 ```
 
-`OPENROUTER_API_KEY`, `DUUDLAGA_API_KEY`, `ELEVENLABS_API_KEY` ба
-`OPENROUTER_MODEL` дөрвийг **Тохиргоо хуудсанаас** (админ, `/admin`) ч
-оруулж болно. Хуудсан дээрх утга орчны хувьсагчийг дарах ба **дараагийн
+`OPENROUTER_API_KEY`, `DUUDLAGA_API_KEY`, `ELEVENLABS_API_KEY`,
+`OPENROUTER_MODEL` ба монгол дууны загвар, хоолойг (`ELEVENLABS_TTS_MODEL`,
+`ELEVENLABS_TTS_VOICE_ID`) **Тохиргоо хуудсанаас** (админ, `/admin`) ч
+оруулж болно — хоолойг тэнд данс дахь жагсаалтаас нэрээр нь сонгоно. Хуудсан дээрх утга орчны хувьсагчийг дарах ба **дараагийн
 ажлаас эхлэн** хүчинтэй: API ба worker хоёулаа тэр мөрийг ажил тутам
 уншдаг тул redeploy ч, restart ч шаардахгүй. Талбарыг хоосон болгож
 хадгалбал мөр устаж, орчны хувьсагч руу буцна — эс бөгөөс нэг андуурч

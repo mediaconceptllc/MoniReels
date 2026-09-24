@@ -125,7 +125,26 @@ class UploadCompleteOut(BaseModel):
     job_id: str
 
 
+class LogoIn(BaseModel):
+    """The per-project half of the brand logo. Bounds match models.LogoSettings."""
+
+    enabled: bool | None = None
+    position: Literal["top-left", "top-right", "bottom-left", "bottom-right"] | None = None
+    width_pct: float | None = Field(default=None, gt=0.0, le=100.0)
+    opacity: float | None = Field(default=None, ge=0.0, le=1.0)
+    margin_pct: float | None = Field(default=None, ge=0.0, lt=50.0)
+
+
 class ExportSettingsIn(BaseModel):
+    """Every field of models.ExportSettings, each optional.
+
+    EVERY field, and a test holds the two lists together: `logo`,
+    `use_intro` and `use_outro` were missing from here from the day they were
+    added, and pydantic drops a field it does not know without a word — so
+    the page saved them, answered "saved", and the next read had them off.
+    No export ever carried a logo or an intro chosen on the page.
+    """
+
     orientation: Literal["portrait", "landscape"] | None = None
     portrait_fill: Literal["blur", "crop", "pad"] | None = None
     crf: int | None = Field(default=None, ge=0, le=51)
@@ -138,7 +157,12 @@ class ExportSettingsIn(BaseModel):
     ) = None
     burn_subtitles: bool | None = None
     write_srt: bool | None = None
+    logo: LogoIn | None = None
+    use_intro: bool | None = None
+    use_outro: bool | None = None
     subtitle_language: Literal["mn", "source"] | None = None
+    voice_over: bool | None = None
+    original_volume: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class SubtitleStyleIn(BaseModel):
@@ -351,9 +375,18 @@ class ProviderSettingsIn(BaseModel):
 
     openrouter_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
     duudlaga_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
-    # Accepted and stored before anything reads it — see config.Settings.
     elevenlabs_api_key: str | None = Field(default=None, max_length=SECRET_MAX)
     openrouter_model: str | None = Field(default=None, max_length=MODEL_MAX)
+    #: The voice-over's model and voice. Both end up in a request to
+    #: ElevenLabs — the voice id in its URL PATH — so both are held to the
+    #: characters an id can have: a slash would address another endpoint
+    #: with the account's key. Empty clears, as for every field here.
+    elevenlabs_tts_model: str | None = Field(
+        default=None, max_length=MODEL_MAX, pattern=r"^[A-Za-z0-9_.-]*$"
+    )
+    elevenlabs_tts_voice_id: str | None = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]*$"
+    )
     #: Which recogniser runs. A closed set, checked here rather than at the
     #: first transcribe: a typo would otherwise be stored, look saved, and
     #: fail a job an hour later.

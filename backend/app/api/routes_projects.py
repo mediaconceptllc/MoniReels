@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,7 +26,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
 from app.jobs import queue
-from app.languages import needs_translation, translation_view
+from app.languages import needs_translation, translation_view, voice_over_on
 from app.models import Project
 from app.schemas import (
     CreateProjectIn,
@@ -210,8 +211,9 @@ def get_project(
         "shorts_default": shorts_default,
         "youtube_default": youtube_default,
     }
-    # The export guard's verdict, read by the page rather than re-derived.
+    # The export guards' verdicts, read by the page rather than re-derived.
     data["translation"] = translation_view(project)
+    data["voice"] = voice_view(db, project)
     transcript = (data.get("transcript") or {}).get("full_text") or ""
     data["spend"] = spend.view(
         db,
@@ -254,6 +256,12 @@ def update_project(
         if section is None:
             continue
         for field, value in section.model_dump(exclude_none=True).items():
+            current = getattr(target, field)
+            if isinstance(current, BaseModel):
+                # A nested section (the logo) is merged like the one around
+                # it: only what was sent changes. Assigned whole, a dict would
+                # replace the model and every field not sent would be lost.
+                value = current.model_copy(update=value)
             setattr(target, field, value)
 
     save(db, project)
@@ -397,23 +405,58 @@ def _require_provider(db: Session, capability: str) -> None:
         raise HTTPException(status_code=503, detail=reason)
 
 
-def _require_subtitles_ready(project: Project) -> None:
-    """Refuse a render whose Mongolian subtitles would have holes in them.
+def _require_translation_ready(project: Project) -> None:
+    """Refuse a render whose Mongolian subtitles or voice would have holes.
 
     Checked before the render rather than discovered in it: an export is
     minutes of encoding, and the lines a translation run missed would come out
-    in the source language, mid-video, with nothing to say why. The producer
-    has two ways forward and the message names both.
+    in the source language, mid-video, with nothing to say why. The message
+    names the ways forward that actually work — switching the subtitles to the
+    source language fixes nothing while a Mongolian voice still reads the
+    translation.
     """
     view = translation_view(project)
-    if view["blocks_export"]:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{view['missing']} мөр орчуулагдаагүй байна. Эхлээд монгол руу орчуулна уу, "
-                "эсвэл хадмалыг эх хэлээр нь гаргана уу."
-            ),
+    if not view["blocks_export"]:
+        return
+    missing = view["missing"]
+    if "voice" in view["used_for"]:
+        detail = (
+            f"{missing} мөр орчуулагдаагүй байна. Монгол дуу орчуулгыг уншдаг тул эхлээд "
+            "монгол руу орчуулна уу, эсвэл монгол дууг унтраана уу."
         )
+    else:
+        detail = (
+            f"{missing} мөр орчуулагдаагүй байна. Эхлээд монгол руу орчуулна уу, "
+            "эсвэл хадмалыг эх хэлээр нь гаргана уу."
+        )
+    raise HTTPException(status_code=409, detail=detail)
+
+
+def voice_view(db: Session, project: Project) -> dict:
+    """Whether this project's export reads a Mongolian voice, and why it
+    cannot right now — the guard's own verdict, read by the page."""
+    from app import provider_settings
+
+    # One dict, built once: two literals for the two answers is how a field
+    # gets renamed in one and not the other — and the page reads both.
+    on = voice_over_on(project)
+    blocked = providers.blocker(provider_settings.effective(db), providers.TTS) if on else None
+    return {"on": on, "blocked": blocked}
+
+
+def _require_voice_ready(db: Session, project: Project) -> None:
+    """Refuse a voice-over export the voice cannot be made for.
+
+    Before the render, for the same reason as every provider check here: the
+    alternative is a job that claims the render slot, downloads the source,
+    and only then learns there is no key or no voice. Refused rather than
+    exported silent: the producer asked for a Mongolian voice, and a video
+    without one looks finished.
+    """
+    reason = voice_view(db, project)["blocked"]
+    if reason:
+        # Every reason names the voice itself, so none needs a prefix.
+        raise HTTPException(status_code=503, detail=reason)
 
 
 def _require_recogniser_for(db: Session, language: str) -> None:
@@ -653,7 +696,8 @@ def export_all(
     project = _require_project(db, project_id, principal)
     if project.suggestions is None or not (project.suggestions.shorts or project.suggestions.youtube):
         raise HTTPException(status_code=400, detail="Экспортлох санал алга.")
-    _require_subtitles_ready(project)
+    _require_translation_ready(project)
+    _require_voice_ready(db, project)
 
     pick: dict = {}
     if body and body.shorts is not None:
@@ -704,7 +748,8 @@ def export_timeline(
     project = _require_project(db, project_id, principal)
     if not project.clips:
         raise HTTPException(status_code=400, detail="Timeline дээр клип алга.")
-    _require_subtitles_ready(project)
+    _require_translation_ready(project)
+    _require_voice_ready(db, project)
     # No dedupe key: re-exporting the same timeline after changing render
     # settings is a normal thing to want, unlike re-running a paid stage.
     return {"job_id": queue.enqueue("export", project_id=project_id)}

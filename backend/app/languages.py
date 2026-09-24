@@ -40,6 +40,26 @@ def subtitles_need_translation(project) -> bool:
     )
 
 
+def voice_over_on(project) -> bool:
+    """Whether this project's export reads the translation aloud. Only a video
+    not in Mongolian has one to read: a Mongolian video already speaks it."""
+    return needs_translation(project.language) and bool(project.export.voice_over)
+
+
+def translation_uses(project) -> list[str]:
+    """What this project's export would use the translation for — subtitles,
+    the voice, both, or nothing. Named rather than collapsed to a yes/no,
+    because the way out of a missing translation depends on which: subtitles
+    can go out in the source language, a Mongolian voice has nothing else to
+    read."""
+    uses = []
+    if subtitles_need_translation(project):
+        uses.append("subtitles")
+    if voice_over_on(project):
+        uses.append("voice")
+    return uses
+
+
 def untranslated_lines(project) -> int:
     """Lines with words and no translation yet."""
     transcript = project.transcript
@@ -63,12 +83,14 @@ def translation_view(project) -> dict:
         sum(1 for s in transcript.segments if (s.text or "").strip()) if transcript else 0
     )
     missing = untranslated_lines(project) if needed else 0
+    uses = translation_uses(project)
     return {
         "needed": needed,
         "lines": lines,
         "translated": lines - missing if needed else 0,
         "missing": missing,
-        "blocks_export": subtitles_need_translation(project) and missing > 0,
+        "blocks_export": bool(uses) and missing > 0,
+        "used_for": uses,
     }
 
 

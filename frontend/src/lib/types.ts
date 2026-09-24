@@ -150,6 +150,11 @@ export interface ExportSettings {
    *  with what was said ("source"). Mongolian by default, because the
    *  audience is. */
   subtitle_language: "mn" | "source";
+  /** Read the Mongolian translation aloud over the video. Only for a video
+   *  not in Mongolian; billed per character. */
+  voice_over: boolean;
+  /** How loud the original sound stays under the voice, 0–1. */
+  original_volume: number;
 }
 
 export interface BrandLogo {
@@ -218,7 +223,28 @@ export interface JobResult {
     cost_usd: number;
     models: string[];
   };
+  /** Present only on an export that read a Mongolian voice. */
+  voice?: VoiceReport;
   [field: string]: unknown;
+}
+
+/** What a voice-over did. ElevenLabs bills per character and the price per
+ *  character depends on the account's plan, so the characters are the cost
+ *  this system can state — not dollars it would have to guess. */
+export interface VoiceReport {
+  /** Lines read aloud across every clip. */
+  lines: number;
+  /** Clips paid for by this export, and the characters sent for them. */
+  synthesized: number;
+  characters: number;
+  /** Clips already in storage — paid for before, not again. */
+  cached: number;
+  /** Lines with no translation to read; they kept the original sound. */
+  missing: number;
+  /** Lines played faster to fit, and lines cut at the end of their clip —
+   *  the ones worth listening to before publishing. */
+  sped_up: number;
+  cut: number;
 }
 
 export interface Job {
@@ -323,6 +349,17 @@ export interface TranslationStatus {
   translated: number;
   missing: number;
   blocks_export: boolean;
+  /** What the export would use the translation for. The way out of a gap
+   *  depends on it: subtitles can go out in the spoken language, a Mongolian
+   *  voice has nothing else to read. */
+  used_for: ("subtitles" | "voice")[];
+}
+
+/** Whether this project's export reads a Mongolian voice, and — when it
+ *  cannot be made right now — why, in the guard's own words. */
+export interface VoiceStatus {
+  on: boolean;
+  blocked: string | null;
 }
 
 export interface Project extends ProjectDocument {
@@ -341,6 +378,7 @@ export interface Project extends ProjectDocument {
   spend: ProjectSpend;
   suggest_limits: SuggestLimits;
   translation: TranslationStatus;
+  voice: VoiceStatus;
 }
 
 export interface Output {
@@ -399,6 +437,30 @@ export interface ProviderSettings {
   /** Which recogniser runs. A name, not a guess from which key is filled
    *  in — two keys can be set at once. */
   stt_provider: ProviderField;
+  /** The voice-over's model and voice. Not secrets — read back in full. */
+  elevenlabs_tts_model: ProviderField;
+  elevenlabs_tts_voice_id: ProviderField;
+}
+
+export interface TtsVoice {
+  id: string;
+  name: string;
+  category: string;
+  gender: string;
+  accent: string;
+  /** ElevenLabs' own sample, in English: enough to hear the timbre. */
+  preview_url: string | null;
+}
+
+/** The voice picker. `mongolian` is ASKED of ElevenLabs: true or false when
+ *  its model list says so, null when that could not be read — unknown, which
+ *  is not the same as no. */
+export interface TtsVoices {
+  model: string;
+  voice_id: string | null;
+  voices: TtsVoice[];
+  mongolian: boolean | null;
+  error: string | null;
 }
 
 /** Only the fields the operator actually edited. An omitted field is left

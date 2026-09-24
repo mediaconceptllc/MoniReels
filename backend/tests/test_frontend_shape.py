@@ -52,6 +52,7 @@ from app.models import (
 )
 from app.security import hash_password
 from app.store import load, save
+from app.tts.voiceover import VoiceReport
 from app.video.capabilities import Capabilities
 from tests.conftest import requires_db
 
@@ -76,6 +77,7 @@ SHAPE_DIR = Path(__file__).resolve().parents[2] / "frontend" / ".shape"
 _LITERAL = frozenset({
     "role", "state", "kind", "source", "orientation", "portrait_fill",
     "position", "capabilities.name", "subtitle_language", "project.language",
+    "used_for",
 })
 
 #: `Record<string, …>` in api.ts: the KEYS are data, not field names, so they
@@ -326,6 +328,48 @@ def _filled_project(db, owner_id: str) -> Project:
 # ---------------------------------------------------------------------------
 
 
+def _voices(monkeypatch, get) -> dict:
+    """The voice picker's answer with voices IN it — an empty list satisfies
+    `TtsVoice[]` while checking nothing about TtsVoice. One voice has a
+    sample and one does not, so `preview_url: string | null` carries both.
+
+    Only the NETWORK is faked: ElevenLabs' answer goes through the real
+    client, so a field renamed in its parser reaches the contract."""
+    import httpx
+
+    from app import provider_settings
+    from app.tts import elevenlabs
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/voices"):
+            return httpx.Response(200, json={"voices": [
+                {"voice_id": "V1", "name": "Ana", "category": "premade",
+                 "labels": {"gender": "female", "accent": "american"},
+                 "preview_url": "https://example.test/ana.mp3"},
+                {"voice_id": "V2", "name": "Bat", "category": "cloned"},
+            ]})
+        return httpx.Response(200, json=[
+            {"model_id": "eleven_v3", "languages": [{"language_id": "mn"}]},
+        ])
+
+    def build(settings):
+        return elevenlabs.ElevenLabsTts(
+            elevenlabs.VoiceConfig(api_key="k", voice_id="", model="eleven_v3"),
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(answer)),
+        )
+
+    real = provider_settings.effective
+    monkeypatch.setattr(
+        provider_settings, "effective",
+        lambda db: real(db).model_copy(update={"elevenlabs_api_key": "el-shape-not-a-real-key"}),
+    )
+    monkeypatch.setattr(elevenlabs, "build_client", build)
+    try:
+        return get("/admin/tts/voices")
+    finally:
+        monkeypatch.setattr(provider_settings, "effective", real)
+
+
 def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     """Every response `api.ts` declares a type for, captured in one place."""
     from app import r2
@@ -390,6 +434,24 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
             result={"payload": {}, "output": {"elapsed_sec": 3.0}},
             error="RuntimeError: жишээ", attempts=2,
         ),
+        # An export that read a Mongolian voice: the history shows the
+        # characters it sent, the one cost of it this system can count.
+        Job(
+            id="shapejob3", project_id=row.id, kind="export_all", state="done",
+            progress=1.0, stage="done", message="Дууссан",
+            result={
+                "payload": {},
+                "output": {
+                    "elapsed_sec": 40.0,
+                    # Built by the class the worker reports with, so a field
+                    # renamed there reaches the contract rather than a copy.
+                    "voice": VoiceReport(
+                        lines=12, synthesized=9, characters=640, cached=3, sped_up=2, cut=1,
+                    ).to_dict(),
+                },
+            },
+            attempts=1, created_at=time.time(), finished_at=time.time(),
+        ),
     ])
     db.commit()
 
@@ -419,6 +481,7 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         # jobs
         "job": get("/jobs/shapejob1"),
         "job_failed": get("/jobs/shapejob2"),
+        "job_voiced": get("/jobs/shapejob3"),
         "queue": get("/jobs/queue"),
         "job_canceled": send("POST", "/jobs/shapejob2/cancel"),
         # admin + settings
@@ -436,6 +499,7 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
             },
         ),
         "providers": get("/admin/providers"),
+        "tts_voices": _voices(monkeypatch, get),
         "readiness": get("/projects/providers/status"),
         # Nothing uploaded yet, so every slot is null — which is the half of
         # `BrandLogo | null` a fresh deployment shows. The filled half is

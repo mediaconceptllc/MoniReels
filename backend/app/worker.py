@@ -33,13 +33,16 @@ from app.db import session_scope
 from app.jobs import queue
 from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
-from app.languages import needs_translation, subtitle_segments
+from app.languages import needs_translation, subtitle_segments, voice_over_on
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
 from app.stt.factory import build_client as build_stt_client
 from app.stt.factory import for_language as stt_for_language
 from app.stt.pipeline import separation_available, transcribe_audio
 from app.subtitle.srt import segments_to_srt
+from app.tts import voiceover
+from app.tts.elevenlabs import TtsError
+from app.tts.elevenlabs import build_client as build_tts_client
 from app.utils.logging import get_logger, setup_logging
 from app.utils.paths import (
     OutOfSpace,
@@ -432,6 +435,27 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
                 "None of the selected ideas are still in this project: "
                 + "; ".join(skipped)
             )
+        ranges = [(c.start, c.end) for s in wanted.shorts for c in s.cuts]
+        ranges += [(r.start, r.end) for plan in wanted.youtube for r in plan.ranges]
+    else:
+        if not project.clips:
+            raise RuntimeError("The timeline has no clips")
+        # The stored clips point at the desktop-era source path; the render
+        # must read the copy this worker just downloaded.
+        clips = [c.model_copy(update={"source_path": str(local)}) for c in project.clips]
+        ranges = [(c.start, c.end) for c in clips]
+
+    # Only the lines these ranges say, and before the render: a voice that
+    # cannot be made fails the export while it has cost a download, not a
+    # render. Each clip bought is stored the moment it arrives, so a retry
+    # pays only for what the failed attempt did not get.
+    voice = (
+        await _prepare_voice(handle, project, ranges, workdir, binaries)
+        if voice_over_on(project) and project.transcript is not None
+        else None
+    )
+
+    if all_ideas:
         rendered = await render_all_ideas(
             handle, binaries, str(local), wanted, project.transition,
             crf=project.export.crf, preset=project.export.preset,
@@ -441,14 +465,9 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
             logo=logo, logo_path=logo_path, transcript_source=str(local),
-            intro_path=intro_path, outro_path=outro_path,
+            intro_path=intro_path, outro_path=outro_path, voice=voice,
         )
     else:
-        if not project.clips:
-            raise RuntimeError("The timeline has no clips")
-        # The stored clips point at the desktop-era source path; the render
-        # must read the copy this worker just downloaded.
-        clips = [c.model_copy(update={"source_path": str(local)}) for c in project.clips]
         output_path = out_dir / "export.mp4"
         await render_timeline(
             handle, binaries, clips, project.transition,
@@ -458,7 +477,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
             subtitle_style=project.subtitle_style, transcript_segments=segments,
             logo=logo, logo_path=logo_path, transcript_source=str(local),
-            intro_path=intro_path, outro_path=outro_path,
+            intro_path=intro_path, outro_path=outro_path, voice=voice,
         )
         rendered = [{"kind": "export", "title": project_name, "output_path": str(output_path)}]
 
@@ -504,7 +523,53 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     # because its translation was cleared after the export was queued.
     if subtitle_fallback:
         out["subtitle_fallback_lines"] = subtitle_fallback
+    # What the voice cost in characters, what it already had, and every line
+    # it had to hurry or cut — the parts of a voice-over a producer should
+    # listen to before publishing.
+    if voice is not None:
+        out["voice"] = voice.report.to_dict()
     return out
+
+
+async def _prepare_voice(
+    handle: JobHandle, project, ranges: list[tuple[float, float]], workdir: Path, binaries
+) -> voiceover.VoiceOver:
+    from app import provider_settings
+
+    with session_scope() as db:
+        settings = provider_settings.effective(db)
+
+    async def on_progress(p: float) -> None:
+        await handle.set_progress(0.03 + p * 0.07, stage="voicing",
+                                  message="Synthesising the Mongolian voice")
+
+    await handle.set_progress(0.03, stage="voicing", message="Synthesising the Mongolian voice")
+    client = build_tts_client(settings)
+    try:
+        audio, report = await voiceover.prepare(
+            client, _project_id(handle), project.transcript.segments, ranges,
+            workdir / "voice", on_progress=on_progress,
+        )
+    finally:
+        await client.aclose()
+    return voiceover.VoiceOver(
+        ffmpeg=binaries.ffmpeg,
+        segments=project.transcript.segments,
+        audio=audio,
+        original_volume=project.export.original_volume,
+        report=report,
+    )
+
+
+def _retry_cannot_help(error: Exception) -> bool:
+    """A failure the next attempt would meet exactly as this one did.
+
+    A spent character quota or a revoked key at the voice provider: every
+    retry of the export claims the render slot and downloads the source again
+    to be refused the same way. Settled at once, like a full disk, with the
+    provider's reason as the error.
+    """
+    return isinstance(error, TtsError) and error.ends_the_run
 
 
 HANDLERS = {
@@ -601,7 +666,7 @@ async def _run_job(job) -> None:
         )
     except Exception as e:  # noqa: BLE001 - a failing job must be recorded, not crash the loop
         logger.exception("Job %s (%s) failed", job.id, job.kind)
-        last_attempt = job.no_retry or job.attempts >= MAX_ATTEMPTS
+        last_attempt = job.no_retry or job.attempts >= MAX_ATTEMPTS or _retry_cannot_help(e)
         await asyncio.to_thread(
             queue.finish,
             job.id,

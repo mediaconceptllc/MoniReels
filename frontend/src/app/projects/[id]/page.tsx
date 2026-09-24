@@ -167,10 +167,17 @@ export default function ProjectPage() {
   const view: Stage = tab === "translation" && !translation.needed ? "transcript" : tab;
 
   // Said where the producer meets it: in the export's own cell and above the
-  // per-idea export on the suggestions tab. Both ways forward are named.
-  const exportBlocked = translation.blocks_export
-    ? `${translation.missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`
-    : null;
+  // per-idea export on the suggestions tab. The ways forward named are the
+  // ones that work: subtitles can go out in the spoken language, a Mongolian
+  // voice has nothing else to read.
+  const translationBlocked = !translation.blocks_export
+    ? null
+    : translation.used_for.includes("voice")
+      ? `${translation.missing} мөр орчуулагдаагүй байна — монгол дуу орчуулгыг уншдаг. «Орчуулга» алхмыг дуусгана уу, эсвэл Экспортын тохиргооноос монгол дууг унтраана уу.`
+      : `${translation.missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`;
+  const voiceOn = project.voice.on;
+  const voiceBlocked = project.voice.blocked;
+  const exportBlocked = translationBlocked ?? voiceBlocked;
 
   // Every cell says what it HOLDS, in the producer's terms — and a stage that
   // cannot run yet says why in its own cell, rather than as a footnote under
@@ -234,9 +241,11 @@ export default function ProjectPage() {
         ? `${outputs.length} файл`
         : !hasSuggestions
           ? "Саналын дараа"
-          : exportBlocked
+          : translationBlocked
             ? "Орчуулга дуустал"
-            : "Саналаас экспортлоно",
+            : voiceBlocked
+              ? "Монгол дуу тохируулаагүй"
+              : "Саналаас экспортлоно",
     },
   ];
 
@@ -334,7 +343,10 @@ export default function ProjectPage() {
           label: "Бүгдийг экспортлох",
           note: !hasSuggestions
             ? "Санал боловсруулсны дараа экспортлоно."
-            : (exportBlocked ?? "Санал таб дээрээс тус тусад нь ч экспортлож болно."),
+            : (exportBlocked ??
+              (voiceOn
+                ? "Монгол дуутай: шинэ мөр бүр ElevenLabs-т тэмдэгтээр төлбөртэй, өмнө нь үүсгэсэн мөр дахин төлөгдөхгүй. Санал таб дээрээс тус тусад нь ч экспортлож болно."
+                : "Санал таб дээрээс тус тусад нь ч экспортлож болно.")),
           onRun: () => void run(() => api.exportAll(projectId)),
           disabled: !hasSuggestions || !!exportBlocked || running,
           loading: busy,
@@ -347,7 +359,7 @@ export default function ProjectPage() {
         if (!hasTranscript) return actionFor("transcript");
         // Only when the export would need it: a producer who chose
         // subtitles in the spoken language is not steered into a paid run.
-        if (exportBlocked) return actionFor("translation");
+        if (translation.blocks_export) return actionFor("translation");
         if (!hasSuggestions) return actionFor("suggestions");
         return actionFor("outputs");
     }

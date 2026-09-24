@@ -231,6 +231,14 @@ class ExportSettings(BaseModel):
     #: by default, because the audience is. Meaningless for a Mongolian video,
     #: where the two are the same text.
     subtitle_language: str = "mn"
+    #: Read the Mongolian translation aloud over the video (app.tts). Only for
+    #: a video not in Mongolian — a Mongolian one already speaks it — and off
+    #: by default, because every line it reads is billed by the character.
+    voice_over: bool = False
+    #: How loud the original sound stays under the voice: 0 silent, 1 as it
+    #: was. Low enough that the source language is not heard over the
+    #: Mongolian, high enough that the scene still sounds like itself.
+    original_volume: float = Field(default=0.2, ge=0.0, le=1.0)
 
 
 class Project(BaseModel):

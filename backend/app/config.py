@@ -118,12 +118,19 @@ class Settings(BaseSettings):
     # the key's concurrency limit turns out lower than this.
     duudlaga_concurrency: int = 4
 
-    # ---- TTS: ElevenLabs ---------------------------------------------
-    # Stored, not yet used. Nothing in the pipeline synthesises speech; the
-    # key exists so it can be entered and rotated in the same place as the
-    # others rather than being remembered somewhere else until TTS lands.
+    # ---- ElevenLabs: Scribe (speech to text) and the voice-over ------
+    # One key for both. Scribe hears every video not in Mongolian (and a
+    # Mongolian one when selected); the voice-over reads the Mongolian
+    # translation of it (app.tts).
     elevenlabs_api_key: str = ""
     elevenlabs_base_url: str = "https://api.elevenlabs.io/v1"
+    #: The model that speaks the voice-over — v3, the studio's choice.
+    #: Whether it lists Mongolian is asked of ElevenLabs on the admin page,
+    #: not assumed here.
+    elevenlabs_tts_model: str = "eleven_v3"
+    #: Which voice reads it. Empty until an admin picks one: there is no
+    #: sensible default, and a default voice is a voice nobody chose.
+    elevenlabs_tts_voice_id: str = ""
     #: Scribe, ElevenLabs' speech-to-text model.
     elevenlabs_stt_model: str = "scribe_v1"
     #: ISO-639-3. Left set rather than auto-detected: the material is

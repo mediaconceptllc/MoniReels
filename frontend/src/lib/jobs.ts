@@ -152,6 +152,7 @@ export const STAGE_LABELS: Record<string, string> = {
   audio: "Дууг салгаж хадгалж байна",
   transcribing: "Яриаг таньж байна",
   translating: "Орчуулж байна",
+  voicing: "Монгол дуу үүсгэж байна",
   requesting: "Загвараас хариу хүлээж байна",
   normalize: "Хэсгүүдийг бэлдэж байна",
   join: "Хэсгүүдийг холбож байна",

@@ -14,8 +14,9 @@ import { Alert } from "@/components/ui";
  * that: an empty duudlaga.dev balance, 62 rejected chunks, and the operator's
  * first notice was a stack trace.
  *
- * TTS is left out unless something asks for it: nothing in the pipeline uses
- * it yet, so warning about it on every project page is noise that trains
+ * TTS is left out unless something asks for it: only a project with the
+ * Mongolian voice turned on needs it, and that project's export cell already
+ * says why it cannot run. Warning about it on every page is noise that trains
  * people to ignore the banner.
  */
 export function ProviderWarnings({ only }: { only?: Capability["name"][] }) {

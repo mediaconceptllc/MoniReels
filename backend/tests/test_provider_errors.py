@@ -82,6 +82,23 @@ def test_a_bodiless_status_yields_nothing():
     assert read.message is None
 
 
+def test_an_elevenlabs_body_gives_its_status_as_the_code():
+    """`{"detail": {"status", "message"}}`. Read as a whole it reached the
+    user as the repr of a dict; the status is what decides a retry."""
+    body = {"detail": {"status": "quota_exceeded", "message": "Үлдэгдэл дууссан"}, "trace": "x"}
+    read = read_error(_response(401, json=body))
+    assert (read.code, read.message) == ("quota_exceeded", "Үлдэгдэл дууссан")
+
+
+def test_a_fastapi_validation_body_gives_its_first_message():
+    body = {"detail": [{"loc": ["body", "text"], "msg": "field required", "type": "missing"}]}
+    assert read_error(_response(422, json=body)).message == "field required"
+
+
+def test_a_plain_detail_string_is_the_message():
+    assert read_error(_response(400, json={"detail": "Bad voice"})).message == "Bad voice"
+
+
 def test_a_long_message_is_cut():
     read = read_error(_response(400, json={"error": {"message": "ш" * 5000}}))
     assert len(read.message) == MESSAGE_MAX

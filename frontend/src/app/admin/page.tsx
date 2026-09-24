@@ -7,6 +7,7 @@ import { errorMessage, useRequireAuth } from "@/lib/auth";
 import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
 import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
+import { VoiceOverCard } from "@/components/VoiceOverCard";
 import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
 
@@ -44,12 +45,11 @@ const SECRETS: {
   {
     name: "elevenlabs_api_key",
     label: "ElevenLabs API түлхүүр",
-    // One key, two features, and only one of them is built. Said plainly,
-    // because a stored key that half the page reads must not look like it
-    // powers the other half too.
-    hint: "Яриа таних (Scribe) хэсэгт ашиглагдана. Дуу оруулах (TTS) хараахан хэрэгжээгүй.",
-    capability: "stt",
-    sttProvider: "elevenlabs",
+    // One key, two features. The badge follows the voice-over, which needs
+    // a chosen voice besides the key; the English recogniser needs only the
+    // key, and the capability table says so on its own row.
+    hint: "Англи яриаг таних (Scribe) ба монгол дуу (доорх хоолой) хоёуланд хэрэглэгдэнэ.",
+    capability: "tts",
   },
 ];
 
@@ -165,12 +165,13 @@ export default function AdminPage() {
             <Skeleton className="h-8 w-40" />
             <Skeleton className="h-4 w-full max-w-xl" />
           </div>
-          {/* One block per card the page settles into: keys, capabilities,
-              brand assets. The heights are approximate — what has to match is
+          {/* One block per card the page settles into: capabilities, keys,
+              the voice, brand assets. The heights are approximate — what has to match is
               the COUNT and the order, so the operator's eye is already on the
               card they came for. */}
           <Skeleton className="h-96 rounded-lg" />
           <Skeleton className="h-64 rounded-lg" />
+          <Skeleton className="h-56 rounded-lg" />
           <Skeleton className="h-72 rounded-lg" />
         </Loading>
       </Shell>
@@ -280,6 +281,8 @@ export default function AdminPage() {
             </div>
           </div>
         </Card>
+
+        <VoiceOverCard settings={settings} onSaved={() => void load()} />
 
         <BrandAssetsCard />
 

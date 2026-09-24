@@ -763,19 +763,65 @@ def test_readiness_leaks_no_keys_or_balances(client, db):
         assert set(capability) == {"name", "label", "ready", "blocked"}
 
 
-def test_a_stored_key_for_an_unbuilt_feature_never_reads_as_ready():
-    # ElevenLabs has a key field and no code behind it. Reporting that as
-    # working is how the first attempt to use it becomes a bug report.
+def test_a_key_without_a_chosen_voice_is_not_a_voice_over():
+    """A key alone has nothing to send. Reported ready, the first export to
+    find that out would be the first one somebody asked a voice for."""
     from app import providers
     from app.config import get_settings
 
-    settings = get_settings().model_copy(update={"elevenlabs_api_key": "sk_live_whatever"})
+    settings = get_settings().model_copy(
+        update={"elevenlabs_api_key": "sk_live_whatever", "elevenlabs_tts_voice_id": ""}
+    )
     tts = next(c for c in providers.describe(settings) if c.name == providers.TTS)
 
-    assert tts.configured is True
-    assert tts.implemented is False
+    assert tts.implemented is True
     assert tts.ready is False
-    assert tts.blocked
+    assert "хоолой" in tts.blocked
+
+
+def test_a_key_and_a_voice_are_a_voice_over():
+    from app import providers
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(
+        update={"elevenlabs_api_key": "sk_live_whatever", "elevenlabs_tts_voice_id": "Voice123"}
+    )
+    tts = next(c for c in providers.describe(settings) if c.name == providers.TTS)
+    assert tts.ready is True and tts.blocked is None
+    assert "eleven_v3" in tts.provider
+
+
+def test_no_key_says_so_before_it_asks_for_a_voice():
+    from app import providers
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(
+        update={"elevenlabs_api_key": "", "elevenlabs_tts_voice_id": "Voice123"}
+    )
+    tts = next(c for c in providers.describe(settings) if c.name == providers.TTS)
+    assert tts.ready is False and "түлхүүр" in tts.blocked
+
+
+@pytest.mark.parametrize("voice_id", ["../user", "a/b", "a b", "x" * 65])
+def test_a_voice_id_that_would_change_the_request_path_is_refused(client, db, voice_id):
+    """It goes into ElevenLabs' URL path; stored, `../user` would send the
+    account's key to a different endpoint on every export."""
+    _user(db, "voiceadmin", role="admin")
+    response = client.put(
+        "/admin/settings", json={"elevenlabs_tts_voice_id": voice_id},
+        headers=_auth(client, "voiceadmin"),
+    )
+    assert response.status_code == 422
+
+
+def test_a_voice_is_chosen_and_read_back_in_full(client, db):
+    """Not a secret: the admin has to be able to see which voice is set."""
+    _user(db, "voiceadmin2", role="admin")
+    auth = _auth(client, "voiceadmin2")
+    saved = client.put("/admin/settings", json={"elevenlabs_tts_voice_id": "Voice123"}, headers=auth)
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["elevenlabs_tts_voice_id"]["hint"] == "Voice123"
+    assert saved.json()["settings"]["elevenlabs_tts_model"]["hint"] == "eleven_v3"
 
 
 def test_a_font_the_image_lacks_is_refused_on_save(client, db):
@@ -1656,7 +1702,8 @@ def test_a_mongolian_video_has_nothing_to_translate(client, db):
     alice = _user(db, "mnview")
     row = _project_with_video(db, alice)
     view = client.get(f"/projects/{row.id}", headers=_auth(client, "mnview")).json()["translation"]
-    assert view == {"needed": False, "lines": 0, "translated": 0, "missing": 0, "blocks_export": False}
+    assert view == {"needed": False, "lines": 0, "translated": 0, "missing": 0, "blocks_export": False,
+                    "used_for": []}
 
 
 def test_the_subtitle_language_is_a_setting(client, db):
@@ -1668,3 +1715,210 @@ def test_the_subtitle_language_is_a_setting(client, db):
     assert saved["export"]["subtitle_language"] == "source"
     bad = {"export": {"subtitle_language": "fr"}}
     assert client.patch(f"/projects/{row.id}", json=bad, headers=auth).status_code == 422
+
+
+
+# ---------------------------------------------------------------------------
+# Export settings: every field the page saves is a field the server keeps
+# ---------------------------------------------------------------------------
+
+def test_every_export_setting_can_be_written():
+    """`logo`, `use_intro` and `use_outro` were missing from the input model
+    from the day they were added, and pydantic drops a field it does not know
+    without a word: the page said "saved" and the next read had them off. The
+    rule, so the next field added to one list cannot be missed in the other."""
+    from app.models import ExportSettings, LogoSettings
+    from app.schemas import ExportSettingsIn, LogoIn
+
+    assert set(ExportSettingsIn.model_fields) == set(ExportSettings.model_fields)
+    assert set(LogoIn.model_fields) == set(LogoSettings.model_fields)
+
+
+def test_the_logo_intro_and_outro_choices_are_kept(client, db):
+    alice = _user(db, "brandkeep")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "brandkeep")
+    sized = {"export": {"logo": {"width_pct": 20.0}}}
+    assert client.patch(f"/projects/{row.id}", json=sized, headers=auth).status_code == 200
+    body = {"export": {"logo": {"enabled": True, "position": "top-left"},
+                       "use_intro": True, "use_outro": True}}
+    assert client.patch(f"/projects/{row.id}", json=body, headers=auth).status_code == 200
+
+    saved = client.get(f"/projects/{row.id}", headers=auth).json()["export"]
+    assert saved["use_intro"] is True and saved["use_outro"] is True
+    assert saved["logo"]["enabled"] is True and saved["logo"]["position"] == "top-left"
+    # Merged, not replaced: what was not sent keeps the value it was GIVEN —
+    # a default would come back either way.
+    assert saved["logo"]["width_pct"] == 20.0
+
+
+def test_a_logo_position_nothing_can_draw_is_refused(client, db):
+    alice = _user(db, "brandbad")
+    row = _project_with_video(db, alice)
+    body = {"export": {"logo": {"position": "center"}}}
+    response = client.patch(f"/projects/{row.id}", json=body, headers=_auth(client, "brandbad"))
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# The Mongolian voice-over
+# ---------------------------------------------------------------------------
+
+def _voice_ready(monkeypatch, ready: bool = True) -> None:
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={
+        "openrouter_api_key": "sk-or-test",
+        "elevenlabs_api_key": "el-key" if ready else "",
+        "elevenlabs_tts_voice_id": "Voice123" if ready else "",
+    })
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+
+
+def test_the_voice_choice_is_kept_and_its_level_bounded(client, db):
+    alice = _user(db, "voicekeep")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "voicekeep")
+    body = {"export": {"voice_over": True, "original_volume": 0.35}}
+    saved = client.patch(f"/projects/{row.id}", json=body, headers=auth).json()["export"]
+    assert saved["voice_over"] is True and saved["original_volume"] == 0.35
+
+    too_loud = {"export": {"original_volume": 1.5}}
+    assert client.patch(f"/projects/{row.id}", json=too_loud, headers=auth).status_code == 422
+
+
+def test_the_page_is_told_whether_the_voice_can_be_made(client, db, monkeypatch):
+    row = _english_project(db, "voiceview", translations=("Сайн уу.", "Баяртай."),
+                           voice_over=True)
+    auth = _auth(client, "voiceview")
+
+    _voice_ready(monkeypatch, ready=False)
+    view = client.get(f"/projects/{row.id}", headers=auth).json()["voice"]
+    assert view["on"] is True and "түлхүүр" in view["blocked"]
+
+    _voice_ready(monkeypatch, ready=True)
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["voice"] == {
+        "on": True, "blocked": None,
+    }
+
+
+def test_a_mongolian_video_has_no_voice_to_make(client, db):
+    alice = _user(db, "voicemn")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "voicemn")
+    client.patch(f"/projects/{row.id}", json={"export": {"voice_over": True}}, headers=auth)
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["voice"] == {
+        "on": False, "blocked": None,
+    }
+
+
+def test_an_export_whose_voice_cannot_be_made_is_refused_before_it_starts(client, db, monkeypatch):
+    """Not exported silent: the producer asked for a Mongolian voice, and a
+    video without one looks finished."""
+    row = _english_project(db, "voiceno", translations=("Сайн уу.", "Баяртай."), voice_over=True)
+    _with_suggestions(db, row)
+    _voice_ready(monkeypatch, ready=False)
+    auth = _auth(client, "voiceno")
+
+    for route in ("export-all", "export"):
+        if route == "export":
+            client.post(f"/projects/{row.id}/select", json={"ranges": [[0.0, 4.0]]}, headers=auth)
+        response = client.post(f"/projects/{row.id}/{route}", headers=auth)
+        assert response.status_code == 503, route
+        assert response.json()["detail"].startswith("Монгол дуу")
+
+
+def test_a_voice_with_lines_left_to_translate_names_the_way_out_that_works(client, db, monkeypatch):
+    """Subtitles already in the source language: the usual advice — switch
+    them to the source language — would fix nothing."""
+    row = _english_project(db, "voicegap", translations=("Сайн уу.", None),
+                           voice_over=True, subtitle_language="source")
+    _with_suggestions(db, row)
+    _voice_ready(monkeypatch)
+    response = client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "voicegap"))
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "Монгол дуу орчуулгыг уншдаг" in detail and "эх хэлээр" not in detail
+
+
+def test_a_voice_over_that_can_be_made_goes_ahead(client, db, monkeypatch):
+    row = _english_project(db, "voicego", translations=("Сайн уу.", "Баяртай."), voice_over=True)
+    _with_suggestions(db, row)
+    _voice_ready(monkeypatch)
+    response = client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "voicego"))
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Choosing the voice
+# ---------------------------------------------------------------------------
+
+def _fake_voices(monkeypatch, *, voices=None, languages=None, fail=None, languages_fail=False):
+    from app.tts import elevenlabs
+
+    class Fake:
+        async def voices(self):
+            if fail:
+                raise elevenlabs.TtsError(fail)
+            return voices or []
+
+        async def model_languages(self, model_id):
+            if languages_fail:
+                raise elevenlabs.TtsError("models unavailable")
+            return languages
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(elevenlabs, "build_client", lambda settings: Fake())
+
+
+def test_the_admin_picks_from_the_voices_the_account_has(client, db, monkeypatch):
+    _user(db, "voicepick", role="admin")
+    _voice_ready(monkeypatch)
+    _fake_voices(monkeypatch, voices=[{"id": "V1", "name": "Ana"}], languages=["en", "mn"])
+    body = client.get("/admin/tts/voices", headers=_auth(client, "voicepick")).json()
+    assert body["voices"] == [{"id": "V1", "name": "Ana"}]
+    assert body["mongolian"] is True and body["model"] == "eleven_v3"
+    assert body["voice_id"] == "Voice123" and body["error"] is None
+
+
+@pytest.mark.parametrize(("languages", "fails", "expected"), [
+    (["en", "ru"], False, False),
+    (None, False, None),
+    (["mn"], True, None),
+])
+def test_whether_the_model_speaks_mongolian_is_asked_not_guessed(
+    client, db, monkeypatch, languages, fails, expected
+):
+    _user(db, "voicelang", role="admin")
+    _voice_ready(monkeypatch)
+    _fake_voices(monkeypatch, voices=[{"id": "V1", "name": "Ana"}], languages=languages,
+                 languages_fail=fails)
+    body = client.get("/admin/tts/voices", headers=_auth(client, "voicelang")).json()
+    assert body["mongolian"] is expected
+    # The voices are still worth showing when the language list is not.
+    assert body["voices"]
+
+
+def test_a_provider_that_cannot_be_reached_is_the_answer_not_a_500(client, db, monkeypatch):
+    _user(db, "voicedown", role="admin")
+    _voice_ready(monkeypatch)
+    _fake_voices(monkeypatch, fail="ElevenLabs дуу үүсгэж чадсангүй (401): API түлхүүр буруу")
+    response = client.get("/admin/tts/voices", headers=_auth(client, "voicedown"))
+    assert response.status_code == 200
+    assert "API түлхүүр буруу" in response.json()["error"] and response.json()["voices"] == []
+
+
+def test_no_key_is_said_without_calling_anyone(client, db, monkeypatch):
+    _user(db, "voicenokey", role="admin")
+    _voice_ready(monkeypatch, ready=False)
+    _fake_voices(monkeypatch, fail="must not be called")
+    body = client.get("/admin/tts/voices", headers=_auth(client, "voicenokey")).json()
+    assert "түлхүүр" in body["error"] and body["voices"] == []
+
+
+def test_the_voice_list_is_for_admins_only(client, db):
+    _user(db, "voiceeditor")
+    assert client.get("/admin/tts/voices", headers=_auth(client, "voiceeditor")).status_code == 403

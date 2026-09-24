@@ -3,9 +3,9 @@
 Two questions this answers that nothing answered before:
 
 **Which provider is doing what.** The keys sit in one list on the settings
-page with no indication of what each one powers, and one of them — ElevenLabs
-— powers nothing at all yet. A stored key that nothing reads looks exactly
-like a working feature until someone depends on it.
+page with no indication of what each one powers. A stored key that nothing
+reads looks exactly like a working feature until someone depends on it —
+which is why the voice-over reported itself unbuilt until it was built.
 
 **Whether a job can succeed before it is started.** A transcribe with no key,
 or against an empty balance, used to queue happily, claim a worker slot,
@@ -72,6 +72,16 @@ def describe(settings: Settings) -> list[Capability]:
 
     llm_key = bool(settings.openrouter_api_key)
     tts_key = bool(settings.elevenlabs_api_key)
+    tts_voice = bool(settings.elevenlabs_tts_voice_id)
+    if not tts_key:
+        tts_blocked = "Монгол дуу үүсгэх ElevenLabs-ийн API түлхүүр тавигдаагүй байна."
+    elif not tts_voice:
+        # A key alone is not a voice-over: with no voice there is nothing to
+        # send, and the first export to find that out would be the first
+        # one somebody asked for.
+        tts_blocked = "Монгол дууны хоолой сонгогдоогүй байна — Тохиргоо хуудаснаас сонгоно уу."
+    else:
+        tts_blocked = None
 
     if not stt_known:
         stt_blocked = (
@@ -104,16 +114,12 @@ def describe(settings: Settings) -> list[Capability]:
         ),
         Capability(
             name=TTS,
-            label="Хиймэл дуу",
-            provider="ElevenLabs",
-            powers="Одоогоор юуг ч ажиллуулахгүй.",
-            configured=tts_key,
-            implemented=False,
-            # Said plainly. A key stored for a feature nothing reads must not
-            # look like a working feature, or the first attempt to use it
-            # becomes a bug report.
-            blocked="Хиймэл дуу оруулах хэсэг хараахан хэрэгжээгүй. Түлхүүр хадгалагдана, "
-            "гэхдээ одоогоор ямар ч ажил үүгээр явахгүй.",
+            label="Монгол дуу",
+            provider=f"ElevenLabs {settings.elevenlabs_tts_model}",
+            powers="Монголоос бусад хэлтэй видеоны экспортод орчуулгыг монгол дуугаар уншуулна.",
+            configured=tts_key and tts_voice,
+            implemented=True,
+            blocked=tts_blocked,
         ),
     ]
 
