@@ -163,6 +163,22 @@ class ExportSettingsIn(BaseModel):
     subtitle_language: Literal["mn", "source"] | None = None
     voice_over: bool | None = None
     original_volume: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: {speaker: voice id}, sent whole. The id goes into ElevenLabs' URL PATH
+    #: at export, so it is held to the characters an id can have, as the
+    #: admin's default voice is. An empty id means "the default voice" and is
+    #: dropped rather than stored.
+    speaker_voices: (
+        dict[
+            Annotated[str, StringConstraints(min_length=1, max_length=64)],
+            Annotated[str, StringConstraints(max_length=64, pattern=r"^[A-Za-z0-9_-]*$")],
+        ]
+        | None
+    ) = Field(default=None, max_length=50)
+
+    @field_validator("speaker_voices")
+    @classmethod
+    def _default_is_no_entry(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return None if value is None else {k: v for k, v in value.items() if v}
 
 
 class SubtitleStyleIn(BaseModel):

@@ -176,6 +176,9 @@
       "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
+      "speaker_voices": {
+        "*": ""
+      },
       "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
@@ -263,6 +266,13 @@
     },
     "name": "",
     "schema_version": 0,
+    "speakers": [
+      {
+        "id": "",
+        "lines": 0,
+        "sample": ""
+      }
+    ],
     "spend": {
       "keep_days": 0,
       "priced_jobs": 0,
@@ -438,6 +448,9 @@
       "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
+      "speaker_voices": {
+        "*": ""
+      },
       "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
@@ -565,6 +578,28 @@
       "thumbnail_key": "",
       "width": 0
     }
+  },
+  "project_voices": {
+    "default_voice_id": "",
+    "error": null,
+    "voices": [
+      {
+        "accent": "",
+        "category": "",
+        "gender": "",
+        "id": "",
+        "name": "",
+        "preview_url": ""
+      },
+      {
+        "accent": "",
+        "category": "",
+        "gender": "",
+        "id": "",
+        "name": "",
+        "preview_url": null
+      }
+    ]
   },
   "projects": [
     {

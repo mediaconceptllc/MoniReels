@@ -239,6 +239,10 @@ class ExportSettings(BaseModel):
     #: was. Low enough that the source language is not heard over the
     #: Mongolian, high enough that the scene still sounds like itself.
     original_volume: float = Field(default=0.2, ge=0.0, le=1.0)
+    #: A voice per speaker ({transcript speaker label: ElevenLabs voice id}).
+    #: A speaker with none — and a line with no speaker — is read in the
+    #: default voice chosen on the admin page.
+    speaker_voices: dict[str, str] = Field(default_factory=dict)
 
 
 class Project(BaseModel):

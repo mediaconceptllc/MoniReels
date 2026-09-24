@@ -1922,3 +1922,112 @@ def test_no_key_is_said_without_calling_anyone(client, db, monkeypatch):
 def test_the_voice_list_is_for_admins_only(client, db):
     _user(db, "voiceeditor")
     assert client.get("/admin/tts/voices", headers=_auth(client, "voiceeditor")).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# A voice per speaker
+# ---------------------------------------------------------------------------
+
+def test_each_speaker_is_given_a_voice_and_the_map_is_sent_whole(client, db):
+    alice = _user(db, "speakermap")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "speakermap")
+
+    def patch(export: dict) -> dict:
+        response = client.patch(f"/projects/{row.id}", json={"export": export}, headers=auth)
+        assert response.status_code == 200, response.text
+        return response.json()["export"]["speaker_voices"]
+
+    # An empty id is "the default voice": no entry, rather than a stored "".
+    assert patch({"speaker_voices": {"speaker_0": "Anna", "speaker_1": ""}}) == {"speaker_0": "Anna"}
+    # Sent whole, so taking a speaker's voice away is sending the map without it.
+    assert patch({"speaker_voices": {"speaker_1": "Bold"}}) == {"speaker_1": "Bold"}
+    # Another setting saved on its own leaves the voices as they were.
+    assert patch({"voice_over": True}) == {"speaker_1": "Bold"}
+    assert patch({"speaker_voices": {}}) == {}
+
+
+@pytest.mark.parametrize("voices", [
+    {"speaker_0": "../user"},
+    {"speaker_0": "a/b"},
+    {"speaker_0": "a b"},
+    {"speaker_0": "x" * 65},
+    {"": "Anna"},
+    {"s" * 65: "Anna"},
+])
+def test_a_speakers_voice_that_would_change_the_request_path_is_refused(client, db, voices):
+    """The id goes into ElevenLabs' URL path at export, with the account's key."""
+    alice = _user(db, "speakerbad")
+    row = _project_with_video(db, alice)
+    response = client.patch(f"/projects/{row.id}", json={"export": {"speaker_voices": voices}},
+                            headers=_auth(client, "speakerbad"))
+    assert response.status_code == 422
+
+
+def test_no_more_voices_than_a_transcript_has_speakers(client, db):
+    alice = _user(db, "speakermany")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "speakermany")
+    fifty = {f"speaker_{i}": "Anna" for i in range(50)}
+    ok = client.patch(f"/projects/{row.id}", json={"export": {"speaker_voices": fifty}}, headers=auth)
+    assert ok.status_code == 200
+    too_many = {**fifty, "speaker_50": "Anna"}
+    refused = client.patch(f"/projects/{row.id}", json={"export": {"speaker_voices": too_many}},
+                           headers=auth)
+    assert refused.status_code == 422
+
+
+def test_the_page_is_told_who_speaks(client, db):
+    row = _english_project(db, "speakerview")
+    doc = dict(row.doc)
+    doc["transcript"] = {
+        **doc["transcript"],
+        "segments": [
+            {**doc["transcript"]["segments"][0], "speaker": "speaker_1"},
+            {**doc["transcript"]["segments"][1], "speaker": "speaker_0"},
+        ],
+    }
+    row.doc = doc
+    db.commit()
+    auth = _auth(client, "speakerview")
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["speakers"] == [
+        {"id": "speaker_1", "lines": 1, "sample": "Hello."},
+        {"id": "speaker_0", "lines": 1, "sample": "Bye."},
+    ]
+
+    untranscribed = _project_with_video(db, _user(db, "speakernone"))
+    body = client.get(f"/projects/{untranscribed.id}", headers=_auth(client, "speakernone")).json()
+    assert body["speakers"] == []
+
+
+def test_the_voices_a_speaker_can_have_are_listed_for_whoever_edits(client, db, monkeypatch):
+    """Not only for admins: the producer choosing a speaker's voice is not one."""
+    _user(db, "speakerpick")
+    _voice_ready(monkeypatch)
+    _fake_voices(monkeypatch, voices=[{"id": "V1", "name": "Ana"}], languages=["mn"])
+    response = client.get("/projects/tts/voices", headers=_auth(client, "speakerpick"))
+    assert response.status_code == 200
+    # Thinner than the admin's: nothing about the model or the account.
+    assert response.json() == {
+        "voices": [{"id": "V1", "name": "Ana"}], "default_voice_id": "Voice123", "error": None,
+    }
+
+
+def test_the_speakers_voice_list_says_why_it_is_empty(client, db, monkeypatch):
+    _user(db, "speakerdown")
+    auth = _auth(client, "speakerdown")
+
+    _voice_ready(monkeypatch, ready=False)
+    _fake_voices(monkeypatch, fail="must not be called")
+    body = client.get("/projects/tts/voices", headers=auth).json()
+    assert body["voices"] == [] and "түлхүүр" in body["error"] and body["default_voice_id"] is None
+
+    _voice_ready(monkeypatch)
+    _fake_voices(monkeypatch, fail="ElevenLabs дуу үүсгэж чадсангүй (401): API түлхүүр буруу")
+    response = client.get("/projects/tts/voices", headers=auth)
+    assert response.status_code == 200
+    assert "API түлхүүр буруу" in response.json()["error"] and response.json()["voices"] == []
+
+
+def test_the_speakers_voice_list_needs_a_login(client):
+    assert client.get("/projects/tts/voices").status_code == 401

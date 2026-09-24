@@ -155,6 +155,10 @@ export interface ExportSettings {
   voice_over: boolean;
   /** How loud the original sound stays under the voice, 0–1. */
   original_volume: number;
+  /** A voice per speaker: {transcript speaker label: ElevenLabs voice id}.
+   *  Sent whole. A speaker with no entry — and a line with no speaker — is
+   *  read in the default voice chosen on the admin page. */
+  speaker_voices: Record<string, string>;
 }
 
 export interface BrandLogo {
@@ -362,6 +366,16 @@ export interface VoiceStatus {
   blocked: string | null;
 }
 
+/** One person in the transcript, as the voice picker shows them. A bare
+ *  label like `speaker_1` identifies nobody; how much they say and their
+ *  first line do. */
+export interface SpeakerSummary {
+  id: string;
+  lines: number;
+  /** The start of their first line, in the language it was said in. */
+  sample: string;
+}
+
 export interface Project extends ProjectDocument {
   /** Signed and short-lived. Regenerated on every read, so a page left open
    *  past the expiry must refetch rather than reuse what it has. */
@@ -379,6 +393,8 @@ export interface Project extends ProjectDocument {
   suggest_limits: SuggestLimits;
   translation: TranslationStatus;
   voice: VoiceStatus;
+  /** Who speaks, in the order they first do. Empty before a transcript. */
+  speakers: SpeakerSummary[];
 }
 
 export interface Output {
@@ -460,6 +476,15 @@ export interface TtsVoices {
   voice_id: string | null;
   voices: TtsVoice[];
   mongolian: boolean | null;
+  error: string | null;
+}
+
+/** The voices a speaker can be given — the producer's list, thinner than
+ *  the admin's: nothing about the model or the account. `default_voice_id`
+ *  is what a speaker without a voice of their own is read in. */
+export interface ProjectVoices {
+  voices: TtsVoice[];
+  default_voice_id: string | null;
   error: string | null;
 }
 

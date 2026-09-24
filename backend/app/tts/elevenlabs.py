@@ -61,12 +61,15 @@ RETRY_AFTER_MAX_S = 20.0
 #: dot-dot — would address a different endpoint with the account's key.
 VOICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
-#: The codes that mean the ACCOUNT is the problem, not this line: every other
-#: line would fail the same way, so the export stops at the first one.
-#: `not_configured` is ours — no key, or no voice chosen — and no retry can
-#: supply either.
+#: The codes no retry can fix: the account, the key, the model or a voice is
+#: wrong, and every other line would fail the same way — so the export stops
+#: at the first one. A voice deleted from the account after a speaker was
+#: given it is one of them. `not_configured` is ours: no key, or no voice.
 NOT_CONFIGURED = "not_configured"
-ACCOUNT_CODES = frozenset({"quota_exceeded", "invalid_api_key", "payment_required", NOT_CONFIGURED})
+FINAL_CODES = frozenset({
+    "quota_exceeded", "invalid_api_key", "payment_required",
+    "voice_not_found", "invalid_uid", "model_not_found", NOT_CONFIGURED,
+})
 
 #: What a Mongolian operator reads for the codes ElevenLabs documents. Its own
 #: message is English and is kept beside it.
@@ -92,8 +95,8 @@ class TtsError(Exception):
 
     @property
     def ends_the_run(self) -> bool:
-        """Whether the account, not this line, is the problem."""
-        return self.status in (401, 402, 403) or self.code in ACCOUNT_CODES
+        """Whether a retry could not help — see FINAL_CODES."""
+        return self.status in (401, 402, 403) or self.code in FINAL_CODES
 
 
 @dataclass(frozen=True)
@@ -103,17 +106,19 @@ class VoiceConfig:
     model: str = "eleven_v3"
     base_url: str = "https://api.elevenlabs.io/v1"
 
-    def fingerprint(self) -> str:
-        """Everything that decides how a clip sounds except its text.
+    def fingerprint(self, voice_id: str | None = None) -> str:
+        """Everything that decides how a clip sounds except its text — for
+        `voice_id`, or the default voice when none is given.
 
         Part of the cache key, so a new voice or model is a new clip for
         every line — and the same voice reading the same words is never paid
         for twice. The key stays out of it: rotating it changes nothing that
         was spoken.
         """
-        return "|".join(
-            (self.model, self.voice_id, str(STABILITY), str(SIMILARITY_BOOST), OUTPUT_FORMAT)
-        )
+        return "|".join((
+            self.model, voice_id or self.voice_id, str(STABILITY), str(SIMILARITY_BOOST),
+            OUTPUT_FORMAT,
+        ))
 
 
 def is_mongolian(language_ids: list[str] | None) -> bool | None:
@@ -149,16 +154,18 @@ class ElevenLabsTts:
         if not self.config.api_key:
             raise TtsError("ElevenLabs API түлхүүр тавигдаагүй байна.", code=NOT_CONFIGURED)
 
-    async def synthesize(self, text: str) -> bytes:
-        """Speech for one line, as MP3 bytes."""
+    async def synthesize(self, text: str, voice_id: str | None = None) -> bytes:
+        """Speech for one line, as MP3 bytes — in `voice_id`, or the default
+        voice when none is given."""
         text = text.strip()
         if not text:
             raise TtsError("Хоосон мөрийг дуу болгох боломжгүй.")
         self._require_key()
-        if not VOICE_ID.fullmatch(self.config.voice_id or ""):
+        voice = voice_id or self.config.voice_id
+        if not VOICE_ID.fullmatch(voice or ""):
             raise TtsError("Монгол дууны хоолой сонгогдоогүй байна.", code=NOT_CONFIGURED)
 
-        url = self._url(SPEECH_PATH.format(voice_id=self.config.voice_id))
+        url = self._url(SPEECH_PATH.format(voice_id=voice))
         payload = {
             "text": text,
             "model_id": self.config.model,

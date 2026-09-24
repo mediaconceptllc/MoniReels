@@ -10,11 +10,15 @@ hears. A segment belongs to a clip when its middle falls inside it: a cut
 lands at a sentence edge, padded a little, so a segment is either wholly in
 or a sliver of it is, and the sliver is not what the clip is saying.
 
-**What they sound like.** Each line is synthesised once and kept in storage
-(`audio/{project}/voice-{hash}.mp3`), keyed by the voice, the model and the
-words. A re-export — another idea, a new logo, a retry after a failed
-render — pays for nothing it already has. An edited translation is new
-words, so it is a new clip; the old one is left, and goes with the project.
+**What they sound like.** Each speaker is read in the voice the producer
+gave them (`export.speaker_voices`); a speaker given none, and a line with no
+speaker, in the default voice chosen on the admin page. Each line is
+synthesised once and kept in storage (`audio/{project}/voice-{hash}.mp3`),
+keyed by the voice, the model and the words. A re-export — another idea, a
+new logo, a retry after a failed render — pays for nothing it already has.
+An edited translation is new words, and a speaker given another voice is a
+new voice, so either is a new clip; the old one is left, and goes with the
+project.
 
 **Where they go.** `place_lines` lays the lines on the clip's own timeline:
 each starts where it was said, never over the line before it, played faster
@@ -65,6 +69,37 @@ class VoiceOverError(RuntimeError):
 def lines_in(segments: list[Segment], start: float, end: float) -> list[Segment]:
     """The segments a clip of [start, end) says, in order."""
     return [s for s in segments if start <= (s.start + s.end) / 2 < end]
+
+
+#: How much of a speaker's first line identifies them on the page.
+SAMPLE_CHARS = 90
+
+
+def speakers(segments: list[Segment]) -> list[dict]:
+    """The people a transcript has, in the order they first speak — what a
+    producer gives a voice to.
+
+    Each comes with how much they say and their first line, because a label
+    like `speaker_1` identifies nobody: "the one who opens with 'Welcome back
+    to the channel'" does. A first line longer than SAMPLE_CHARS is cut and
+    says so with an ellipsis. Lines with no words are not speech, and a line
+    with no speaker is read in the default voice, so neither makes a row.
+    """
+    order: list[str] = []
+    counts: dict[str, int] = {}
+    samples: dict[str, str] = {}
+    for seg in segments:
+        text = (seg.text or "").strip()
+        if not seg.speaker or not text:
+            continue
+        if seg.speaker not in counts:
+            order.append(seg.speaker)
+            counts[seg.speaker] = 0
+            samples[seg.speaker] = (
+                text if len(text) <= SAMPLE_CHARS else text[:SAMPLE_CHARS].rstrip() + "…"
+            )
+        counts[seg.speaker] += 1
+    return [{"id": sid, "lines": counts[sid], "sample": samples[sid]} for sid in order]
 
 
 def clip_key(project_id: str, fingerprint: str, text: str) -> str:
@@ -170,9 +205,13 @@ async def prepare(
     ranges: list[tuple[float, float]],
     cache_dir: Path,
     *,
+    voices: dict[str, str] | None = None,
     on_progress: Callable[[float], Awaitable[None]] | None = None,
 ) -> tuple[dict[str, Path], VoiceReport]:
     """Every line `ranges` contain, as a local clip: {segment id: mp3 path}.
+
+    Each line is read in its speaker's voice from `voices` ({speaker: voice
+    id}); a speaker with none, and a line with no speaker, in the default.
 
     Read from storage when this voice has said these words before, paid for
     and stored otherwise — stored the moment it arrives, so an export that
@@ -180,35 +219,39 @@ async def prepare(
     """
     from app import r2
 
+    voices = voices or {}
     report = VoiceReport()
-    wanted: dict[str, str] = {}
+    wanted: dict[str, tuple[str, str]] = {}
     missing: set[str] = set()
     for start, end in ranges:
         for seg in lines_in(segments, start, end):
             text = (seg.translation or "").strip()
             if text:
-                wanted[seg.id] = text
+                # Resolved to a real id here, so a speaker given the default
+                # voice shares the default's clips rather than buying twins.
+                voice = voices.get(seg.speaker or "") or client.config.voice_id
+                wanted[seg.id] = (voice, text)
             elif (seg.text or "").strip():
                 missing.add(seg.id)
     report.lines = len(wanted)
     report.missing = len(missing)
 
-    # The same words are one clip, however many lines say them.
-    by_text: dict[str, list[str]] = {}
-    for seg_id, text in wanted.items():
-        by_text.setdefault(text, []).append(seg_id)
+    # The same words in the same voice are one clip, however many lines say
+    # them. In another voice they are another clip.
+    by_clip: dict[tuple[str, str], list[str]] = {}
+    for seg_id, voiced in wanted.items():
+        by_clip.setdefault(voiced, []).append(seg_id)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    fingerprint = client.config.fingerprint()
     paths: dict[str, Path] = {}
-    for n, (text, ids) in enumerate(by_text.items(), 1):
-        key = clip_key(project_id, fingerprint, text)
+    for n, ((voice, text), ids) in enumerate(by_clip.items(), 1):
+        key = clip_key(project_id, client.config.fingerprint(voice), text)
         local = cache_dir / key.rsplit("/", 1)[-1]
         if await asyncio.to_thread(r2.exists, key):
             await asyncio.to_thread(r2.download_file, key, local)
             report.cached += 1
         else:
-            audio = await client.synthesize(text)
+            audio = await client.synthesize(text, voice)
             local.write_bytes(audio)
             await asyncio.to_thread(r2.upload_file, local, key, "audio/mpeg")
             report.synthesized += 1
@@ -216,7 +259,7 @@ async def prepare(
         for seg_id in ids:
             paths[seg_id] = local
         if on_progress:
-            await on_progress(n / len(by_text))
+            await on_progress(n / len(by_clip))
     if report.missing:
         logger.warning("%d line(s) have no translation to read; they keep the original sound",
                        report.missing)

@@ -548,7 +548,7 @@ async def _prepare_voice(
     try:
         audio, report = await voiceover.prepare(
             client, _project_id(handle), project.transcript.segments, ranges,
-            workdir / "voice", on_progress=on_progress,
+            workdir / "voice", voices=project.export.speaker_voices, on_progress=on_progress,
         )
     finally:
         await client.aclose()
