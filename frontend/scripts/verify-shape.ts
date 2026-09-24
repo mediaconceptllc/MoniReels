@@ -170,6 +170,13 @@ const present: unknown[] = [
   raw.project.media.source_url, raw.project.media.thumbnail_url,
   raw.project.media.expires_in_s,
   raw.project.jobs.map((j) => [j.job_id, j.kind, j.state, j.progress, j.stage]),
+  // What the project cost and what the next paid run will. `spent_usd` is
+  // exact; `suggest_estimate_usd` is a measurement with its sample count
+  // beside it, and the page is not allowed to show one without the other.
+  raw.project.job_history_limit,
+  raw.project.spend.spent_usd, raw.project.spend.priced_jobs,
+  raw.project.spend.keep_days, raw.project.spend.suggest_estimate_usd,
+  raw.project.spend.suggest_samples, raw.project.spend.stt_measured,
 
   // creating one, and the upload that follows
   raw.create_project.project_id, raw.create_project.upload_url,
@@ -188,6 +195,13 @@ const present: unknown[] = [
   raw.job.progress, raw.job.stage, raw.job.message, raw.job.result,
   raw.job.attempts, raw.job.created_at, raw.job.updated_at, raw.job.finished_at,
   raw.job_failed.error,
+  // `result` was `Record<string, unknown>`, which is how a metered cost sat
+  // in the payload from the first day with nothing able to read it. These
+  // two are a contract now; the rest of the object is still per-kind.
+  raw.job.result.elapsed_sec, raw.job.result.llm.calls,
+  raw.job.result.llm.prompt_tokens, raw.job.result.llm.completion_tokens,
+  raw.job.result.llm.cost_usd, raw.job.result.llm.models,
+  raw.job_failed.result.elapsed_sec,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs.

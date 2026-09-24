@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import providers, r2, security
+from app import providers, r2, security, spend
 from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
@@ -43,6 +43,12 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+# How far back the project page's job history reaches. Bounded because the
+# list travels inside every project read; the 30-day prune
+# (config.job_keep_days) is the other, harder bound, and the payload says so
+# rather than letting a short history read as a quiet project.
+JOB_HISTORY_LIMIT = 30
 
 
 def _not_found(project_id: str) -> HTTPException:
@@ -181,7 +187,19 @@ def get_project(
         ),
         "expires_in_s": get_settings().r2_presign_ttl_s,
     }
-    data["jobs"] = queue.list_for_project(project_id, limit=10)
+    # Deep enough to BE a history: ten rows is three exports and a retry, and
+    # the question this answers — "what ran yesterday, how long did it take,
+    # what did it cost" — needs more than the last afternoon.
+    data["jobs"] = queue.list_for_project(project_id, limit=JOB_HISTORY_LIMIT)
+    data["job_history_limit"] = JOB_HISTORY_LIMIT
+    transcript = (data.get("transcript") or {}).get("full_text") or ""
+    data["spend"] = spend.view(
+        db,
+        project_id=project_id,
+        owner_id=row.owner_id,
+        characters=len(transcript),
+        keep_days=get_settings().job_keep_days,
+    )
     return data
 
 

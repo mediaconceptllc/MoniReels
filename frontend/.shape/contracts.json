@@ -51,12 +51,21 @@
     "error": null,
     "finished_at": 0.0,
     "job_id": "",
-    "kind": "transcribe",
+    "kind": "suggest",
     "message": "",
     "progress": 0.0,
     "project_id": "",
     "result": {
-      "*": 0
+      "elapsed_sec": 0.0,
+      "llm": {
+        "calls": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.0,
+        "models": [
+          ""
+        ],
+        "prompt_tokens": 0
+      }
     },
     "stage": "",
     "state": "done",
@@ -76,7 +85,9 @@
     "message": "",
     "progress": 0.0,
     "project_id": "",
-    "result": null,
+    "result": {
+      "elapsed_sec": 0.0
+    },
     "stage": "",
     "state": "failed",
     "updated_at": 0.0
@@ -143,6 +154,7 @@
       "write_srt": false
     },
     "id": "",
+    "job_history_limit": 0,
     "jobs": [
       {
         "attempts": 0,
@@ -154,7 +166,9 @@
         "message": "",
         "progress": 0.0,
         "project_id": "",
-        "result": null,
+        "result": {
+          "elapsed_sec": 0.0
+        },
         "stage": "",
         "state": "failed",
         "updated_at": 0.0
@@ -165,12 +179,21 @@
         "error": null,
         "finished_at": 0.0,
         "job_id": "",
-        "kind": "transcribe",
+        "kind": "suggest",
         "message": "",
         "progress": 0.0,
         "project_id": "",
         "result": {
-          "*": 0
+          "elapsed_sec": 0.0,
+          "llm": {
+            "calls": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "models": [
+              ""
+            ],
+            "prompt_tokens": 0
+          }
         },
         "stage": "",
         "state": "done",
@@ -184,6 +207,14 @@
     },
     "name": "",
     "schema_version": 0,
+    "spend": {
+      "keep_days": 0,
+      "priced_jobs": 0,
+      "spent_usd": 0.0,
+      "stt_measured": false,
+      "suggest_estimate_usd": null,
+      "suggest_samples": 0
+    },
     "subtitle_style": {
       "enabled": false,
       "font_family": "",

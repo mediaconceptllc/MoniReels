@@ -87,7 +87,6 @@ _LITERAL = frozenset({
 #: key that is not `*` or a plain identifier.
 _MAPS = {
     "counts": 1,   # QueueStatus.counts — one entry per job state present
-    "result": 1,   # Job.result — whatever the handler returned
 }
 
 _FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -352,16 +351,36 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
 
     # A job in every state the frontend renders, so `Job` is captured with a
     # result and an error present rather than both null.
+    #
+    # The outputs hold exactly the two fields the job history READS —
+    # `elapsed_sec` and `llm` — and nothing else. A handler's own return
+    # values (`segments`, `shorts`) are real, but they are not part of the
+    # contract the frontend checks itself against, and putting them here
+    # would turn every change to a handler's bookkeeping into a red CI run
+    # on a contract that had not moved.
     db.add_all([
         Job(
-            id="shapejob1", project_id=row.id, kind="transcribe", state="done",
+            id="shapejob1", project_id=row.id, kind="suggest", state="done",
             progress=1.0, stage="done", message="Дууссан",
-            result={"payload": {}, "output": {"segments": 2}},
-            attempts=1, finished_at=time.time(),
+            result={
+                "payload": {},
+                "output": {
+                    "elapsed_sec": 12.5,
+                    "llm": {
+                        "calls": 2,
+                        "prompt_tokens": 7000,
+                        "completion_tokens": 900,
+                        "cost_usd": 0.0312,
+                        "models": ["example/model"],
+                    },
+                },
+            },
+            attempts=1, created_at=time.time(), finished_at=time.time(),
         ),
         Job(
             id="shapejob2", project_id=row.id, kind="export", state="failed",
             progress=0.4, stage="rendering", message="Дүрслэл",
+            result={"payload": {}, "output": {"elapsed_sec": 3.0}},
             error="RuntimeError: жишээ", attempts=2,
         ),
     ])

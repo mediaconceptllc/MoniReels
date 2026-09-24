@@ -126,7 +126,7 @@ function withoutComments(source) {
  *  than matching `<tag[^>]*>`, because a className built from a template
  *  literal contains `>` inside `${...}` and a lazy regex stops there. */
 function* openingTags(source) {
-  const re = /<(button|a|select|textarea|input|Link)(?=[\s/>])/g;
+  const re = /<(button|a|select|textarea|input|summary|Link)(?=[\s/>])/g;
   let match;
   while ((match = re.exec(source))) {
     let i = re.lastIndex;
