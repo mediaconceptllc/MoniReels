@@ -16,8 +16,9 @@
  * belongs, rather than as a footnote under three buttons.
  */
 
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Spinner } from "@/components/ui";
+import { Button, Loading, Skeleton } from "@/components/ui";
 
 export type Stage = "source" | "transcript" | "suggestions" | "outputs";
 
@@ -68,6 +69,28 @@ function Marker({ state, index }: { state: StageDef["state"]; index: number }) {
   );
 }
 
+/** The action, drawn once so the pinned copy cannot drift from the one in the
+ *  rail. The note is the cost stated BEFORE the click, which is why it travels
+ *  with the button rather than being left behind. */
+function ActionBar({ action }: { action: RailAction }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <Button
+        tone="primary"
+        className="text-[15px]"
+        disabled={action.disabled}
+        loading={action.loading}
+        onClick={action.onRun}
+      >
+        {action.label}
+      </Button>
+      {action.note && (
+        <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action.note}</p>
+      )}
+    </div>
+  );
+}
+
 export function PipelineRail({
   stages,
   active,
@@ -82,6 +105,34 @@ export function PipelineRail({
   action?: RailAction;
   children?: ReactNode;
 }) {
+  // On a phone the rail is the first thing on the page and the panel under it
+  // is long — three hundred transcript lines, or a grid of six ideas. By the
+  // time the producer has read enough to decide, the button that acts on the
+  // decision has scrolled away, and the way back to it is to scroll up, act,
+  // and lose their place. So once it leaves the screen a compact copy pins
+  // itself to the bottom. Both read the same `action`: one button's worth of
+  // state, drawn in whichever place is currently visible.
+  const barRef = useRef<HTMLDivElement>(null);
+  const [offscreen, setOffscreen] = useState(false);
+  // What the observer must be rebuilt for is the bar appearing or
+  // disappearing, not the label on it changing.
+  const hasAction = !!action;
+  const hasProgress = !!children;
+
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar) {
+      setOffscreen(false);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setOffscreen(!entry.isIntersecting),
+      { threshold: 0 },
+    );
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, [hasAction, hasProgress]);
+
   return (
     <div className="overflow-hidden rounded-lg border border-rule bg-surface">
       <div className="grid grid-cols-2 sm:grid-cols-4">
@@ -120,35 +171,62 @@ export function PipelineRail({
       </div>
 
       {(action || children) && (
-        <div className="border-t border-rule p-4">
-          {children ?? (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <Button
-                tone="primary"
-                className="min-h-[44px] px-4 text-[15px]"
-                disabled={action!.disabled}
-                loading={action!.loading}
-                onClick={action!.onRun}
-              >
-                {action!.label}
-              </Button>
-              {action!.note && (
-                <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action!.note}</p>
-              )}
-            </div>
-          )}
+        <div ref={barRef} className="border-t border-rule p-4">
+          {children ?? <ActionBar action={action!} />}
+        </div>
+      )}
+
+      {/* Fixed, not sticky: sticky is bounded by its scrolling ancestor, so a
+          bar inside this box would ride away with the box it belongs to —
+          which is the whole thing being prevented. A fixed child escapes the
+          rail's `overflow-hidden` because it is positioned against the
+          viewport rather than against any ancestor here. */}
+      {offscreen && action && !children && (
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-rule bg-surface px-4 py-3 sm:hidden">
+          <Button
+            tone="primary"
+            className="w-full text-[15px]"
+            disabled={action.disabled}
+            loading={action.loading}
+            onClick={action.onRun}
+          >
+            {action.label}
+          </Button>
         </div>
       )}
     </div>
   );
 }
 
-/** The rail's own placeholder, so the page keeps its shape while a project
- *  loads instead of collapsing to a spinner on a blank page. */
+/**
+ * The rail's own geometry, held empty.
+ *
+ * A spinner would say "wait" and take the layout with it: the page would then
+ * arrive as a jump rather than as a fill, and the reader would have to find
+ * their place in it twice. These are the same four cells at the same
+ * `min-h-[68px]`, the same 22px marker and the same 31px text indent, so
+ * nothing moves when the real ones replace them.
+ */
 export function PipelineRailSkeleton() {
   return (
-    <div className="flex min-h-[68px] items-center justify-center rounded-lg border border-rule bg-surface">
-      <Spinner />
-    </div>
+    <Loading className="overflow-hidden rounded-lg border border-rule bg-surface">
+      <div className="grid grid-cols-2 sm:grid-cols-4">
+        {[0, 1, 2, 3].map((cell) => (
+          <div
+            key={cell}
+            className="flex min-h-[68px] flex-col gap-2 border-b border-rule-soft px-4 py-3 sm:border-b-0 sm:border-r sm:last:border-r-0"
+          >
+            <span className="flex items-center gap-2.5">
+              <Skeleton className="h-[22px] w-[22px] shrink-0 rounded-full" />
+              <Skeleton className="h-3.5 w-20" />
+            </span>
+            <Skeleton className="ml-[31px] h-3 w-16" />
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-rule p-4">
+        <Skeleton className="h-11 w-40 rounded-md" />
+      </div>
+    </Loading>
   );
 }

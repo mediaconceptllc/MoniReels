@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "verify-shape": "node scripts/check-shape-data.mjs && tsc --noEmit -p tsconfig.shape.json && tsx scripts/verify-shape.ts"
+    "verify-shape": "node scripts/check-shape-data.mjs && tsc --noEmit -p tsconfig.shape.json && tsx scripts/verify-shape.ts",
+    "check-ui": "node scripts/check-ui.mjs"
   },
   "dependencies": {
     "next": "^15.1.0",

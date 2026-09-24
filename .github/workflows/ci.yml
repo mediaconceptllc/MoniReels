@@ -129,6 +129,12 @@ jobs:
       # The fixtures are committed — see frontend/.shape/README.md.
       - run: npm run verify-shape
 
+      # Two interface rules a type checker cannot hold: every tap target is at
+      # least 44px, and a loading REGION uses Skeleton rather than Spinner. Both
+      # are defaults living in the primitives, and a default is only worth
+      # having if the next component cannot quietly opt out of it.
+      - run: npm run check-ui
+
       # A placeholder is fine: NEXT_PUBLIC_API_URL is baked in at build time
       # and nothing here calls it. What is being checked is that the build
       # compiles, not that it can reach a server.

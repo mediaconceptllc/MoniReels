@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
-import { Button } from "@/components/ui";
+import { Button, TAP } from "@/components/ui";
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { user, signOut } = useAuth();
@@ -11,7 +11,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-dvh">
       <header className="border-b border-rule bg-surface">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3.5">
-          <Link href="/" className="font-display text-lg font-semibold tracking-tight text-ink">
+          <Link
+            href="/"
+            className={`${TAP} inline-flex items-center font-display text-lg font-semibold tracking-tight text-ink`}
+          >
             MoniReels
           </Link>
           {user && (
@@ -19,13 +22,19 @@ export function Shell({ children }: { children: React.ReactNode }) {
               {/* Convenience only. /admin/* is closed on the server, so
                   hiding the link is not what keeps anyone out. */}
               {user.role === "admin" && (
-                <Link href="/admin" className="text-ink-3 hover:text-ink">
+                <Link
+                  href="/admin"
+                  className={`${TAP} inline-flex items-center px-1 text-ink-3 hover:text-ink`}
+                >
                   Тохиргоо
                 </Link>
               )}
               {/* The name was plain text, which left the password-change
                   endpoint with no way in at all. */}
-              <Link href="/profile" className="text-ink-3 hover:text-ink">
+              <Link
+                href="/profile"
+                className={`${TAP} inline-flex items-center px-1 text-ink-3 hover:text-ink`}
+              >
                 {user.username}
               </Link>
               <Button tone="quiet" onClick={signOut}>

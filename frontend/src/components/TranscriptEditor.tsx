@@ -24,7 +24,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { timecode } from "@/lib/format";
 import type { Segment } from "@/lib/types";
-import { Alert, Badge, Button } from "@/components/ui";
+import { Alert, Badge, Button, TAP } from "@/components/ui";
 
 export function TranscriptEditor({
   projectId,
@@ -108,7 +108,7 @@ export function TranscriptEditor({
                 onClick={() => playFrom(segment)}
                 disabled={!sourceUrl}
                 aria-label={`${timecode(segment.start)}-аас тоглуулах`}
-                className={`tabular min-h-[44px] w-16 shrink-0 rounded px-1 pt-1.5 text-left font-mono text-[11px] transition-colors ${
+                className={`tabular ${TAP} w-16 shrink-0 rounded px-1 pt-1.5 text-left font-mono text-[11px] transition-colors ${
                   isPlaying ? "text-accent" : "text-ink-3"
                 } ${sourceUrl ? "hover:bg-surface-2 hover:text-ink-2" : "cursor-default"}`}
               >
@@ -118,7 +118,7 @@ export function TranscriptEditor({
                 value={value}
                 rows={1}
                 onChange={(e) => setEdits((prev) => ({ ...prev, [segment.id]: e.target.value }))}
-                className={`min-h-[2.75rem] w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink ${
+                className={`${TAP} w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink ${
                   isChanged ? "border-warn/60" : "border-transparent hover:border-rule"
                 }`}
               />
@@ -141,7 +141,6 @@ export function TranscriptEditor({
           {saved && changed.length === 0 && <Badge tone="fit">✓ Хадгалагдсан</Badge>}
           <Button
             tone="primary"
-            className="min-h-[44px] px-4"
             onClick={save}
             loading={saving}
             disabled={changed.length === 0}

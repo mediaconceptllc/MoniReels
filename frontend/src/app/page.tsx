@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, relativeTime } from "@/lib/format";
 import type { ProjectSummary, QueueStatus } from "@/lib/types";
-import { Alert, Badge, Card, Empty, Spinner } from "@/components/ui";
+import { Alert, Badge, Card, Empty, Loading, Skeleton, TAP } from "@/components/ui";
 import { NewProject } from "@/components/NewProject";
 import { Shell } from "@/components/Shell";
 
@@ -37,7 +37,11 @@ export default function ProjectsPage() {
   if (authLoading || !user) {
     return (
       <Shell>
-        <Spinner />
+        <div className="flex flex-col gap-6">
+          <Skeleton className="h-44 rounded-lg" />
+          <Skeleton className="h-5 w-24" />
+          <ProjectGridSkeleton />
+        </div>
       </Shell>
     );
   }
@@ -62,7 +66,7 @@ export default function ProjectsPage() {
 
           {error && <Alert>{error}</Alert>}
 
-          {!projects && !error && <Spinner />}
+          {!projects && !error && <ProjectGridSkeleton />}
 
           {projects?.length === 0 && (
             <Empty
@@ -73,7 +77,11 @@ export default function ProjectsPage() {
 
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {projects?.map((project) => (
-              <Link key={project.id} href={`/projects/${project.id}`} className="block">
+              <Link
+                key={project.id}
+                href={`/projects/${project.id}`}
+                className={`${TAP} block`}
+              >
                 <Card className="flex h-full flex-col overflow-hidden transition-colors hover:border-accent">
                   {/* Import has always made a thumbnail; the list never asked
                       for one, so a wall of VIDEO projects read as a wall of
@@ -121,6 +129,34 @@ export default function ProjectsPage() {
         </section>
       </div>
     </Shell>
+  );
+}
+
+/**
+ * Six cards in the grid they will land in.
+ *
+ * The count is a guess at what is coming, and a wrong guess is cheap in both
+ * directions — the grid reflows either way. What it buys is that the page has
+ * a SHAPE while it loads, so the eye is already in the right place when the
+ * names arrive. The block carries the same `aspect-video` as the real
+ * thumbnail, which is what keeps that reflow from being visible at all.
+ */
+function ProjectGridSkeleton() {
+  return (
+    <Loading className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {[0, 1, 2, 3, 4, 5].map((card) => (
+        <Card key={card} className="flex h-full flex-col overflow-hidden">
+          <Skeleton className="aspect-video rounded-none" />
+          <div className="flex flex-1 flex-col gap-3 p-3.5">
+            <Skeleton className="h-4 w-3/4" />
+            <div className="mt-auto flex items-center gap-2">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-3 w-16" />
+            </div>
+          </div>
+        </Card>
+      ))}
+    </Loading>
   );
 }
 

@@ -17,7 +17,7 @@
 import { useMemo, useState } from "react";
 import { CUT_ROLE_LABELS, timecode, totalCutSeconds } from "@/lib/format";
 import type { Suggestions } from "@/lib/types";
-import { Badge, Button, Card } from "@/components/ui";
+import { Badge, Button, Card, TAP } from "@/components/ui";
 import { CutPreview, type PreviewCut } from "@/components/CutPreview";
 
 /** The window a reel has to land in to be usable on any of the platforms
@@ -91,7 +91,7 @@ export function SuggestionList({
         <button
           type="button"
           onClick={toggleAll}
-          className="flex min-h-[44px] items-center gap-2.5 text-sm text-ink-2 hover:text-ink"
+          className={`${TAP} flex items-center gap-2.5 text-sm text-ink-2 hover:text-ink`}
         >
           <Tick on={allPicked} />
           {picked === 0 ? "Бүгдийг сонгох" : `${picked} сонгосон`}
@@ -99,7 +99,6 @@ export function SuggestionList({
         {onExport && (
           <Button
             tone="primary"
-            className="min-h-[44px] px-4"
             loading={busy}
             onClick={() => onExport(exportPick)}
           >
@@ -125,7 +124,7 @@ export function SuggestionList({
                 <button
                   type="button"
                   onClick={() => toggleShort(short.id)}
-                  className="flex items-start gap-2.5 text-left"
+                  className={`${TAP} flex items-start gap-2.5 py-1 text-left`}
                 >
                   <span className="mt-0.5">
                     <Tick on={on} />
@@ -161,7 +160,7 @@ export function SuggestionList({
 
                 {sourceUrl && (
                   <Button
-                    className="mt-auto min-h-[44px] self-start px-3 text-[13px]"
+                    className="mt-auto self-start"
                     onClick={() =>
                       setPreview({
                         title: short.title,
@@ -198,7 +197,7 @@ export function SuggestionList({
                   <button
                     type="button"
                     onClick={() => togglePlan(index)}
-                    className="flex items-start gap-2.5 text-left"
+                    className={`${TAP} flex items-start gap-2.5 py-1 text-left`}
                   >
                     <span className="mt-0.5">
                       <Tick on={on} />
@@ -213,7 +212,7 @@ export function SuggestionList({
                   </p>
                   {sourceUrl && (
                     <Button
-                      className="mt-auto min-h-[44px] self-start px-3 text-[13px]"
+                      className="mt-auto self-start"
                       onClick={() =>
                         setPreview({
                           title: plan.title,

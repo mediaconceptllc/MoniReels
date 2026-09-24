@@ -81,10 +81,10 @@ export function ConfirmDialog({
         <p className="text-sm text-ink-3">Энэ үйлдлийг буцаах боломжгүй.</p>
 
         <div className="flex flex-wrap justify-end gap-2">
-          <Button ref={cancelRef} className="min-h-[44px] px-4" onClick={onCancel}>
+          <Button ref={cancelRef} onClick={onCancel}>
             Болих
           </Button>
-          <Button tone="danger" className="min-h-[44px] px-4" loading={busy} onClick={onConfirm}>
+          <Button tone="danger" loading={busy} onClick={onConfirm}>
             {confirmLabel}
           </Button>
         </div>
