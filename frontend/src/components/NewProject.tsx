@@ -14,9 +14,10 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
-import { fileSize } from "@/lib/format";
+import { fileSize, LANGUAGE_LABELS } from "@/lib/format";
+import type { SourceLanguage } from "@/lib/types";
 import { uploadToStorage } from "@/lib/upload";
-import { Alert, Button, Card, Field, ProgressBar, TextInput } from "@/components/ui";
+import { Alert, Button, Card, Field, ProgressBar, Select, TextInput } from "@/components/ui";
 
 const ACCEPT = ".mp4,.mov,.mkv,.webm,.m4v,.avi";
 
@@ -25,6 +26,9 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
+  // Asked, never guessed from the file: it decides which recogniser hears
+  // the video, and a wrong one comes back as confident nonsense, billed.
+  const [language, setLanguage] = useState<SourceLanguage>("mn");
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<(() => void) | null>(null);
@@ -42,7 +46,12 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
     setError(null);
     setProgress(0);
     try {
-      const created = await api.createProject(name.trim() || file.name, file.name, file.size);
+      const created = await api.createProject(
+        name.trim() || file.name,
+        file.name,
+        file.size,
+        language,
+      );
 
       const upload = uploadToStorage(created.upload_url, file, setProgress);
       abortRef.current = upload.abort;
@@ -98,6 +107,30 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
               disabled={uploading}
               maxLength={200}
             />
+          </Field>
+        )}
+
+        {file && (
+          <Field
+            label="Видеонд ямар хэлээр ярьж байна"
+            hint={
+              language === "mn"
+                ? undefined
+                : "Яриаг тэр хэлээр нь танина. Дараа нь монгол руу орчуулж, хадмал монголоор гарна."
+            }
+          >
+            <Select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value as SourceLanguage)}
+              disabled={uploading}
+              className="self-start"
+            >
+              {(Object.keys(LANGUAGE_LABELS) as SourceLanguage[]).map((code) => (
+                <option key={code} value={code}>
+                  {LANGUAGE_LABELS[code]}
+                </option>
+              ))}
+            </Select>
           </Field>
         )}
 

@@ -21,7 +21,12 @@ import type { ReactNode } from "react";
 import { usd } from "@/lib/format";
 import { Button, Loading, Skeleton } from "@/components/ui";
 
-export type Stage = "source" | "transcript" | "suggestions" | "outputs";
+export type Stage = "source" | "transcript" | "translation" | "suggestions" | "outputs";
+
+/** Literal class names, not `sm:grid-cols-${n}`: Tailwind finds classes by
+ *  reading the source, and one assembled at runtime is never generated. A
+ *  video not in Mongolian has a fifth stage, its translation. */
+const COLUMNS: Record<number, string> = { 4: "sm:grid-cols-4", 5: "sm:grid-cols-5" };
 
 export interface StageDef {
   key: Stage;
@@ -171,16 +176,18 @@ export function PipelineRail({
 
   return (
     <div className="overflow-hidden rounded-lg border border-rule bg-surface">
-      <div className="grid grid-cols-2 sm:grid-cols-4">
+      <div className={`grid grid-cols-2 ${COLUMNS[stages.length] ?? "sm:grid-cols-4"}`}>
         {stages.map((stage, index) => {
           const selected = stage.key === active;
+          // On a phone's two columns an odd last cell takes the whole row,
+          // rather than leaving half of the rail's last line empty.
           return (
             <button
               key={stage.key}
               type="button"
               onClick={() => onSelect(stage.key)}
               aria-current={selected ? "step" : undefined}
-              className={`flex min-h-[68px] flex-col gap-1.5 border-b border-rule-soft px-4 py-3 text-left transition-colors sm:border-b-0 sm:border-r sm:last:border-r-0 ${
+              className={`flex min-h-[68px] flex-col gap-1.5 border-b border-rule-soft px-4 py-3 text-left transition-colors max-sm:odd:last:col-span-2 sm:border-b-0 sm:border-r sm:last:border-r-0 ${
                 selected ? "bg-accent-soft" : "hover:bg-surface-2"
               }`}
             >

@@ -458,3 +458,45 @@ def test_a_short_video_is_told_to_skip_youtube_without_a_duration_rule():
     asked = build_suggestions_prompt(["[0] 00:00-00:05 hi"], duration_sec=300.0, youtube=0)
     assert "empty list" in asked
     assert "sum them and check" not in asked
+
+
+# --------------------------------------------------------------------------
+# The language ideas are written in
+# --------------------------------------------------------------------------
+
+_RULES = " ".join(SYSTEM_PROMPT.split())
+
+
+def test_titles_hooks_and_captions_are_written_in_mongolian_whatever_the_video_is_in():
+    """The rule was "the SAME LANGUAGE as the transcript" — which, for an
+    English video, put English titles in front of a Mongolian audience."""
+    assert "`caption` in Mongolian (Cyrillic script)" in _RULES
+    assert "SAME LANGUAGE as the transcript" not in _RULES
+
+
+def test_the_hook_quote_stays_in_the_language_it_was_copied_from():
+    """It is checked against the transcript verbatim; translated, it could
+    never match and every short would fail that check."""
+    assert "`hook_quote` alone stays in the transcript's own language" in _RULES
+
+
+# --------------------------------------------------------------------------
+# The prompt reference
+# --------------------------------------------------------------------------
+
+def test_the_prompt_reference_shows_the_system_prompts_that_are_sent():
+    """docs/PROMPTS.md says it is the text actually sent. It went stale once
+    already — a count change reached the model and not the page — and a
+    reference that is wrong is worse than none: it is what someone reads to
+    decide why the model did what it did."""
+    from pathlib import Path
+
+    from app.ai import punctuate, translate
+
+    reference = (Path(__file__).resolve().parents[2] / "docs" / "PROMPTS.md").read_text()
+    for name, text in (
+        ("prompts.SYSTEM_PROMPT", SYSTEM_PROMPT),
+        ("punctuate.SYSTEM_PROMPT", punctuate.SYSTEM_PROMPT),
+        ("translate.SYSTEM_PROMPT", translate.SYSTEM_PROMPT),
+    ):
+        assert f"```\n{text}\n```" in reference, f"docs/PROMPTS.md-д {name} хуучирсан"

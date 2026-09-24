@@ -149,6 +149,7 @@
       "orientation": "portrait",
       "portrait_fill": "blur",
       "preset": "",
+      "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
       "write_srt": false
@@ -200,6 +201,7 @@
         "updated_at": 0.0
       }
     ],
+    "language": "mn",
     "media": {
       "expires_in_s": 0,
       "source_url": "",
@@ -307,6 +309,7 @@
           "speaker": "",
           "start": 0.0,
           "text": "",
+          "translation": "",
           "words": []
         },
         {
@@ -315,6 +318,7 @@
           "speaker": null,
           "start": 0.0,
           "text": "",
+          "translation": null,
           "words": []
         }
       ],
@@ -324,6 +328,13 @@
     "transition": {
       "duration": 0.0,
       "type": ""
+    },
+    "translation": {
+      "blocks_export": false,
+      "lines": 0,
+      "missing": 0,
+      "needed": false,
+      "translated": 0
     },
     "updated_at": 0.0,
     "video": {
@@ -367,11 +378,13 @@
       "orientation": "portrait",
       "portrait_fill": "blur",
       "preset": "",
+      "subtitle_language": "mn",
       "use_intro": false,
       "use_outro": false,
       "write_srt": false
     },
     "id": "",
+    "language": "",
     "name": "",
     "schema_version": 0,
     "subtitle_style": {
@@ -459,6 +472,7 @@
           "speaker": "",
           "start": 0.0,
           "text": "",
+          "translation": "",
           "words": []
         },
         {
@@ -467,6 +481,7 @@
           "speaker": null,
           "start": 0.0,
           "text": "",
+          "translation": null,
           "words": []
         }
       ],
@@ -709,8 +724,12 @@
     "job_id": ""
   },
   "transcript_updated": {
+    "translations_cleared": 0,
     "unknown_ids": [],
     "updated": 0
+  },
+  "translate_started": {
+    "job_id": ""
   },
   "upload_complete": {
     "job_id": "",

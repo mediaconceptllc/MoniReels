@@ -1394,3 +1394,277 @@ def test_a_short_video_is_offered_what_it_can_hold(client, db, monkeypatch):
     row = _suggestable(db, monkeypatch, "shortlimits", duration_sec=100.0)
     limits = client.get(f"/projects/{row.id}", headers=_auth(client, "shortlimits")).json()["suggest_limits"]
     assert limits == {"shorts_max": 2, "youtube_max": 0, "shorts_default": 2, "youtube_default": 0}
+
+
+# ---------------------------------------------------------------------------
+# Languages: declaring one, hearing it, translating it, exporting it
+# ---------------------------------------------------------------------------
+
+def _english_project(db, username: str, *, translations=(None, None), llm_key: bool = True,
+                     monkeypatch=None, **export) -> Project:
+    from app import provider_settings
+    from app.config import get_settings
+
+    if monkeypatch is not None:
+        settings = get_settings().model_copy(update={"openrouter_api_key": "sk-or-test" if llm_key else ""})
+        monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+    owner = _user(db, username)
+    row = _project_with_video(db, owner)
+    doc = {
+        **row.doc,
+        "language": "en",
+        "transcript": {
+            "language": "eng", "full_text": "Hello. Bye.",
+            "segments": [
+                {"id": "a", "start": 0.0, "end": 2.0, "text": "Hello.", "words": [],
+                 "translation": translations[0]},
+                {"id": "b", "start": 2.0, "end": 4.0, "text": "Bye.", "words": [],
+                 "translation": translations[1]},
+            ],
+        },
+    }
+    if export:
+        doc["export"] = export
+    row.doc = doc
+    db.commit()
+    return row
+
+
+def test_a_project_is_created_in_the_language_it_is_spoken_in(client, db):
+    _user(db, "polyglot")
+    auth = _auth(client, "polyglot")
+    made = client.post("/projects", json={
+        "name": "talk", "filename": "talk.mp4", "size_bytes": 1024, "language": "en",
+    }, headers=auth).json()
+    assert client.get(f"/projects/{made['project_id']}", headers=auth).json()["language"] == "en"
+
+
+def test_a_client_that_never_says_gets_mongolian(client, db):
+    _user(db, "monoglot")
+    auth = _auth(client, "monoglot")
+    body = {"name": "t", "filename": "t.mp4", "size_bytes": 1024}
+    made = client.post("/projects", json=body, headers=auth).json()
+    assert client.get(f"/projects/{made['project_id']}", headers=auth).json()["language"] == "mn"
+
+
+def test_a_language_nothing_can_hear_is_refused(client, db):
+    _user(db, "klingon")
+    response = client.post("/projects", json={
+        "name": "t", "filename": "t.mp4", "size_bytes": 1024, "language": "tlh",
+    }, headers=_auth(client, "klingon"))
+    assert response.status_code == 422
+
+
+def test_a_wrong_language_can_be_corrected(client, db):
+    alice = _user(db, "fixer")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "fixer")
+    assert client.patch(f"/projects/{row.id}", json={"language": "en"}, headers=auth).status_code == 200
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["language"] == "en"
+
+
+def test_an_english_video_is_refused_when_scribe_cannot_hear_it(client, db, monkeypatch):
+    """The readiness check read the SELECTED recogniser. An English video is
+    heard by Scribe whatever is selected, so a missing Scribe key has to stop
+    it here, before the download — and say why."""
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={
+        "stt_provider": "duudlaga", "duudlaga_api_key": "dd-key", "elevenlabs_api_key": "",
+    })
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+    row = _english_project(db, "noscribe")
+
+    response = client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "noscribe"))
+    assert response.status_code == 503
+    assert "ElevenLabs Scribe" in response.json()["detail"]
+
+
+def test_an_english_video_is_accepted_when_scribe_can_hear_it(client, db, monkeypatch):
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(update={"stt_provider": "duudlaga", "elevenlabs_api_key": "el-key"})
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+    row = _english_project(db, "scribe")
+    assert client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "scribe")).status_code == 200
+
+
+def test_translating_queues_a_job_that_fills_only_the_gaps_by_default(client, db, monkeypatch):
+    row = _english_project(db, "translator", monkeypatch=monkeypatch)
+    response = client.post(f"/projects/{row.id}/translate", headers=_auth(client, "translator"))
+    assert response.status_code == 200
+    assert _queued_payload(db, response.json()["job_id"]) == {"force": False}
+
+
+def test_force_travels_to_the_job(client, db, monkeypatch):
+    row = _english_project(db, "forcer", monkeypatch=monkeypatch)
+    response = client.post(
+        f"/projects/{row.id}/translate", json={"force": True}, headers=_auth(client, "forcer")
+    )
+    assert _queued_payload(db, response.json()["job_id"]) == {"force": True}
+
+
+def test_a_mongolian_video_is_not_sent_for_translation(client, db, monkeypatch):
+    """A paid call whose answer is the text it was given is a bill for nothing."""
+    row = _suggestable(db, monkeypatch, "mnonly", duration_sec=600.0)
+    response = client.post(f"/projects/{row.id}/translate", headers=_auth(client, "mnonly"))
+    assert response.status_code == 400
+
+
+def test_translation_is_refused_without_a_model_key(client, db, monkeypatch):
+    row = _english_project(db, "nollm", monkeypatch=monkeypatch, llm_key=False)
+    assert client.post(f"/projects/{row.id}/translate", headers=_auth(client, "nollm")).status_code == 503
+
+
+def test_a_translation_can_be_edited_by_hand(client, db, monkeypatch):
+    row = _english_project(db, "editor1", translations=("Сайн уу.", None), monkeypatch=monkeypatch)
+    auth = _auth(client, "editor1")
+    body = {"segments": [{"id": "a", "translation": "Сайн байна уу."}]}
+    assert client.put(f"/projects/{row.id}/transcript", json=body, headers=auth).json()["updated"] == 1
+    segs = client.get(f"/projects/{row.id}", headers=auth).json()["transcript"]["segments"]
+    assert segs[0]["translation"] == "Сайн байна уу." and segs[0]["text"] == "Hello."
+
+
+def test_correcting_what_was_said_clears_its_translation(client, db, monkeypatch):
+    """A translation of words that are no longer there is a subtitle saying
+    something nobody said. Cleared, the line is exactly what the next run —
+    which sends only untranslated lines — fixes."""
+    row = _english_project(db, "editor2", translations=("Сайн уу.", "Баяртай."), monkeypatch=monkeypatch)
+    auth = _auth(client, "editor2")
+    body = {"segments": [{"id": "a", "text": "Hello, friend."}]}
+    result = client.put(f"/projects/{row.id}/transcript", json=body, headers=auth).json()
+    assert result["translations_cleared"] == 1
+    segs = client.get(f"/projects/{row.id}", headers=auth).json()["transcript"]["segments"]
+    assert segs[0]["translation"] is None and segs[1]["translation"] == "Баяртай."
+
+
+def test_an_edit_that_gives_both_keeps_the_new_translation(client, db, monkeypatch):
+    row = _english_project(db, "editor3", translations=("Сайн уу.", None), monkeypatch=monkeypatch)
+    auth = _auth(client, "editor3")
+    body = {"segments": [{"id": "a", "text": "Hi.", "translation": "Сайн."}]}
+    result = client.put(f"/projects/{row.id}/transcript", json=body, headers=auth).json()
+    assert result["translations_cleared"] == 0
+    segs = client.get(f"/projects/{row.id}", headers=auth).json()["transcript"]["segments"]
+    assert segs[0]["translation"] == "Сайн."
+
+
+def test_an_empty_translation_clears_it(client, db, monkeypatch):
+    row = _english_project(db, "editor4", translations=("Сайн уу.", None), monkeypatch=monkeypatch)
+    auth = _auth(client, "editor4")
+    body = {"segments": [{"id": "a", "translation": " "}]}
+    client.put(f"/projects/{row.id}/transcript", json=body, headers=auth)
+    segs = client.get(f"/projects/{row.id}", headers=auth).json()["transcript"]["segments"]
+    assert segs[0]["translation"] is None
+
+
+def test_an_edit_that_says_nothing_is_refused(client, db, monkeypatch):
+    row = _english_project(db, "editor5", monkeypatch=monkeypatch)
+    response = client.put(f"/projects/{row.id}/transcript", json={"segments": [{"id": "a"}]},
+                            headers=_auth(client, "editor5"))
+    assert response.status_code == 422
+
+
+def _with_suggestions(db, row) -> None:
+    project = load(db, row.id)
+    from app.models import Cut, ShortIdea, Suggestions
+
+    project.suggestions = Suggestions(shorts=[ShortIdea(
+        id="sh1", title="t", hook_text="h", hook_quote="q", caption="c", why_it_works="w",
+        cuts=[
+            Cut(start=0.0, end=2.0, role="hook", reason="r"),
+            Cut(start=2.0, end=4.0, role="payoff", reason="r"),
+        ],
+    )])
+    save(db, project)
+    db.commit()
+
+
+def test_an_export_whose_mongolian_subtitles_would_have_holes_is_refused(client, db, monkeypatch):
+    """Minutes of encoding, then untranslated lines in the source language
+    mid-video with nothing to say why. Refused before, with both ways out."""
+    row = _english_project(db, "holes", translations=("Сайн уу.", None), monkeypatch=monkeypatch)
+    _with_suggestions(db, row)
+    response = client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "holes"))
+    assert response.status_code == 409
+    assert "1 мөр" in response.json()["detail"]
+
+
+def test_a_hand_cut_timeline_is_held_to_the_same_rule(client, db, monkeypatch):
+    """The "cut it myself" export renders the same subtitles as the ideas do.
+    Guarded on one route and not the other, holes would ship from the one
+    nobody thought to check."""
+    row = _english_project(db, "timeline", translations=("Сайн уу.", None), monkeypatch=monkeypatch)
+    auth = _auth(client, "timeline")
+    cut = client.post(f"/projects/{row.id}/select", json={"ranges": [[0.0, 4.0]]}, headers=auth)
+    assert cut.status_code == 200
+    response = client.post(f"/projects/{row.id}/export", headers=auth)
+    assert response.status_code == 409 and "1 мөр" in response.json()["detail"]
+
+    body = {"segments": [{"id": "b", "translation": "Баяртай."}]}
+    client.put(f"/projects/{row.id}/transcript", json=body, headers=auth)
+    assert client.post(f"/projects/{row.id}/export", headers=auth).status_code == 200
+
+
+def test_an_export_in_the_source_language_needs_no_translation(client, db, monkeypatch):
+    row = _english_project(db, "srcsubs", monkeypatch=monkeypatch, subtitle_language="source")
+    _with_suggestions(db, row)
+    assert client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "srcsubs")).status_code == 200
+
+
+def test_an_export_with_no_subtitles_needs_no_translation(client, db, monkeypatch):
+    row = _english_project(db, "nosubs", monkeypatch=monkeypatch, burn_subtitles=False, write_srt=False)
+    _with_suggestions(db, row)
+    assert client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "nosubs")).status_code == 200
+
+
+def test_a_fully_translated_export_goes_ahead(client, db, monkeypatch):
+    row = _english_project(db, "allgood", translations=("Сайн уу.", "Баяртай."), monkeypatch=monkeypatch)
+    _with_suggestions(db, row)
+    response = client.post(f"/projects/{row.id}/export-all", headers=_auth(client, "allgood"))
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("username", "translations", "export"),
+    [
+        ("verdict1", ("Сайн уу.", None), {}),
+        ("verdict2", ("Сайн уу.", "Баяртай."), {}),
+        ("verdict3", (None, None), {"subtitle_language": "source"}),
+        ("verdict4", (None, None), {"burn_subtitles": False, "write_srt": False}),
+        ("verdict5", (None, None), {"burn_subtitles": False, "write_srt": True}),
+    ],
+)
+def test_the_page_is_told_exactly_what_the_export_will_decide(
+    client, db, monkeypatch, username, translations, export
+):
+    """The page disables its export button from `blocks_export`. Worked out
+    anywhere but the guard itself, the two would drift, and the page would
+    offer a click the server refuses — or hide one it would accept."""
+    row = _english_project(db, username, translations=translations, monkeypatch=monkeypatch, **export)
+    _with_suggestions(db, row)
+    auth = _auth(client, username)
+    view = client.get(f"/projects/{row.id}", headers=auth).json()["translation"]
+    refused = client.post(f"/projects/{row.id}/export-all", headers=auth).status_code == 409
+    assert view["blocks_export"] is refused
+    missing = sum(1 for t in translations if t is None)
+    assert (view["lines"], view["translated"], view["missing"]) == (2, 2 - missing, missing)
+
+
+def test_a_mongolian_video_has_nothing_to_translate(client, db):
+    alice = _user(db, "mnview")
+    row = _project_with_video(db, alice)
+    view = client.get(f"/projects/{row.id}", headers=_auth(client, "mnview")).json()["translation"]
+    assert view == {"needed": False, "lines": 0, "translated": 0, "missing": 0, "blocks_export": False}
+
+
+def test_the_subtitle_language_is_a_setting(client, db):
+    alice = _user(db, "subslang")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "subslang")
+    body = {"export": {"subtitle_language": "source"}}
+    saved = client.patch(f"/projects/{row.id}", json=body, headers=auth).json()
+    assert saved["export"]["subtitle_language"] == "source"
+    bad = {"export": {"subtitle_language": "fr"}}
+    assert client.patch(f"/projects/{row.id}", json=bad, headers=auth).status_code == 422

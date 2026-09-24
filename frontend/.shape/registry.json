@@ -10,7 +10,8 @@
     "export_all": 0,
     "import_video": 0,
     "suggest": 0,
-    "transcribe": 0
+    "transcribe": 0,
+    "translate": 0
   },
   "output_kinds": {
     "reel": 0,

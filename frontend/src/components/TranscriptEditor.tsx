@@ -1,7 +1,9 @@
 "use client";
 
 /**
- * Correct transcript text before asking the model for suggestions.
+ * Correct transcript text before asking the model for suggestions — or, for a
+ * video not in Mongolian, correct the Mongolian translation its subtitles
+ * will carry.
  *
  * The video sits beside the lines, because correcting a transcript is a
  * listening job. It used to live on a different tab: the producer read a line
@@ -17,14 +19,27 @@
  *
  * Only changed lines are sent. Posting the whole table would make one stale
  * tab overwrite corrections another made.
+ *
+ * The same table does both jobs, because both are the same listening job. In
+ * translation mode what was said stays on screen above each line, read-only:
+ * a translation is checked against the words, and a correction to the words
+ * belongs on the other tab, where it clears the translation it invalidates.
  */
 
 import { useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { timecode } from "@/lib/format";
-import type { Segment } from "@/lib/types";
+import type { Segment, SourceLanguage, TranslationStatus } from "@/lib/types";
 import { Alert, Badge, Button, TAP } from "@/components/ui";
+
+type Column = "text" | "translation";
+
+/** The words a line currently holds in the column being edited. A line with
+ *  no translation yet reads as empty, so typing one counts as a change. */
+function current(segment: Segment, field: Column): string {
+  return field === "translation" ? (segment.translation ?? "") : segment.text;
+}
 
 export function TranscriptEditor({
   projectId,
@@ -32,6 +47,9 @@ export function TranscriptEditor({
   timingsEstimated,
   sourceUrl,
   onSaved,
+  field = "text",
+  language,
+  translation,
 }: {
   projectId: string;
   segments: Segment[];
@@ -40,18 +58,33 @@ export function TranscriptEditor({
    *  which case the editor is the plain list it always was. */
   sourceUrl?: string | null;
   onSaved: () => void;
+  /** Which words are being corrected: what was said, or its translation. */
+  field?: Column;
+  /** What was said is in this language — set on the lines so a browser
+   *  spell-checks English as English. */
+  language: SourceLanguage;
+  /** The server's count. Absent reads as "nothing to translate". */
+  translation?: TranslationStatus;
 }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // How many corrected lines lost their translation on the last save — said
+  // after it, because until the next translation run those lines are holes.
+  const [cleared, setCleared] = useState(0);
   const [playing, setPlaying] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  const translating = field === "translation";
+
   const changed = useMemo(
-    () => segments.filter((s) => edits[s.id] !== undefined && edits[s.id] !== s.text),
-    [segments, edits],
+    () => segments.filter((s) => edits[s.id] !== undefined && edits[s.id] !== current(s, field)),
+    [segments, edits, field],
   );
+  // Said BEFORE the save: correcting what was said clears that line's
+  // translation, because it translated words that are no longer there.
+  const willClear = translating ? 0 : changed.filter((s) => s.translation).length;
 
   function playFrom(segment: Segment) {
     const video = videoRef.current;
@@ -73,12 +106,15 @@ export function TranscriptEditor({
     setSaving(true);
     setError(null);
     try {
-      await api.updateTranscript(
+      const result = await api.updateTranscript(
         projectId,
-        changed.map((s) => ({ id: s.id, text: edits[s.id] })),
+        changed.map((s) =>
+          translating ? { id: s.id, translation: edits[s.id] } : { id: s.id, text: edits[s.id] },
+        ),
       );
       setEdits({});
       setSaved(true);
+      setCleared(result.translations_cleared);
       onSaved();
     } catch (err) {
       setError(errorMessage(err));
@@ -91,9 +127,10 @@ export function TranscriptEditor({
     <div className="overflow-hidden rounded-lg border border-rule">
       <ul className="max-h-[34rem] divide-y divide-rule-soft overflow-y-auto">
         {segments.map((segment) => {
-          const value = edits[segment.id] ?? segment.text;
-          const isChanged = value !== segment.text;
+          const value = edits[segment.id] ?? current(segment, field);
+          const isChanged = value !== current(segment, field);
           const isPlaying = playing === segment.id;
+          const isMissing = translating && !value.trim() && !!segment.text.trim();
           return (
             <li
               key={segment.id}
@@ -108,20 +145,38 @@ export function TranscriptEditor({
                 onClick={() => playFrom(segment)}
                 disabled={!sourceUrl}
                 aria-label={`${timecode(segment.start)}-аас тоглуулах`}
-                className={`tabular ${TAP} w-16 shrink-0 rounded px-1 pt-1.5 text-left font-mono text-[11px] transition-colors ${
+                className={`tabular ${TAP} w-16 shrink-0 self-start rounded px-1 pt-1.5 text-left font-mono text-[11px] transition-colors ${
                   isPlaying ? "text-accent" : "text-ink-3"
                 } ${sourceUrl ? "hover:bg-surface-2 hover:text-ink-2" : "cursor-default"}`}
               >
                 {timecode(segment.start)}
               </button>
-              <textarea
-                value={value}
-                rows={1}
-                onChange={(e) => setEdits((prev) => ({ ...prev, [segment.id]: e.target.value }))}
-                className={`${TAP} w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink ${
-                  isChanged ? "border-warn/60" : "border-transparent hover:border-rule"
-                }`}
-              />
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                {translating && (
+                  <p lang={language} className="px-2 pt-1.5 text-[13px] text-ink-3">
+                    {segment.text}
+                  </p>
+                )}
+                {/* Grows to its words where the browser can: a translation
+                    is checked by reading all of it, and one row of a phone's
+                    width shows half a sentence. Elsewhere it is the one row
+                    it always was, with the drag handle. */}
+                <textarea
+                  value={value}
+                  rows={1}
+                  lang={translating ? "mn" : language}
+                  placeholder={isMissing ? "Орчуулагдаагүй" : undefined}
+                  aria-label={`${timecode(segment.start)} мөрийн ${translating ? "орчуулга" : "текст"}`}
+                  onChange={(e) => setEdits((prev) => ({ ...prev, [segment.id]: e.target.value }))}
+                  className={`${TAP} field-sizing-content w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink placeholder:text-warn ${
+                    isChanged
+                      ? "border-warn/60"
+                      : isMissing
+                        ? "border-dashed border-warn/60"
+                        : "border-transparent hover:border-rule"
+                  }`}
+                />
+              </div>
             </li>
           );
         })}
@@ -133,11 +188,18 @@ export function TranscriptEditor({
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <h3 className="font-display text-base font-semibold">Хадмал текст</h3>
-          <span className="tabular text-xs text-ink-3">{segments.length} мөр</span>
+          <h3 className="font-display text-base font-semibold">
+            {translating ? "Монгол орчуулга" : "Хадмал текст"}
+          </h3>
+          <span className="tabular text-xs text-ink-3">
+            {translating && translation?.missing
+              ? `${translation.missing} мөр орчуулагдаагүй`
+              : `${segments.length} мөр`}
+          </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {changed.length > 0 && <Badge tone="warn">{changed.length} мөр өөрчлөгдсөн</Badge>}
+          {willClear > 0 && <Badge tone="warn">{willClear} мөрийн орчуулга арилна</Badge>}
           {saved && changed.length === 0 && <Badge tone="fit">✓ Хадгалагдсан</Badge>}
           <Button
             tone="primary"
@@ -157,6 +219,15 @@ export function TranscriptEditor({
         <Alert tone="warn">
           Зарим мөрийн доторх өгүүлбэрийн хуваарь ойролцоо тооцоологдсон. Хэсгийн эхлэл,
           төгсгөл нь харин яг таарна.
+        </Alert>
+      )}
+
+      {/* After the save, not only before it: until the next translation run
+          these lines would go out as holes, and the export refuses them. */}
+      {cleared > 0 && changed.length === 0 && (
+        <Alert tone="warn">
+          Засварласан {cleared} мөрийн орчуулга арилсан — хуучин үгийг орчуулсан байсан.
+          «Орчуулга» алхмаас үлдсэнийг орчуулна уу.
         </Alert>
       )}
 

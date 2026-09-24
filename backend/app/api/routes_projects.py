@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
 from app.jobs import queue
+from app.languages import needs_translation, translation_view
 from app.models import Project
 from app.schemas import (
     CreateProjectIn,
@@ -34,6 +35,7 @@ from app.schemas import (
     SelectRangesIn,
     SubtitleTemplateIn,
     SuggestIn,
+    TranslateIn,
     UpdateProjectIn,
     UpdateTranscriptIn,
     UploadCompleteOut,
@@ -91,7 +93,7 @@ def create_project(
     _require_r2()
     settings = get_settings()
 
-    project = Project(id=uuid.uuid4().hex, name=body.name)
+    project = Project(id=uuid.uuid4().hex, name=body.name, language=body.language)
     row = save(db, project, owner_id=principal.id)
 
     # Derived from the project id, which never changes — a rename must not
@@ -179,7 +181,8 @@ def get_project(
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
-    data = to_domain(row).model_dump(mode="json")
+    project = to_domain(row)
+    data = project.model_dump(mode="json")
     # Signed, short-lived, and regenerated on every read — a URL embedded in
     # a page the user leaves open would otherwise expire silently mid-session.
     data["media"] = {
@@ -207,6 +210,8 @@ def get_project(
         "shorts_default": shorts_default,
         "youtube_default": youtube_default,
     }
+    # The export guard's verdict, read by the page rather than re-derived.
+    data["translation"] = translation_view(project)
     transcript = (data.get("transcript") or {}).get("full_text") or ""
     data["spend"] = spend.view(
         db,
@@ -239,6 +244,8 @@ def update_project(
 
     if body.name is not None:
         project.name = body.name
+    if body.language is not None:
+        project.language = body.language
     for section, target in (
         (body.export, project.export),
         (body.subtitle_style, project.subtitle_style),
@@ -275,13 +282,30 @@ def update_transcript(
     if project.transcript is None:
         raise HTTPException(status_code=400, detail="Энэ төсөлд транскрипт хараахан алга.")
 
-    edits = {e.id: e.text for e in body.segments}
-    changed = 0
+    edits = {e.id: e for e in body.segments}
+    changed = cleared = 0
     for segment in project.transcript.segments:
-        new_text = edits.get(segment.id)
-        if new_text is not None and new_text != segment.text:
-            segment.text = new_text
-            changed += 1
+        edit = edits.get(segment.id)
+        if edit is None:
+            continue
+        touched = False
+        if edit.text is not None and edit.text != segment.text:
+            segment.text = edit.text
+            touched = True
+            # A translation of the words that USED to be here is a subtitle
+            # that says something nobody said. Cleared rather than kept, so
+            # the line shows as untranslated and the next run — which sends
+            # only untranslated lines — fixes exactly it. Unless this same
+            # edit gave the line a new translation, which then stands.
+            if segment.translation and edit.translation is None:
+                segment.translation = None
+                cleared += 1
+        if edit.translation is not None:
+            new = edit.translation.strip() or None
+            if new != segment.translation:
+                segment.translation = new
+                touched = True
+        changed += touched
 
     project.transcript.full_text = " ".join(s.text for s in project.transcript.segments if s.text)
     save(db, project)
@@ -289,7 +313,7 @@ def update_transcript(
     # An id the client sent that matched nothing is named rather than
     # silently dropped: it usually means the client is holding a stale copy.
     unknown = sorted(edits.keys() - {s.id for s in project.transcript.segments})
-    return {"updated": changed, "unknown_ids": unknown}
+    return {"updated": changed, "unknown_ids": unknown, "translations_cleared": cleared}
 
 
 @router.post("/{project_id}/select")
@@ -373,6 +397,45 @@ def _require_provider(db: Session, capability: str) -> None:
         raise HTTPException(status_code=503, detail=reason)
 
 
+def _require_subtitles_ready(project: Project) -> None:
+    """Refuse a render whose Mongolian subtitles would have holes in them.
+
+    Checked before the render rather than discovered in it: an export is
+    minutes of encoding, and the lines a translation run missed would come out
+    in the source language, mid-video, with nothing to say why. The producer
+    has two ways forward and the message names both.
+    """
+    view = translation_view(project)
+    if view["blocks_export"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{view['missing']} мөр орчуулагдаагүй байна. Эхлээд монгол руу орчуулна уу, "
+                "эсвэл хадмалыг эх хэлээр нь гаргана уу."
+            ),
+        )
+
+
+def _require_recogniser_for(db: Session, language: str) -> None:
+    """Refuse a transcription the recogniser for THIS video cannot do.
+
+    The readiness check used to read the operator's selected recogniser only.
+    For an English video that is the wrong question: it is heard by ElevenLabs
+    Scribe whatever is selected (stt.factory.for_language), so a missing
+    Scribe key must stop it here — not after the video has been downloaded
+    and the job has failed with a message about a recogniser nobody chose.
+    """
+    from app import provider_settings
+    from app.stt.factory import for_language
+
+    settings = for_language(provider_settings.effective(db), language)
+    reason = providers.blocker(settings, providers.STT)
+    if reason and needs_translation(language):
+        reason = f"Монголоос бусад хэлний яриаг зөвхөн ElevenLabs Scribe танина. {reason}"
+    if reason:
+        raise HTTPException(status_code=503, detail=reason)
+
+
 @router.post("/{project_id}/transcribe")
 def transcribe(
     project_id: str,
@@ -382,10 +445,38 @@ def transcribe(
     project = _require_project(db, project_id, principal)
     if project.video is None:
         raise HTTPException(status_code=400, detail="Эхлээд видео оруулна уу.")
-    _require_provider(db, providers.STT)
+    _require_recogniser_for(db, project.language)
     return {
         "job_id": queue.enqueue(
             "transcribe", project_id=project_id, dedupe_key=f"transcribe:{project_id}"
+        )
+    }
+
+
+@router.post("/{project_id}/translate")
+def translate(
+    project_id: str,
+    body: TranslateIn | None = None,
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Translate a non-Mongolian transcript into Mongolian subtitles.
+
+    Refused for a Mongolian video rather than run as a no-op: a paid call
+    whose answer is the text it was given is a bill for nothing.
+    """
+    project = _require_project(db, project_id, principal)
+    if not needs_translation(project.language):
+        raise HTTPException(status_code=400, detail="Энэ видео монгол хэлтэй — орчуулах шаардлагагүй.")
+    if project.transcript is None or not project.transcript.segments:
+        raise HTTPException(status_code=400, detail="Эхлээд яриаг таниулна уу.")
+    _require_provider(db, providers.LLM)
+    return {
+        "job_id": queue.enqueue(
+            "translate",
+            project_id=project_id,
+            payload={"force": bool(body and body.force)},
+            dedupe_key=f"translate:{project_id}",
         )
     }
 
@@ -562,6 +653,7 @@ def export_all(
     project = _require_project(db, project_id, principal)
     if project.suggestions is None or not (project.suggestions.shorts or project.suggestions.youtube):
         raise HTTPException(status_code=400, detail="Экспортлох санал алга.")
+    _require_subtitles_ready(project)
 
     pick: dict = {}
     if body and body.shorts is not None:
@@ -612,6 +704,7 @@ def export_timeline(
     project = _require_project(db, project_id, principal)
     if not project.clips:
         raise HTTPException(status_code=400, detail="Timeline дээр клип алга.")
+    _require_subtitles_ready(project)
     # No dedupe key: re-exporting the same timeline after changing render
     # settings is a normal thing to want, unlike re-running a paid stage.
     return {"job_id": queue.enqueue("export", project_id=project_id)}

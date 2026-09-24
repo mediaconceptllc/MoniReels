@@ -14,7 +14,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
-import { duration } from "@/lib/format";
+import { duration, LANGUAGE_LABELS } from "@/lib/format";
 import type { Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
 import {
@@ -30,6 +30,7 @@ import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
 import { JobHistory } from "@/components/JobHistory";
 import { SuggestCounts, type Counts } from "@/components/SuggestCounts";
 import { JobProgress } from "@/components/JobProgress";
+import { LanguagePanel } from "@/components/LanguagePanel";
 import { OutputList } from "@/components/OutputList";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Shell } from "@/components/Shell";
@@ -49,6 +50,7 @@ export default function ProjectPage() {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Stage>("source");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmRedo, setConfirmRedo] = useState(false);
   // The producer's choice, or null for "the default". Kept across the refresh
   // every settled job triggers — a count chosen and then silently reset to
   // three by the page reloading itself would be a choice that did not stick.
@@ -85,6 +87,7 @@ export default function ProjectPage() {
       if (current !== "source") return current;
       if (outputs.length) return "outputs";
       if (project.suggestions?.shorts.length) return "suggestions";
+      if (project.translation.needed && project.translation.translated) return "translation";
       if (project.transcript?.segments.length) return "transcript";
       return "source";
     });
@@ -155,6 +158,20 @@ export default function ProjectPage() {
   const shorts = project.suggestions?.shorts.length ?? 0;
   const plans = project.suggestions?.youtube.length ?? 0;
 
+  // The server's counts and the export guard's own verdict. Worked out here
+  // instead, the page would disable a button the server accepts — or offer
+  // one it refuses — the first time either rule changed.
+  const translation = project.translation;
+  // A translation tab left open on a video since declared Mongolian has no
+  // cell to belong to; it falls back to the text it would have translated.
+  const view: Stage = tab === "translation" && !translation.needed ? "transcript" : tab;
+
+  // Said where the producer meets it: in the export's own cell and above the
+  // per-idea export on the suggestions tab. Both ways forward are named.
+  const exportBlocked = translation.blocks_export
+    ? `${translation.missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`
+    : null;
+
   // Every cell says what it HOLDS, in the producer's terms — and a stage that
   // cannot run yet says why in its own cell, rather than as a footnote under
   // a row of disabled buttons.
@@ -177,6 +194,24 @@ export default function ProjectPage() {
           ? "Дараагийн алхам"
           : "Видео бэлдэж дуустал",
     },
+    // Only for a video not in Mongolian. After the text it translates and
+    // before the ideas: a producer choosing clips reads them in Mongolian.
+    ...(translation.needed
+      ? [
+          {
+            key: "translation",
+            label: "Орчуулга",
+            state: !hasTranscript ? "blocked" : translation.missing ? "current" : "done",
+            detail: !hasTranscript
+              ? "Текст бэлдсэний дараа"
+              : translation.missing
+                ? `${translation.translated}/${translation.lines} мөр${
+                    translation.blocks_export ? "" : " · заавал биш"
+                  }`
+                : `${translation.lines} мөр монголоор`,
+          } satisfies StageDef,
+        ]
+      : []),
     {
       key: "suggestions",
       label: "Санал",
@@ -190,12 +225,18 @@ export default function ProjectPage() {
     {
       key: "outputs",
       label: "Бэлэн видео",
-      state: outputs.length ? "done" : hasSuggestions ? "current" : "blocked",
+      state: outputs.length
+        ? "done"
+        : hasSuggestions && !exportBlocked
+          ? "current"
+          : "blocked",
       detail: outputs.length
         ? `${outputs.length} файл`
-        : hasSuggestions
-          ? "Саналаас экспортлоно"
-          : "Саналын дараа",
+        : !hasSuggestions
+          ? "Саналын дараа"
+          : exportBlocked
+            ? "Орчуулга дуустал"
+            : "Саналаас экспортлоно",
     },
   ];
 
@@ -263,14 +304,39 @@ export default function ProjectPage() {
           disabled: !hasTranscript || running,
           loading: busy,
         };
+      case "translation": {
+        // With nothing missing the only move left is starting OVER, which
+        // replaces hand-corrected lines too — so that one asks first.
+        const redo = hasTranscript && translation.missing === 0;
+        const partial = translation.missing > 0 && translation.missing < translation.lines;
+        return {
+          label: redo
+            ? "Дахин орчуулах"
+            : partial
+              ? `Үлдсэн ${translation.missing} мөрийг орчуулах`
+              : "Монгол руу орчуулах",
+          note: !hasTranscript
+            ? "Эхлээд яриаг текст болгоно."
+            : redo
+              ? "Бүх мөрийг шинээр орчуулна — гараар зассан орчуулга ч солигдоно. Оролдлого тутам төлбөртэй."
+              : partial
+                ? "Зөвхөн орчуулагдаагүй мөрүүдийг. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
+                : "Үгчлэн биш, утгаар нь — мөр бүрийг уншиж амжих урттай. Оролдлого тутам төлбөртэй.",
+          onRun: redo
+            ? () => setConfirmRedo(true)
+            : () => void run(() => api.translate(projectId)),
+          disabled: !hasTranscript || !translation.lines || running,
+          loading: busy,
+        };
+      }
       case "outputs":
         return {
           label: "Бүгдийг экспортлох",
-          note: hasSuggestions
-            ? "Санал таб дээрээс тус тусад нь ч экспортлож болно."
-            : "Санал боловсруулсны дараа экспортлоно.",
+          note: !hasSuggestions
+            ? "Санал боловсруулсны дараа экспортлоно."
+            : (exportBlocked ?? "Санал таб дээрээс тус тусад нь ч экспортлож болно."),
           onRun: () => void run(() => api.exportAll(projectId)),
-          disabled: !hasSuggestions || running,
+          disabled: !hasSuggestions || !!exportBlocked || running,
           loading: busy,
         };
       case "source":
@@ -279,12 +345,15 @@ export default function ProjectPage() {
         // nothing at all.
         if (!hasVideo) return undefined;
         if (!hasTranscript) return actionFor("transcript");
+        // Only when the export would need it: a producer who chose
+        // subtitles in the spoken language is not steered into a paid run.
+        if (exportBlocked) return actionFor("translation");
         if (!hasSuggestions) return actionFor("suggestions");
         return actionFor("outputs");
     }
   }
 
-  const action = actionFor(tab);
+  const action = actionFor(view);
 
   return (
     <Shell>
@@ -296,6 +365,7 @@ export default function ProjectPage() {
               {hasVideo
                 ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}`
                 : "Видео боловсруулагдаж байна…"}
+              {translation.needed ? ` · ${LANGUAGE_LABELS[project.language]} яриа` : ""}
             </p>
           </div>
           <Button tone="danger" onClick={() => setConfirmDelete(true)}>
@@ -310,7 +380,7 @@ export default function ProjectPage() {
 
         <PipelineRail
           stages={STAGES}
-          active={tab}
+          active={view}
           onSelect={setTab}
           action={action}
         >
@@ -325,7 +395,7 @@ export default function ProjectPage() {
           ) : undefined}
         </PipelineRail>
 
-        {tab === "source" && (
+        {view === "source" && (
           <div className="flex flex-col gap-6">
             {project.media.source_url ? (
               <video
@@ -346,6 +416,20 @@ export default function ProjectPage() {
               <ExportSettingsPanel
                 projectId={projectId}
                 settings={project.export}
+                sourceLanguage={translation.needed ? project.language : null}
+                onSaved={() => void refresh()}
+              />
+            </Card>
+            <Card className="p-5">
+              <h3 className="font-display text-base font-semibold">Видеоны хэл</h3>
+              <p className="mt-1 mb-4 text-sm text-ink-3">
+                Яриаг аль хэлээр танихыг шийднэ. Монголоос бусад хэлтэй видеог монгол руу
+                орчуулж, хадмалыг монголоор гаргана.
+              </p>
+              <LanguagePanel
+                projectId={projectId}
+                language={project.language}
+                hasTranscript={hasTranscript}
                 onSaved={() => void refresh()}
               />
             </Card>
@@ -363,13 +447,15 @@ export default function ProjectPage() {
           </div>
         )}
 
-        {tab === "transcript" &&
+        {view === "transcript" &&
           (hasTranscript ? (
             <TranscriptEditor
               projectId={projectId}
               segments={project.transcript!.segments}
               timingsEstimated={project.transcript!.timings_estimated}
               sourceUrl={project.media.source_url}
+              language={project.language}
+              translation={translation}
               onSaved={() => void refresh()}
             />
           ) : (
@@ -379,12 +465,32 @@ export default function ProjectPage() {
             />
           ))}
 
-        {tab === "suggestions" &&
+        {view === "translation" &&
+          (hasTranscript ? (
+            <TranscriptEditor
+              field="translation"
+              projectId={projectId}
+              segments={project.transcript!.segments}
+              timingsEstimated={project.transcript!.timings_estimated}
+              sourceUrl={project.media.source_url}
+              language={project.language}
+              translation={translation}
+              onSaved={() => void refresh()}
+            />
+          ) : (
+            <Empty
+              title="Орчуулах текст хараахан алга"
+              hint="Эхлээд «Яриаг текст болгох» дарна."
+            />
+          ))}
+
+        {view === "suggestions" &&
           (hasSuggestions ? (
             <SuggestionList
               suggestions={project.suggestions!}
               sourceUrl={project.media.source_url}
               busy={busy || !!activeJob}
+              blocked={exportBlocked}
               onExport={(pick) => void run(() => api.exportAll(projectId, pick))}
             />
           ) : (
@@ -394,11 +500,11 @@ export default function ProjectPage() {
             />
           ))}
 
-        {tab === "outputs" && (
+        {view === "outputs" && (
           <OutputList projectId={projectId} outputs={outputs} onChanged={() => void refresh()} />
         )}
 
-        {project.transcript?.timings_estimated && tab === "source" && (
+        {project.transcript?.timings_estimated && view === "source" && (
           <Badge tone="warn">Зарим хугацаа ойролцоо</Badge>
         )}
 
@@ -412,6 +518,21 @@ export default function ProjectPage() {
 
         {/* Counted, not implied: a project is hours of work and real money,
             and `window.confirm` could say neither. */}
+        {/* Asked, because nothing records which lines were corrected by hand:
+            a fresh run replaces them all, and there is no undo. */}
+        {confirmRedo && (
+          <ConfirmDialog
+            title="Бүх мөрийг дахин орчуулах уу?"
+            lose={[`${translation.translated} мөрийн одоогийн орчуулга — гараар зассан нь ч мөн`]}
+            confirmLabel="Дахин орчуулах"
+            onConfirm={() => {
+              setConfirmRedo(false);
+              void run(() => api.translate(projectId, true));
+            }}
+            onCancel={() => setConfirmRedo(false)}
+          />
+        )}
+
         {confirmDelete && (
           <ConfirmDialog
             title={`«${project.name}» төслийг бүхэлд нь устгах уу?`}

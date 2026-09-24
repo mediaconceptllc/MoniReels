@@ -13,12 +13,8 @@
 
 import type {
   BrandAsset,
-  Capability,
-  ProviderReadiness,
-  SubtitleFonts,
-  SubtitleStyle,
-  SubtitleTemplate,
   BrandSettings,
+  Capability,
   CreateProjectResponse,
   Job,
   Me,
@@ -26,9 +22,14 @@ import type {
   Project,
   ProjectDocument,
   ProjectSummary,
+  ProviderReadiness,
   ProviderSettings,
   ProviderSettingsPatch,
   QueueStatus,
+  SourceLanguage,
+  SubtitleFonts,
+  SubtitleStyle,
+  SubtitleTemplate,
   TokenResponse,
 } from "./types";
 
@@ -157,10 +158,10 @@ export const api = {
 
   getProject: (id: string) => request<Project>(`/projects/${id}`),
 
-  createProject: (name: string, filename: string, size_bytes: number) =>
+  createProject: (name: string, filename: string, size_bytes: number, language: SourceLanguage) =>
     request<CreateProjectResponse>("/projects", {
       method: "POST",
-      body: JSON.stringify({ name, filename, size_bytes }),
+      body: JSON.stringify({ name, filename, size_bytes, language }),
     }),
 
   uploadComplete: (id: string) =>
@@ -179,11 +180,14 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ deleted: boolean }>(`/projects/${id}`, { method: "DELETE" }),
 
-  updateTranscript: (id: string, segments: { id: string; text: string }[]) =>
-    request<{ updated: number; unknown_ids: string[] }>(`/projects/${id}/transcript`, {
-      method: "PUT",
-      body: JSON.stringify({ segments }),
-    }),
+  /** Each line sends `text`, `translation`, or both. Correcting `text`
+   *  clears that line's translation unless the same edit gives a new one —
+   *  the response counts how many were cleared. */
+  updateTranscript: (id: string, segments: { id: string; text?: string; translation?: string }[]) =>
+    request<{ updated: number; unknown_ids: string[]; translations_cleared: number }>(
+      `/projects/${id}/transcript`,
+      { method: "PUT", body: JSON.stringify({ segments }) },
+    ),
 
   selectRanges: (id: string, ranges: [number, number][]) =>
     request<{ clips: number }>(`/projects/${id}/select`, {
@@ -194,6 +198,16 @@ export const api = {
   // -- pipeline -----------------------------------------------------------
   transcribe: (id: string) =>
     request<{ job_id: string }>(`/projects/${id}/transcribe`, { method: "POST" }),
+
+  /** Translate what was said into Mongolian subtitles. Without `force` only
+   *  lines that have no translation are sent — which is also how a run that
+   *  failed part-way is finished without paying for the rest again. `force`
+   *  sends every line and replaces hand edits. */
+  translate: (id: string, force = false) =>
+    request<{ job_id: string }>(`/projects/${id}/translate`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
 
   /** Asks for `counts` ideas; omit them and the server applies what the
    *  button always meant. A count the video cannot hold is refused with 422,

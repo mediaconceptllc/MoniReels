@@ -40,6 +40,7 @@ LANE_LIMITS = {
 KINDS = (
     "import_video",
     "transcribe",
+    "translate",
     "suggest",
     "export_all",
     "export",
@@ -48,6 +49,8 @@ KINDS = (
 PRIORITY = {
     "import_video": QUICK,
     "suggest": MINUTES,
+    # A few LLM calls, like suggest — minutes, not the tens a render takes.
+    "translate": MINUTES,
     "transcribe": VERY_LONG,
     "export": VERY_LONG,
     "export_all": VERY_LONG,
@@ -57,6 +60,7 @@ LANES = {
     "import_video": LANE_HEAVY,
     "transcribe": LANE_METERED,
     "suggest": LANE_METERED,
+    "translate": LANE_METERED,
     "export": LANE_HEAVY,
     "export_all": LANE_HEAVY,
 }
@@ -64,7 +68,7 @@ LANES = {
 # Kinds where one attempt is one bill. A retry is a second charge for work
 # the first attempt may already have completed remotely, so these fail
 # visibly and let a human decide.
-NO_RETRY = frozenset({"transcribe", "suggest"})
+NO_RETRY = frozenset({"transcribe", "translate", "suggest"})
 
 MAX_ATTEMPTS = 3
 

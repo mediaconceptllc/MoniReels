@@ -13,7 +13,15 @@ from sqlalchemy import select
 
 from app.dbmodels import Job, Project, User
 from app.jobs import queue
-from app.jobs.kinds import LANE_HEAVY, LANE_METERED, lane_of, no_retry, priority_of, validate_registry
+from app.jobs.kinds import (
+    LANE_HEAVY,
+    LANE_METERED,
+    LANES,
+    lane_of,
+    no_retry,
+    priority_of,
+    validate_registry,
+)
 from app.security import hash_password
 from tests.conftest import requires_db
 
@@ -57,6 +65,16 @@ def test_paid_kinds_are_not_retried():
     attempt may already have completed remotely."""
     assert no_retry("transcribe") and no_retry("suggest")
     assert not no_retry("export")
+
+
+def test_every_kind_in_the_metered_lane_is_not_retried():
+    """The rule, not a list. The metered lane exists for services that bill
+    per call, so a kind placed there and forgotten in NO_RETRY would retry —
+    and charge — up to MAX_ATTEMPTS times. The list above was written by hand
+    and did not grow when `translate` was added."""
+    metered = {kind for kind, lane in LANES.items() if lane == LANE_METERED}
+    assert metered
+    assert [kind for kind in sorted(metered) if not no_retry(kind)] == []
 
 
 def test_enqueue_dedupes_live_jobs(db, project):

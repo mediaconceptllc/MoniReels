@@ -27,14 +27,17 @@ from app.ai import usage as llm_usage
 from app.ai.openrouter_client import build_client as build_llm_client
 from app.ai.schema import count_limits, default_counts
 from app.ai.suggest import generate_suggestions
+from app.ai.translate import translate_transcript
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
 from app.jobs import queue
 from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
+from app.languages import needs_translation, subtitle_segments
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
 from app.stt.factory import build_client as build_stt_client
+from app.stt.factory import for_language as stt_for_language
 from app.stt.pipeline import separation_available, transcribe_audio
 from app.subtitle.srt import segments_to_srt
 from app.utils.logging import get_logger, setup_logging
@@ -183,6 +186,8 @@ async def handle_transcribe(handle: JobHandle) -> dict:
         else:
             await extract_audio_16k_mono_wav(binaries.ffmpeg, local, audio_path)
 
+    # Heard in the language it is spoken in — see stt.factory.for_language.
+    settings = stt_for_language(settings, project.language)
     client = build_stt_client(settings)
     try:
         async def on_progress(p: float) -> None:
@@ -285,6 +290,60 @@ async def handle_suggest(handle: JobHandle) -> dict:
     }
 
 
+async def handle_translate(handle: JobHandle) -> dict:
+    from app import provider_settings
+
+    with session_scope() as db:
+        settings = provider_settings.effective(db)
+        project = load(db, _project_id(handle))
+    if not needs_translation(project.language):
+        raise RuntimeError("This video is already in Mongolian")
+    if project.transcript is None or not project.transcript.segments:
+        raise RuntimeError("Transcribe the video before translating it")
+    force = (handle.payload or {}).get("force") is True
+    read = project.transcript
+
+    async def on_progress(p: float) -> None:
+        await handle.set_progress(0.05 + p * 0.9, stage="translating", message="Translating the transcript")
+
+    await handle.set_progress(0.05, stage="translating", message="Translating the transcript")
+    client = build_llm_client(settings)
+    try:
+        translated, report = await translate_transcript(
+            client, read, force=force, on_progress=on_progress
+        )
+    finally:
+        await client.aclose()
+
+    handle.raise_if_cancelled()
+
+    # Folded onto the transcript as it is NOW, not as it was read. A run takes
+    # minutes, and in that time the producer may correct an English line
+    # (which clears its translation) or hand-edit a Mongolian one. Writing back
+    # the copy read at the start would silently undo both. So a line takes the
+    # new translation only if neither its text nor its translation moved while
+    # this ran; one that did is kept as the producer left it, and counted.
+    before = {s.id: (s.text, s.translation) for s in read.segments}
+    fresh = {s.id: s for s in translated.segments}
+    applied = kept = 0
+    with session_scope() as db:
+        project = load(db, _project_id(handle))
+        if project.transcript is None:
+            raise RuntimeError("The transcript was removed while it was being translated")
+        for seg in project.transcript.segments:
+            new = fresh.get(seg.id)
+            if new is None or not new.translation or new.translation == seg.translation:
+                continue
+            if (seg.text, seg.translation) != before.get(seg.id):
+                kept += 1
+                continue
+            seg.translation = new.translation
+            applied += 1
+        save(db, project)
+
+    return {**report.to_dict(), "applied": applied, "kept_edits": kept}
+
+
 async def handle_export_all(handle: JobHandle) -> dict:
     return await _render(handle, all_ideas=True)
 
@@ -317,7 +376,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
 
     out_dir = workdir / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    segments = project.transcript.segments if project.transcript else None
+    segments, subtitle_fallback = subtitle_segments(project)
 
     # The mark is global and the choice is per project, so both have to be
     # true before a byte is fetched. A logo the project turned off must not
@@ -441,12 +500,17 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     # producer picked three and has to be able to see they got two.
     if skipped:
         out["skipped"] = skipped
+    # Same rule for a subtitle line that went out in the source language
+    # because its translation was cleared after the export was queued.
+    if subtitle_fallback:
+        out["subtitle_fallback_lines"] = subtitle_fallback
     return out
 
 
 HANDLERS = {
     "import_video": handle_import_video,
     "transcribe": handle_transcribe,
+    "translate": handle_translate,
     "suggest": handle_suggest,
     "export_all": handle_export_all,
     "export": handle_export,

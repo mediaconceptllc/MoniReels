@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from app.ai.schema import MAX_SHORT_COUNT, MAX_YOUTUBE_COUNT
 
@@ -83,10 +83,19 @@ class CreateUserIn(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: The languages a video can be declared as. Mirrors
+#: app.languages.SOURCE_LANGUAGES; a Literal because a request schema has to
+#: be a type, and a test holds the two to each other.
+SourceLanguage = Literal["mn", "en"]
+
+
 class CreateProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=NAME_MAX)
     filename: str = Field(min_length=1, max_length=NAME_MAX)
     size_bytes: int = Field(ge=1, le=UPLOAD_MAX_BYTES)
+    #: What is SPOKEN in the video. Omitted means Mongolian, which is what
+    #: every client before this field sent without saying.
+    language: SourceLanguage = "mn"
 
     @field_validator("filename")
     @classmethod
@@ -129,6 +138,7 @@ class ExportSettingsIn(BaseModel):
     ) = None
     burn_subtitles: bool | None = None
     write_srt: bool | None = None
+    subtitle_language: Literal["mn", "source"] | None = None
 
 
 class SubtitleStyleIn(BaseModel):
@@ -210,20 +220,36 @@ class UpdateProjectIn(BaseModel):
     a whole-document PUT lets one stale tab overwrite work it never saw."""
 
     name: str | None = Field(default=None, min_length=1, max_length=NAME_MAX)
+    #: Correctable, because it is chosen at upload and a wrong one decodes the
+    #: whole video as the wrong language. Changing it does not re-transcribe:
+    #: the page says to, since that is a paid run.
+    language: SourceLanguage | None = None
     export: ExportSettingsIn | None = None
     subtitle_style: SubtitleStyleIn | None = None
     transition: TransitionIn | None = None
 
 
 class SegmentEditIn(BaseModel):
-    """One transcript line the user corrected before asking for suggestions.
+    """One transcript line the user corrected.
 
-    Only `text` is editable: timings come from our own cut boundaries and are
+    Only the words are editable — what was said (`text`) and its Mongolian
+    subtitle (`translation`). Timings come from our own cut boundaries and are
     exact, so letting a client rewrite them can only make them wrong.
+
+    Either field may be omitted, not both: a client from before translation
+    existed sends `text` alone and keeps working. An empty `translation`
+    clears it, which queues the line for the next translation run.
     """
 
     id: str = Field(min_length=1, max_length=64)
-    text: str = Field(max_length=5000)
+    text: str | None = Field(default=None, max_length=5000)
+    translation: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def _says_something(self) -> SegmentEditIn:
+        if self.text is None and self.translation is None:
+            raise ValueError("An edit needs `text`, `translation`, or both")
+        return self
 
 
 class UpdateTranscriptIn(BaseModel):
@@ -234,6 +260,16 @@ class SelectRangesIn(BaseModel):
     """Build a timeline from explicit ranges — the "cut it myself" path."""
 
     ranges: list[tuple[float, float]] = Field(min_length=1, max_length=200)
+
+
+class TranslateIn(BaseModel):
+    """Omitted, or `force: false`, translates only the lines that have no
+    translation — which is also how a run that failed part-way is finished
+    without paying for the lines that already came back. `force` sends every
+    line again, replacing the Mongolian text, hand edits included: the page
+    says so before the click."""
+
+    force: bool = False
 
 
 class SuggestIn(BaseModel):
