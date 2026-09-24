@@ -22,7 +22,7 @@ const LOGO_POSITIONS: [LogoPosition, string][] = [
   ["bottom-right", "Баруун доод"],
   ["bottom-left", "Зүүн доод"],
 ];
-import { Alert, Badge, Button, Field } from "@/components/ui";
+import { Alert, Badge, Button, Checkbox, Field, Select, TAP } from "@/components/ui";
 
 const PRESETS = ["veryfast", "faster", "fast", "medium", "slow"] as const;
 
@@ -75,29 +75,27 @@ export function ExportSettingsPanel({
     <div className="flex flex-col gap-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Чиглэл" hint="Reels, Shorts бол босоо.">
-          <select
+          <Select
             value={draft.orientation}
             onChange={(e) => update("orientation", e.target.value as ExportSettings["orientation"])}
-            className="rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink"
           >
             <option value="portrait">Босоо (1080×1920)</option>
             <option value="landscape">Хэвтээ (1920×1080)</option>
-          </select>
+          </Select>
         </Field>
 
         {draft.orientation === "portrait" && (
           <Field label="Хажуугийн зай" hint="Хэвтээ кадрыг босоо хүрээнд яаж багтаах вэ.">
-            <select
+            <Select
               value={draft.portrait_fill}
               onChange={(e) =>
                 update("portrait_fill", e.target.value as ExportSettings["portrait_fill"])
               }
-              className="rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink"
             >
               <option value="blur">Бүдгэрүүлэх</option>
               <option value="crop">Тайрах</option>
               <option value="pad">Хар зай</option>
-            </select>
+            </Select>
           </Field>
         )}
 
@@ -111,7 +109,7 @@ export function ExportSettingsPanel({
             max={32}
             value={draft.crf}
             onChange={(e) => update("crf", Number(e.target.value))}
-            className="accent-[var(--accent)]"
+            className={`${TAP} w-full accent-[var(--accent)]`}
           />
         </Field>
 
@@ -119,61 +117,35 @@ export function ExportSettingsPanel({
           label="Кодлолтын хурд"
           hint="Удаан нь чанарыг НЭМЭХГҮЙ — ижил чанарыг цөөн битээр багтаана. Сервер дээр GPU байхгүй тул хугацаанд шууд нөлөөлнө."
         >
-          <select
-            value={draft.preset}
-            onChange={(e) => update("preset", e.target.value)}
-            className="rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink"
-          >
+          <Select value={draft.preset} onChange={(e) => update("preset", e.target.value)}>
             {PRESETS.map((preset) => (
               <option key={preset} value={preset}>
                 {PRESET_LABELS[preset]}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
       </div>
 
-      <div className="flex flex-wrap gap-4">
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            checked={draft.burn_subtitles}
-            onChange={(e) => update("burn_subtitles", e.target.checked)}
-          />
+      <div className="flex flex-wrap gap-x-5 gap-y-1">
+        <Checkbox checked={draft.burn_subtitles} onChange={(on) => update("burn_subtitles", on)}>
           Хадмалыг видеон дээр шатаах
-        </label>
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            checked={draft.write_srt}
-            onChange={(e) => update("write_srt", e.target.checked)}
-          />
+        </Checkbox>
+        <Checkbox checked={draft.write_srt} onChange={(on) => update("write_srt", on)}>
           .srt файл тусад нь гаргах
-        </label>
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            checked={draft.logo.enabled}
-            onChange={(e) => update("logo", { ...draft.logo, enabled: e.target.checked })}
-          />
+        </Checkbox>
+        <Checkbox
+          checked={draft.logo.enabled}
+          onChange={(on) => update("logo", { ...draft.logo, enabled: on })}
+        >
           Лого тавих
-        </label>
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            checked={draft.use_intro}
-            onChange={(e) => update("use_intro", e.target.checked)}
-          />
+        </Checkbox>
+        <Checkbox checked={draft.use_intro} onChange={(on) => update("use_intro", on)}>
           Эхлэлийн видео залгах
-        </label>
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            checked={draft.use_outro}
-            onChange={(e) => update("use_outro", e.target.checked)}
-          />
+        </Checkbox>
+        <Checkbox checked={draft.use_outro} onChange={(on) => update("use_outro", on)}>
           Төгсгөлийн видео залгах
-        </label>
+        </Checkbox>
       </div>
 
       {(draft.use_intro || draft.use_outro) && (
@@ -186,8 +158,7 @@ export function ExportSettingsPanel({
       {draft.logo.enabled && (
         <div className="grid gap-4 sm:grid-cols-3">
           <Field label="Логоны байрлал">
-            <select
-              className="rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink"
+            <Select
               value={draft.logo.position}
               onChange={(e) =>
                 update("logo", { ...draft.logo, position: e.target.value as LogoPosition })
@@ -198,7 +169,7 @@ export function ExportSettingsPanel({
                   {label}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label={`Өргөн — кадрын ${draft.logo.width_pct}%`}>
             <input
@@ -210,7 +181,7 @@ export function ExportSettingsPanel({
               onChange={(e) =>
                 update("logo", { ...draft.logo, width_pct: Number(e.target.value) })
               }
-              className="w-full"
+              className={`${TAP} w-full accent-[var(--accent)]`}
             />
           </Field>
           <Field label={`Тунгалаг — ${Math.round(draft.logo.opacity * 100)}%`}>
@@ -223,7 +194,7 @@ export function ExportSettingsPanel({
               onChange={(e) =>
                 update("logo", { ...draft.logo, opacity: Number(e.target.value) / 100 })
               }
-              className="w-full"
+              className={`${TAP} w-full accent-[var(--accent)]`}
             />
           </Field>
           <p className="text-xs text-ink-3 sm:col-span-3">

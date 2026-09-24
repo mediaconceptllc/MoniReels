@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { uploadToStorage } from "@/lib/upload";
 import type { BrandAsset, BrandSettings } from "@/lib/types";
-import { Alert, Button, Card, Spinner } from "@/components/ui";
+import { Alert, Button, Card, Loading, Skeleton } from "@/components/ui";
 
 /** What ffmpeg in this image can actually read.
  *
@@ -100,7 +100,21 @@ export function BrandAssetsCard() {
         )}
 
         {brand === null ? (
-          <Spinner />
+          // The three rows this card always has, at the geometry BrandRow
+          // draws them at: an 80px square, the text beside it, the buttons on
+          // the right. Nothing shifts when the real ones arrive.
+          <Loading className="flex flex-col divide-y divide-rule">
+            {ROWS.map(({ asset }) => (
+              <div key={asset} className="flex items-center gap-4 py-4 first:pt-0 last:pb-0">
+                <Skeleton className="h-20 w-20 shrink-0 rounded-md" />
+                <div className="flex min-w-48 flex-1 flex-col gap-2">
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-3 w-full max-w-sm" />
+                </div>
+                <Skeleton className="h-11 w-24 rounded-md" />
+              </div>
+            ))}
+          </Loading>
         ) : (
           <div className="flex flex-col divide-y divide-rule">
             {ROWS.map(({ asset, title, hint }) => (

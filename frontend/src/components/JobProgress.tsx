@@ -89,7 +89,6 @@ export function JobProgress({
         </span>
         <Button
           tone="quiet"
-          className="px-2 py-1 text-xs"
           onClick={() => void api.cancelJob(jobId).catch(() => undefined)}
         >
           Цуцлах

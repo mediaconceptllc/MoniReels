@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration } from "@/lib/format";
 import type { Output, Project } from "@/lib/types";
-import { Alert, Badge, Button, Card, Empty } from "@/components/ui";
+import { Alert, Badge, Button, Card, Empty, Loading, Skeleton } from "@/components/ui";
 import {
   PipelineRail,
   PipelineRailSkeleton,
@@ -108,12 +108,25 @@ export default function ProjectPage() {
   }
 
   if (authLoading || !user || (!project && !error)) {
-    // The rail's own placeholder, not a spinner alone on a blank page: this
-    // page reloads itself every time a job settles, and the layout used to
-    // vanish and come back on each one.
+    // The whole page's shape, not one box of it. What arrives here is a
+    // title, a rail and a panel, and a placeholder that only stands in for
+    // the rail still lets the other two appear as a jump.
     return (
       <Shell>
-        <PipelineRailSkeleton />
+        <div className="flex flex-col gap-6">
+          <Loading className="flex items-start justify-between gap-4">
+            <div className="flex flex-col gap-2">
+              <Skeleton className="h-8 w-64" />
+              <Skeleton className="h-4 w-40" />
+            </div>
+            <Skeleton className="h-11 w-32 rounded-md" />
+          </Loading>
+          <PipelineRailSkeleton />
+          <Loading className="flex flex-col gap-4">
+            <Skeleton className="aspect-video w-full max-w-3xl rounded-lg" />
+            <Skeleton className="h-40 rounded-lg" />
+          </Loading>
+        </div>
       </Shell>
     );
   }
@@ -231,7 +244,7 @@ export default function ProjectPage() {
 
   return (
     <Shell>
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-6 pb-20 sm:pb-0">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="font-display text-2xl font-semibold tracking-tight">{project.name}</h1>
@@ -241,7 +254,7 @@ export default function ProjectPage() {
                 : "Видео боловсруулагдаж байна…"}
             </p>
           </div>
-          <Button tone="danger" className="min-h-[44px]" onClick={() => setConfirmDelete(true)}>
+          <Button tone="danger" onClick={() => setConfirmDelete(true)}>
             Төсөл устгах
           </Button>
         </header>

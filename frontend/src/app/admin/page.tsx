@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
-import { Alert, Button, Card, Field, Spinner, TextInput } from "@/components/ui";
+import { Alert, Button, Card, Field, Loading, Skeleton, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
 import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
@@ -113,7 +113,19 @@ export default function AdminPage() {
   if (authLoading || user?.role !== "admin" || (!settings && !error)) {
     return (
       <Shell>
-        <Spinner />
+        <Loading className="flex flex-col gap-6">
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-4 w-full max-w-xl" />
+          </div>
+          {/* One block per card the page settles into: keys, capabilities,
+              brand assets. The heights are approximate — what has to match is
+              the COUNT and the order, so the operator's eye is already on the
+              card they came for. */}
+          <Skeleton className="h-96 rounded-lg" />
+          <Skeleton className="h-64 rounded-lg" />
+          <Skeleton className="h-72 rounded-lg" />
+        </Loading>
       </Shell>
     );
   }

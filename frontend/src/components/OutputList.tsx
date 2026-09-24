@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { OUTPUT_KIND_LABELS, fileSize } from "@/lib/format";
 import type { Output } from "@/lib/types";
-import { Alert, Badge, Button, Card, Empty } from "@/components/ui";
+import { Alert, Badge, Button, Card, Empty, TAP } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function OutputList({
@@ -75,19 +75,17 @@ export function OutputList({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <a href={output.download_url} className="inline-flex">
-                <Button className="px-2.5 py-1.5 text-xs">Татах</Button>
+              <a href={output.download_url} className={`${TAP} inline-flex`}>
+                <Button>Татах</Button>
               </a>
               {output.srt_url && (
-                <a href={output.srt_url} className="inline-flex">
-                  <Button tone="quiet" className="px-2.5 py-1.5 text-xs">
-                    Хадмал
-                  </Button>
+                <a href={output.srt_url} className={`${TAP} inline-flex`}>
+                  <Button tone="quiet">Хадмал</Button>
                 </a>
               )}
               <Button
                 tone="danger"
-                className="ml-auto px-2.5 py-1.5 text-xs"
+                className="ml-auto"
                 loading={deleting === output.id}
                 onClick={() => setAsking(output)}
               >

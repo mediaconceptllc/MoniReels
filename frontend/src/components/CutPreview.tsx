@@ -105,7 +105,7 @@ export function CutPreview({
               {cuts.length} огтлол · нийт {Math.round(total)} сек
             </p>
           </div>
-          <Button tone="quiet" className="min-h-[44px] px-3" onClick={onClose}>
+          <Button tone="quiet" onClick={onClose}>
             Хаах
           </Button>
         </div>

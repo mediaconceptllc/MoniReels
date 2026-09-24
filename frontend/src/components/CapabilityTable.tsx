@@ -1,7 +1,7 @@
 "use client";
 
 import type { Capability } from "@/lib/types";
-import { Badge, Card } from "@/components/ui";
+import { Badge, Card, Select } from "@/components/ui";
 
 /**
  * Which outside service powers which feature, and whether it can run.
@@ -52,17 +52,16 @@ export function CapabilityTable({
                 {c.name === "stt" && sttProviders && sttProviders.length > 1 && (
                   <label className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-3">
                     Яриа таних систем:
-                    <select
+                    <Select
                       value={sttProvider ?? sttProviders[0]}
                       onChange={(e) => onSttProvider?.(e.target.value)}
-                      className="rounded-md border border-rule bg-surface px-2 py-1 text-xs text-ink"
                     >
                       {sttProviders.map((name) => (
                         <option key={name} value={name}>
                           {STT_LABEL[name] ?? name}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   </label>
                 )}
               </div>

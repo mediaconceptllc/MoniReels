@@ -4,7 +4,32 @@
  *  globals.css, so both themes stay correct without per-component overrides. */
 
 import { forwardRef } from "react";
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type {
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  ReactNode,
+  SelectHTMLAttributes,
+} from "react";
+
+/**
+ * The floor every tap target stands on: 44 CSS px.
+ *
+ * It lives here, in the primitives, rather than at each call site — a floor
+ * repeated at thirty call sites is a floor the thirty-first forgets, and the
+ * thirty-first is always the newest control. The default button was
+ * `py-2 text-sm`: 8 + 20 + 8 + 2 = 38px, under every published minimum (Apple
+ * asks 44, Material 48) and small enough that a thumb aiming at "Устгах" in a
+ * card footer lands on the card behind it.
+ *
+ * It cannot be lowered by appending a smaller class at a call site: two
+ * Tailwind rules of equal specificity are decided by their order in the
+ * STYLESHEET, not in the class attribute, and Tailwind emits height utilities
+ * in ascending order (MEASURED in the built CSS: h-3, h-4, h-5, h-8, h-11,
+ * h-20 …). So a smaller one loses and a larger one wins — which is the right
+ * way round, since a taller target was never the problem. The floor moves
+ * only by editing this line, and `npm run check-ui` fails if it moves down.
+ */
+export const TAP = "min-h-11";
 
 type Tone = "default" | "primary" | "danger" | "quiet";
 
@@ -27,7 +52,7 @@ export const Button = forwardRef<
       {...rest}
       ref={ref}
       disabled={disabled || loading}
-      className={`inline-flex items-center justify-center gap-2 rounded-md border px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]} ${className}`}
+      className={`${TAP} inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]} ${className}`}
     >
       {loading && <Spinner />}
       {children}
@@ -35,12 +60,45 @@ export const Button = forwardRef<
   );
 });
 
+/** Belongs to a CONTROL that is working — the spinner inside a button that was
+ *  just pressed. It is never a page's loading state: a spinner standing in for
+ *  a layout takes the layout away with it, and the reader has to find their
+ *  place again when it comes back. That job is `Skeleton`'s, and
+ *  `npm run check-ui` keeps this component inside this file. */
 export function Spinner() {
   return (
     <span
       aria-hidden
       className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
     />
+  );
+}
+
+/** A block standing where content has not arrived yet, in its shape.
+ *
+ *  Decorative by construction — `Loading` carries the announcement, so the
+ *  blocks themselves are hidden from a screen reader rather than read out as a
+ *  row of empty boxes. The pulse is an `animation`, so the
+ *  prefers-reduced-motion rule in globals.css already stills it. */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <span aria-hidden className={`block animate-pulse rounded bg-surface-2 ${className}`} />;
+}
+
+/** Wraps a region of skeletons so the wait is announced once, with a name,
+ *  instead of silently or as a heap of blank elements. */
+export function Loading({
+  label = "Ачаалж байна",
+  className = "",
+  children,
+}: {
+  label?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div role="status" aria-busy="true" aria-label={label} className={className}>
+      {children}
+    </div>
   );
 }
 
@@ -119,8 +177,56 @@ export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
       {...props}
-      className={`rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 ${props.className ?? ""}`}
+      className={`${TAP} rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-3 ${props.className ?? ""}`}
     />
+  );
+}
+
+/** The same class string lived inline in one panel and as a `const SELECT` in
+ *  another — which is how one of them gets a floor and the other does not. */
+export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      {...props}
+      className={`${TAP} rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink ${props.className ?? ""}`}
+    />
+  );
+}
+
+/**
+ * A checkbox and the words that explain it, as one target.
+ *
+ * A bare checkbox renders at about 13px — the smallest thing on any page it
+ * appears on, and the one most often tapped by someone holding a phone in one
+ * hand. The box is drawn bigger, but the TARGET is the label: it carries the
+ * floor, so the whole row toggles, which is also what a pointer user expects.
+ */
+export function Checkbox({
+  checked,
+  onChange,
+  disabled,
+  children,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label
+      className={`${TAP} flex items-center gap-2.5 text-sm text-ink-2 ${
+        disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-5 w-5 shrink-0 accent-[var(--accent)]"
+      />
+      {children}
+    </label>
   );
 }
 

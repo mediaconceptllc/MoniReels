@@ -108,11 +108,7 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
               <span className="tabular text-ink-3">{Math.round((progress ?? 0) * 100)}%</span>
             </div>
             <ProgressBar value={progress ?? 0} />
-            <Button
-              tone="quiet"
-              className="self-start px-2 py-1 text-xs"
-              onClick={() => abortRef.current?.()}
-            >
+            <Button tone="quiet" className="self-start" onClick={() => abortRef.current?.()}>
               Цуцлах
             </Button>
           </div>

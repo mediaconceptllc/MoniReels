@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { api, setToken } from "@/lib/api";
 import { useAuth, errorMessage } from "@/lib/auth";
-import { Alert, Badge, Button, Card, Field, Spinner, TextInput } from "@/components/ui";
+import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TAP, TextInput } from "@/components/ui";
 import { Shell } from "@/components/Shell";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -18,7 +18,14 @@ export default function ProfilePage() {
   if (loading) {
     return (
       <Shell>
-        <Spinner />
+        <Loading className="flex max-w-2xl flex-col gap-6">
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-4 w-64" />
+          </div>
+          <Skeleton className="h-24 rounded-lg" />
+          <Skeleton className="h-80 rounded-lg" />
+        </Loading>
       </Shell>
     );
   }
@@ -65,7 +72,7 @@ export default function ProfilePage() {
                   Гадаад үйлчилгээний түлхүүр, брэндийн материал, хадмалын загвар.
                 </p>
               </div>
-              <Link href="/admin">
+              <Link href="/admin" className={`${TAP} inline-flex`}>
                 <Button>Нээх</Button>
               </Link>
             </div>

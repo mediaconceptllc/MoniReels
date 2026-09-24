@@ -5,9 +5,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import type { SubtitleStyle, SubtitleTemplate } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
-import { Alert, Badge, Button, Field } from "@/components/ui";
-
-const SELECT = "rounded-md border border-rule bg-surface px-3 py-2 text-sm text-ink";
+import { Alert, Badge, Button, Field, Select, TAP, TextInput } from "@/components/ui";
 
 const POSITIONS: [SubtitleStyle["position"], string][] = [
   ["bottom", "Доор"],
@@ -127,8 +125,7 @@ export function SubtitleStylePanel({
               : "Фонтын жагсаалт уншигдсангүй."
           }
         >
-          <select
-            className={SELECT}
+          <Select
             value={draft.font_family}
             disabled={families.length === 0}
             onChange={(e) => update("font_family", e.target.value)}
@@ -143,7 +140,7 @@ export function SubtitleStylePanel({
                 {f}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
 
         <Field label={`Үсгийн хэмжээ — ${draft.font_size}`}>
@@ -154,13 +151,12 @@ export function SubtitleStylePanel({
             step={1}
             value={draft.font_size}
             onChange={(e) => update("font_size", Number(e.target.value))}
-            className="w-full"
+            className={`${TAP} w-full accent-[var(--accent)]`}
           />
         </Field>
 
         <Field label="Байрлал">
-          <select
-            className={SELECT}
+          <Select
             value={draft.position}
             onChange={(e) => update("position", e.target.value as SubtitleStyle["position"])}
           >
@@ -169,7 +165,7 @@ export function SubtitleStylePanel({
                 {label}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
 
         <Field label={`Доод зай — ${draft.margin_v}px`}>
@@ -180,7 +176,7 @@ export function SubtitleStylePanel({
             step={5}
             value={draft.margin_v}
             onChange={(e) => update("margin_v", Number(e.target.value))}
-            className="w-full"
+            className={`${TAP} w-full accent-[var(--accent)]`}
           />
         </Field>
 
@@ -189,7 +185,7 @@ export function SubtitleStylePanel({
             type="color"
             value={draft.primary_color}
             onChange={(e) => update("primary_color", e.target.value.toUpperCase())}
-            className="h-10 w-full rounded-md border border-rule bg-surface"
+            className={`${TAP} w-full rounded-md border border-rule bg-surface`}
           />
         </Field>
 
@@ -198,7 +194,7 @@ export function SubtitleStylePanel({
             type="color"
             value={draft.outline_color}
             onChange={(e) => update("outline_color", e.target.value.toUpperCase())}
-            className="h-10 w-full rounded-md border border-rule bg-surface"
+            className={`${TAP} w-full rounded-md border border-rule bg-surface`}
           />
         </Field>
       </div>
@@ -292,16 +288,22 @@ function Templates({
           {templates.map((t) => (
             <span
               key={t.id}
-              className="inline-flex items-center gap-1 rounded-full border border-rule bg-surface pl-3 pr-1 py-1 text-xs"
+              className="inline-flex items-center rounded-full border border-rule bg-surface px-0.5 text-xs"
             >
-              <button type="button" className="text-ink hover:text-accent" onClick={() => onApply(t)}>
+              <button
+                type="button"
+                className={`${TAP} rounded-full px-3 text-ink hover:text-accent`}
+                onClick={() => onApply(t)}
+              >
                 {t.name}
               </button>
+              {/* Apply and delete sat side by side at 20px each, which is the
+                  worst pairing there is: the miss deletes the template. */}
               {canManage && (
                 <button
                   type="button"
                   aria-label={`${t.name} загварыг устгах`}
-                  className="rounded-full px-1.5 text-ink-3 hover:text-tally"
+                  className={`${TAP} w-11 rounded-full text-ink-3 hover:text-tally`}
                   onClick={() => onDelete(t.id)}
                 >
                   ×
@@ -316,12 +318,11 @@ function Templates({
 
       {canManage && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <input
+          <TextInput
             value={name}
             onChange={(e) => onName(e.target.value)}
             placeholder="Загварын нэр"
             maxLength={80}
-            className="rounded-md border border-rule bg-surface px-3 py-1.5 text-sm text-ink"
           />
           <Button tone="quiet" onClick={onSave} disabled={busy || !name.trim()}>
             Одоогийн тохиргоог хадгалах
