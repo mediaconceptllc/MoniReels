@@ -12,7 +12,8 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
-import type { ExportSettings, LogoPosition } from "@/lib/types";
+import { LANGUAGE_LABELS } from "@/lib/format";
+import type { ExportSettings, LogoPosition, SourceLanguage } from "@/lib/types";
 
 // Corners only: a mark anywhere else is a watermark over the face the
 // short is about. Top by default — subtitles sit at the bottom.
@@ -37,10 +38,14 @@ const PRESET_LABELS: Record<string, string> = {
 export function ExportSettingsPanel({
   projectId,
   settings,
+  sourceLanguage,
   onSaved,
 }: {
   projectId: string;
   settings: ExportSettings;
+  /** What the video is spoken in when that is not Mongolian — the one case
+   *  with a choice of subtitle language. Null hides the choice. */
+  sourceLanguage: SourceLanguage | null;
   onSaved: () => void;
 }) {
   const [draft, setDraft] = useState<ExportSettings>(settings);
@@ -147,6 +152,29 @@ export function ExportSettingsPanel({
           Төгсгөлийн видео залгах
         </Checkbox>
       </div>
+
+      {sourceLanguage && (draft.burn_subtitles || draft.write_srt) && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="Хадмалын хэл"
+            hint={
+              draft.subtitle_language === "mn"
+                ? "Орчуулагдаагүй мөр үлдсэн бол экспорт эхлэхгүй — эх хэлээр нь гаргахгүй."
+                : "Яриаг ярьсан хэлээр нь гаргана. Орчуулга шаардахгүй."
+            }
+          >
+            <Select
+              value={draft.subtitle_language}
+              onChange={(e) =>
+                update("subtitle_language", e.target.value as ExportSettings["subtitle_language"])
+              }
+            >
+              <option value="mn">Монгол — орчуулгаар</option>
+              <option value="source">{LANGUAGE_LABELS[sourceLanguage]} — ярьсан хэлээр</option>
+            </Select>
+          </Field>
+        </div>
+      )}
 
       {(draft.use_intro || draft.use_outro) && (
         <p className="text-xs text-ink-3">

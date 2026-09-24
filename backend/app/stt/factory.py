@@ -47,6 +47,31 @@ def build_client(settings: Settings) -> SttProvider:
     )
 
 
+def for_language(settings: Settings, language: str | None) -> Settings:
+    """The recogniser settings for a video spoken in `language`.
+
+    A Mongolian video gets whatever the operator selected. Any other language
+    goes to ElevenLabs Scribe with that language's code, because duudlaga.dev
+    is a Mongolian recogniser whose API takes no language at all: sent English,
+    it returns Mongolian-shaped nonsense and bills for it.
+
+    That used to be the fate of EVERY non-Mongolian video: both recognisers
+    were pinned to Mongolian (duudlaga by design, Scribe by `language_code =
+    "mon"` in one global setting), so English speech was decoded as Mongolian
+    with no error anywhere.
+
+    Returns a copy; the operator's stored settings are never touched.
+    """
+    from app.languages import MONGOLIAN, SCRIBE_CODES
+
+    language = language or MONGOLIAN
+    if language == MONGOLIAN:
+        return settings
+    return settings.model_copy(
+        update={"stt_provider": ELEVENLABS, "elevenlabs_stt_language": SCRIBE_CODES[language]}
+    )
+
+
 def api_key_for(settings: Settings) -> str:
     """The key the SELECTED provider needs, for the readiness check.
 

@@ -40,9 +40,20 @@ export interface Segment {
   id: string;
   start: number;
   end: number;
+  /** What was SAID, in the video's own language — the record of the audio. */
   text: string;
   speaker: string | null;
+  /** The Mongolian subtitle for `text`, when the video is not in Mongolian.
+   *  Null until translated, and cleared again when `text` is corrected: a
+   *  translation of words that are no longer there says something nobody
+   *  said. Optional so a document from before translation still reads. */
+  translation?: string | null;
 }
+
+/** What is spoken in the video. The audience is always Mongolian, so this is
+ *  the only language that varies — and it decides which recogniser hears the
+ *  video and whether its text needs translating. */
+export type SourceLanguage = "mn" | "en";
 
 export interface Transcript {
   language: string;
@@ -135,6 +146,10 @@ export interface ExportSettings {
    *  project's exports carry them. */
   use_intro: boolean;
   use_outro: boolean;
+  /** For a video not in Mongolian: subtitle with the translation ("mn") or
+   *  with what was said ("source"). Mongolian by default, because the
+   *  audience is. */
+  subtitle_language: "mn" | "source";
 }
 
 export interface BrandLogo {
@@ -284,6 +299,7 @@ export interface ProjectDocument {
   schema_version: number;
   id: string;
   name: string;
+  language: SourceLanguage;
   created_at: number;
   updated_at: number;
   video: VideoMeta | null;
@@ -296,6 +312,19 @@ export interface ProjectDocument {
 }
 
 /** What the detail page reads: the document plus what only a read can give. */
+/** How far the translation has got, and whether the export guard will
+ *  refuse because of it — the guard's own verdict, so the page cannot
+ *  disable a button the server would accept. */
+export interface TranslationStatus {
+  /** False for a Mongolian video: there is nothing to translate. */
+  needed: boolean;
+  /** Lines with words in them; a blank line is neither translated nor not. */
+  lines: number;
+  translated: number;
+  missing: number;
+  blocks_export: boolean;
+}
+
 export interface Project extends ProjectDocument {
   /** Signed and short-lived. Regenerated on every read, so a page left open
    *  past the expiry must refetch rather than reuse what it has. */
@@ -311,6 +340,7 @@ export interface Project extends ProjectDocument {
   job_history_limit: number;
   spend: ProjectSpend;
   suggest_limits: SuggestLimits;
+  translation: TranslationStatus;
 }
 
 export interface Output {

@@ -75,7 +75,7 @@ SHAPE_DIR = Path(__file__).resolve().parents[2] / "frontend" / ".shape"
 #: names that are a union EVERYWHERE stand alone.
 _LITERAL = frozenset({
     "role", "state", "kind", "source", "orientation", "portrait_fill",
-    "position", "capabilities.name",
+    "position", "capabilities.name", "subtitle_language", "project.language",
 })
 
 #: `Record<string, …>` in api.ts: the KEYS are data, not field names, so they
@@ -260,7 +260,10 @@ def _filled_project(db, owner_id: str) -> Project:
     project.transcript = Transcript(
         language="mn",
         segments=[
-            Segment(id="s1", start=0.0, end=4.0, text="Сайн байна уу.", speaker="0"),
+            # A translation on one line and none on the other, so the fixture
+            # carries BOTH members of `string | null`.
+            Segment(id="s1", start=0.0, end=4.0, text="Сайн байна уу.", speaker="0",
+                    translation="Hello."),
             # A second segment with `speaker: null`, so the fixture carries
             # BOTH members of `string | null` and the type is really tested.
             Segment(id="s2", start=4.0, end=9.0, text="Тавтай морил.", speaker=None),
@@ -483,6 +486,10 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     shape["suggest_started"] = send("POST", f"/projects/{row.id}/suggest")
     shape["export_started"] = send("POST", f"/projects/{row.id}/export")
     shape["export_all_started"] = send("POST", f"/projects/{row.id}/export-all")
+    # Last, because it changes the project: a Mongolian video has nothing to
+    # translate and is refused with a 400, which would capture the error.
+    send("PATCH", f"/projects/{row.id}", json={"language": "en"})
+    shape["translate_started"] = send("POST", f"/projects/{row.id}/translate")
 
     created = shape["create_project"]["project_id"]
     shape["upload_complete"] = send("POST", f"/projects/{created}/upload-complete")

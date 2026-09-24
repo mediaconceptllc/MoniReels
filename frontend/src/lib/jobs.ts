@@ -137,6 +137,7 @@ async function pollJob(
 export const JOB_LABELS: Record<string, string> = {
   import_video: "Видео бэлтгэх",
   transcribe: "Яриаг текст болгох",
+  translate: "Монгол руу орчуулах",
   suggest: "Санал боловсруулах",
   export_all: "Бүх саналыг экспортлох",
   export: "Экспортлох",
@@ -150,6 +151,7 @@ export const STAGE_LABELS: Record<string, string> = {
   extract_audio: "Дуу салгаж байна",
   audio: "Дууг салгаж хадгалж байна",
   transcribing: "Яриаг таньж байна",
+  translating: "Орчуулж байна",
   requesting: "Загвараас хариу хүлээж байна",
   normalize: "Хэсгүүдийг бэлдэж байна",
   join: "Хэсгүүдийг холбож байна",

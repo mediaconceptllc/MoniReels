@@ -6,6 +6,8 @@
  * a formatted string that leaks into state is one nobody can do arithmetic on.
  */
 
+import type { SourceLanguage } from "@/lib/types";
+
 export function timecode(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const total = Math.floor(seconds);
@@ -62,6 +64,13 @@ export function relativeTime(epochSeconds: number): string {
   if (Math.abs(hours) < 24) return RELATIVE.format(hours, "hour");
   return RELATIVE.format(Math.round(hours / 24), "day");
 }
+
+/** What a video can be spoken in, as the producer reads it. Typed by the
+ *  union so a language added to it without a name here does not compile. */
+export const LANGUAGE_LABELS: Record<SourceLanguage, string> = {
+  mn: "Монгол",
+  en: "Англи",
+};
 
 /** Roles are English in the data (they are structural), Mongolian on screen. */
 export const CUT_ROLE_LABELS: Record<string, string> = {

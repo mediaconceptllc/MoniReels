@@ -17,7 +17,7 @@
 import { useMemo, useState } from "react";
 import { CUT_ROLE_LABELS, timecode, totalCutSeconds } from "@/lib/format";
 import type { Suggestions } from "@/lib/types";
-import { Badge, Button, Card, TAP } from "@/components/ui";
+import { Alert, Badge, Button, Card, TAP } from "@/components/ui";
 import { CutPreview, type PreviewCut } from "@/components/CutPreview";
 
 /** The window a reel has to land in to be usable on any of the platforms
@@ -60,6 +60,7 @@ export function SuggestionList({
   sourceUrl,
   onExport,
   busy = false,
+  blocked = null,
 }: {
   suggestions: Suggestions;
   /** Signed and short-lived; absent while the import is still running, in
@@ -68,6 +69,10 @@ export function SuggestionList({
   /** Absent for a reader who cannot start a render. */
   onExport?: (pick: { shorts: string[]; youtube: number[] }) => void;
   busy?: boolean;
+  /** Why the server would refuse an export right now. The button is disabled
+   *  and the reason is shown beside it — before the click, not as the error
+   *  that follows one. */
+  blocked?: string | null;
 }) {
   const [shorts, setShorts] = useState<string[]>([]);
   const [plans, setPlans] = useState<number[]>([]);
@@ -113,12 +118,15 @@ export function SuggestionList({
           <Button
             tone="primary"
             loading={busy}
+            disabled={!!blocked}
             onClick={() => onExport(exportPick)}
           >
             {picked === 0 ? "Бүгдийг экспортлох" : `Сонгосон ${picked}-г экспортлох`}
           </Button>
         )}
       </div>
+
+      {onExport && blocked && <Alert tone="warn">{blocked}</Alert>}
 
       <section className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">

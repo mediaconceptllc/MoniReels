@@ -81,13 +81,15 @@ not summaries.
   on the same story is a failure.
 - Rank candidates higher when they have: a concrete conflict or reversal, a number a
   viewer can picture, or direct local relevance to the audience described below.
-- `hook_text` is on-screen text for the first 3 seconds. Under 12 words, in the
-  transcript's language, phrased as a question or a jarring claim. Never start it with
+- `hook_text` is on-screen text for the first 3 seconds. Under 12 words, in
+  Mongolian, phrased as a question or a jarring claim. Never start it with
   "Today" / "In this video" / their equivalents.
 - `hook_quote` must be a verbatim substring copied from the transcript, taken from
   inside the `hook` cut. Do not paraphrase it.
-- Write `title`, `hook_text`, `on_screen_texts` and `caption` in the SAME LANGUAGE as
-  the transcript. `role` and `why_it_works` stay in English.
+- Write `title`, `hook_text`, `on_screen_texts` and `caption` in Mongolian (Cyrillic
+  script): the audience is Mongolian whatever language the video is in. `hook_quote`
+  alone stays in the transcript's own language, because it is copied from it.
+  `role` and `why_it_works` stay in English.
 
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.

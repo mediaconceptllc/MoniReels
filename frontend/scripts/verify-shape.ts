@@ -90,12 +90,17 @@ const providers = contracts.providers as {
  *  field is what a rename removes entirely. */
 const writes = {
   upload_complete: contracts.upload_complete as { project_id: string; job_id: string },
-  transcript_updated: contracts.transcript_updated as { updated: number; unknown_ids: string[] },
+  transcript_updated: contracts.transcript_updated as {
+    updated: number;
+    unknown_ids: string[];
+    translations_cleared: number;
+  },
   ranges_selected: contracts.ranges_selected as { clips: number },
   transcribe_started: contracts.transcribe_started as { job_id: string },
   suggest_started: contracts.suggest_started as { job_id: string },
   export_started: contracts.export_started as { job_id: string },
   export_all_started: contracts.export_all_started as { job_id: string },
+  translate_started: contracts.translate_started as { job_id: string },
   job_canceled: contracts.job_canceled as { canceled: boolean },
   project_deleted: contracts.project_deleted as { deleted: boolean },
   output_deleted: contracts.output_deleted as { deleted: boolean },
@@ -134,6 +139,9 @@ const present: unknown[] = [
 
   // the project itself
   raw.project.schema_version, raw.project.id, raw.project.name,
+  // What is spoken in the video. It picks the recogniser and decides whether
+  // a translation stage is drawn at all.
+  raw.project.language,
   raw.project.created_at, raw.project.updated_at,
   raw.project.video.source_key, raw.project.video.duration_sec,
   raw.project.video.width, raw.project.video.height, raw.project.video.fps,
@@ -141,7 +149,9 @@ const present: unknown[] = [
   raw.project.video.thumbnail_key, raw.project.video.audio_key,
   raw.project.transcript.language, raw.project.transcript.full_text,
   raw.project.transcript.timings_estimated,
-  raw.project.transcript.segments.map((s) => [s.id, s.start, s.end, s.text, s.speaker]),
+  raw.project.transcript.segments.map((s) => [
+    s.id, s.start, s.end, s.text, s.speaker, s.translation,
+  ]),
   raw.project.suggestions.shorts.map((s) => [
     s.id, s.title, s.hook_text, s.hook_quote, s.on_screen_texts, s.b_roll,
     s.caption, s.hashtags, s.why_it_works,
@@ -162,6 +172,7 @@ const present: unknown[] = [
   raw.project.export.crf, raw.project.export.preset,
   raw.project.export.burn_subtitles, raw.project.export.write_srt,
   raw.project.export.use_intro, raw.project.export.use_outro,
+  raw.project.export.subtitle_language,
   raw.project.export.logo.enabled, raw.project.export.logo.position,
   raw.project.export.logo.width_pct, raw.project.export.logo.opacity,
   raw.project.export.logo.margin_pct,
@@ -183,6 +194,11 @@ const present: unknown[] = [
   raw.project.suggest_limits.shorts_max, raw.project.suggest_limits.youtube_max,
   raw.project.suggest_limits.shorts_default, raw.project.suggest_limits.youtube_default,
   raw.project.suggestions.requested_shorts, raw.project.suggestions.requested_youtube,
+  // The export guard's own verdict. The page disables its export buttons
+  // from `blocks_export` rather than working the rule out a second time.
+  raw.project.translation.needed, raw.project.translation.lines,
+  raw.project.translation.translated, raw.project.translation.missing,
+  raw.project.translation.blocks_export,
 
   // creating one, and the upload that follows
   raw.create_project.project_id, raw.create_project.upload_url,
@@ -246,9 +262,12 @@ const present: unknown[] = [
 
   // the small write answers
   raw.transcript_updated.updated, raw.transcript_updated.unknown_ids,
+  // A corrected line loses its translation; the editor says how many did.
+  raw.transcript_updated.translations_cleared,
   raw.ranges_selected.clips,
   raw.transcribe_started.job_id, raw.suggest_started.job_id,
   raw.export_started.job_id, raw.export_all_started.job_id,
+  raw.translate_started.job_id,
   raw.job_canceled.canceled, raw.project_deleted.deleted,
   raw.output_deleted.deleted,
 ];

@@ -1105,3 +1105,174 @@ def test_a_render_that_produced_no_file_creates_no_output_row(world, project, db
     db.expire_all()
     assert result["outputs"] == []
     assert db.query(Output).filter(Output.project_id == project.id).count() == 0
+
+
+# ==========================================================================
+# Languages: which recogniser hears a video, and translating what it said
+# ==========================================================================
+
+
+def _set_language(db, project_id: str, language: str) -> None:
+    doc = load(db, project_id)
+    doc.language = language
+    save(db, doc)
+    db.commit()
+
+
+def test_an_english_video_is_heard_by_scribe_in_english(world, project, db, monkeypatch):
+    """Both recognisers were pinned to Mongolian, so English speech was decoded
+    as Mongolian-shaped nonsense — silently, and billed."""
+    from app import worker
+
+    heard: list = []
+    monkeypatch.setattr(worker, "build_stt_client", lambda s: heard.append(s) or type(
+        "C", (), {"aclose": staticmethod(lambda: asyncio.sleep(0))})())
+    _with_video(db, project.id)
+    _set_language(db, project.id, "en")
+    world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
+
+    asyncio.run(worker.handle_transcribe(_handle(db, project.id, "transcribe")))
+
+    assert heard[0].stt_provider == "elevenlabs"
+    assert heard[0].elevenlabs_stt_language == "eng"
+
+
+def test_a_mongolian_video_is_heard_by_the_recogniser_the_operator_chose(world, project, db, monkeypatch):
+    from app import worker
+
+    heard: list = []
+    monkeypatch.setattr(worker, "build_stt_client", lambda s: heard.append(s) or type(
+        "C", (), {"aclose": staticmethod(lambda: asyncio.sleep(0))})())
+    _with_video(db, project.id)
+    world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
+
+    asyncio.run(worker.handle_transcribe(_handle(db, project.id, "transcribe")))
+
+    assert heard[0].elevenlabs_stt_language == "mon"
+
+
+def _english_transcript(db, project_id: str, translations=(None, None)) -> None:
+    doc = load(db, project_id)
+    doc.language = "en"
+    doc.transcript = Transcript(
+        language="eng",
+        segments=[
+            Segment(id="a", start=0.0, end=2.0, text="Hello there.", translation=translations[0]),
+            Segment(id="b", start=2.0, end=4.0, text="Goodbye now.", translation=translations[1]),
+        ],
+        full_text="Hello there. Goodbye now.",
+    )
+    save(db, doc)
+    db.commit()
+
+
+def _fake_translation(monkeypatch, worker, *, during=None):
+    """Translates every line to "мн:<text>". `during` runs inside the call —
+    the moment a producer's edit can land while a real run is in flight."""
+    from app.ai.translate import Report
+
+    seen: dict = {}
+
+    async def fake(client, transcript, *, force=False, on_progress=None):
+        seen["force"] = force
+        if during:
+            during()
+        segs = [s.model_copy(update={"translation": f"мн:{s.text}"}) for s in transcript.segments]
+        return transcript.model_copy(update={"segments": segs}), Report(len(segs), len(segs), len(segs), 0, 0)
+
+    monkeypatch.setattr(worker, "translate_transcript", fake)
+    return seen
+
+
+def test_a_translation_run_stores_the_mongolian_beside_what_was_said(world, project, db, monkeypatch):
+    from app import worker
+
+    _english_transcript(db, project.id)
+    _fake_translation(monkeypatch, worker)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={})
+
+    result = asyncio.run(worker.handle_translate(handle))
+
+    db.expire_all()
+    segs = load(db, project.id).transcript.segments
+    assert [s.translation for s in segs] == ["мн:Hello there.", "мн:Goodbye now."]
+    assert [s.text for s in segs] == ["Hello there.", "Goodbye now."]
+    assert result["applied"] == 2 and result["kept_edits"] == 0
+    assert world.llm_closed
+
+
+def test_an_edit_made_while_translating_is_never_overwritten(world, project, db, monkeypatch):
+    """A run takes minutes. Writing back the copy read at the start would
+    silently undo a correction the producer made in the meantime."""
+    from app import worker
+
+    _english_transcript(db, project.id)
+
+    def producer_edits():
+        doc = load(db, project.id)
+        doc.transcript.segments[0].text = "Hello there, friend."
+        doc.transcript.segments[1].translation = "Гараар бичсэн"
+        save(db, doc)
+        db.commit()
+
+    _fake_translation(monkeypatch, worker, during=producer_edits)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={})
+
+    result = asyncio.run(worker.handle_translate(handle))
+
+    db.expire_all()
+    segs = load(db, project.id).transcript.segments
+    assert segs[0].text == "Hello there, friend." and segs[0].translation is None
+    assert segs[1].translation == "Гараар бичсэн"
+    assert result["kept_edits"] == 2 and result["applied"] == 0
+
+
+def test_force_reaches_the_translation(world, project, db, monkeypatch):
+    from app import worker
+
+    _english_transcript(db, project.id)
+    seen = _fake_translation(monkeypatch, worker)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={"force": True})
+    asyncio.run(worker.handle_translate(handle))
+    assert seen["force"] is True
+
+
+def test_a_mongolian_video_is_not_translated(world, project, db, monkeypatch):
+    from app import worker
+
+    _english_transcript(db, project.id)
+    _set_language(db, project.id, "mn")
+    _fake_translation(monkeypatch, worker)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={})
+    with pytest.raises(RuntimeError, match="already in Mongolian"):
+        asyncio.run(worker.handle_translate(handle))
+
+
+def test_the_render_subtitles_an_english_video_with_its_translation(world, project, db):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    world.r2.put(f"sources/{project.id}/source.mp4")
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert [s.text for s in world.render_kwargs["transcript_segments"]] == ["Сайн уу.", "Баяртай."]
+    assert "subtitle_fallback_lines" not in result
+
+
+def test_a_translation_cleared_after_queueing_falls_back_and_is_named(world, project, db):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", None))
+    world.r2.put(f"sources/{project.id}/source.mp4")
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert [s.text for s in world.render_kwargs["transcript_segments"]] == ["Сайн уу.", "Goodbye now."]
+    assert result["subtitle_fallback_lines"] == 1

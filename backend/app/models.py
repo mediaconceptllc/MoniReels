@@ -52,9 +52,15 @@ class Segment(BaseModel):
     id: str
     start: float
     end: float
+    #: What was SAID, in the video's own language. The record of the audio:
+    #: a translation is stored beside it and never over it.
     text: str
     speaker: str | None = None
     words: list[Word] = Field(default_factory=list)
+    #: The Mongolian rendering of `text`, when the video is not in Mongolian.
+    #: None until translated — and cleared again when `text` is corrected,
+    #: because a translation of a line that no longer says that is wrong.
+    translation: str | None = None
 
 
 #: The shortest interval a segment may occupy. A recogniser that reports a
@@ -220,6 +226,11 @@ class ExportSettings(BaseModel):
     # whether this project's exports carry them.
     use_intro: bool = False
     use_outro: bool = False
+    #: Which text an export's subtitles carry when the video is not in
+    #: Mongolian: "mn" (the translation) or "source" (what was said). Mongolian
+    #: by default, because the audience is. Meaningless for a Mongolian video,
+    #: where the two are the same text.
+    subtitle_language: str = "mn"
 
 
 class Project(BaseModel):
@@ -229,6 +240,11 @@ class Project(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
 
+    #: The language SPOKEN in the video (app.languages.SOURCE_LANGUAGES). It
+    #: decides which recogniser can hear it and whether its text needs
+    #: translating. Mongolian for every project made before it existed, which
+    #: is what they all were.
+    language: str = "mn"
     video: VideoMeta | None = None
     transcript: Transcript | None = None
     suggestions: Suggestions | None = None
