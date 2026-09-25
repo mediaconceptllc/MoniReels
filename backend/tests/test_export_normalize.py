@@ -69,3 +69,18 @@ def test_the_limiter_neither_lifts_the_mix_nor_moves_the_voice():
 
 def test_a_silent_clip_carries_the_voice_alone():
     assert build_voice_mix("anull", 0.2, has_audio=False) == "[1:a]anull[vo_mix]"
+
+
+def test_under_a_dub_the_source_is_never_in_the_mix():
+    """The bed replaces the original: the original still speaks, so no
+    level of it belongs under the dub — and the bed plays at its own."""
+    graph = build_voice_mix("anull", 0.2, has_audio=True, voice_input=1, bed_input=2)
+    assert "[0:a]" not in graph
+    assert "[2:a]anull[vo_bed]" in graph and "[1:a]anull[vo_line]" in graph
+    assert "volume=" not in graph
+    assert "normalize=0" in graph and "level=0" in graph and graph.endswith("[vo_mix]")
+
+
+def test_a_dubbed_clip_nobody_speaks_in_is_its_bed():
+    graph = build_voice_mix("anull", 0.2, has_audio=True, voice_input=None, bed_input=1)
+    assert graph == "[1:a]anull[vo_mix]"

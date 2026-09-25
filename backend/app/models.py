@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -243,6 +244,12 @@ class ExportSettings(BaseModel):
     #: A speaker with none — and a line with no speaker — is read in the
     #: default voice chosen on the admin page.
     speaker_voices: dict[str, str] = Field(default_factory=dict)
+    #: What happens to the speech the Mongolian replaces. "duck": the whole
+    #: original stays under the voice at `original_volume`. "remove": Demucs
+    #: takes every voice out of it and the rest — music, effects, the room —
+    #: plays at its own level (app.audio.dub_bed). Removing costs minutes of
+    #: worker CPU per export, so it is asked for, never assumed.
+    source_speech: Literal["duck", "remove"] = "duck"
 
 
 class Project(BaseModel):

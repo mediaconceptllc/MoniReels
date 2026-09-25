@@ -17,9 +17,7 @@
 # reads the real quota and app.worker exports it before torch is imported,
 # but the safe arrangement is still a worker service of its own.
 # ---------------------------------------------------------------------------
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.1+cpu
-torchaudio==2.5.1+cpu
+# torch, torchaudio and demucs are pinned once, with the clean dub.
+-r requirements-dub.txt
 silero-vad==6.2.1
-demucs==4.0.1
 soundfile==0.13.1

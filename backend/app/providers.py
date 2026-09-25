@@ -20,10 +20,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from app.config import Settings
+from app.worker_report import WorkerReport
 
 STT = "stt"
 LLM = "llm"
 TTS = "tts"
+SEPARATION = "separation"
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,35 @@ def describe(settings: Settings) -> list[Capability]:
             blocked=tts_blocked,
         ),
     ]
+
+
+def separation(report: WorkerReport | None) -> Capability:
+    """Whether an export can remove the source speech under the Mongolian
+    voice (export.source_speech "remove").
+
+    Answered from what the WORKER said about itself (app.worker_report): the
+    API image never has Demucs, so looking for it here would always say no.
+    No report yet — no worker running this code has started — is unknown,
+    and unknown does not start a job that cannot finish.
+    """
+    if report is None:
+        blocked = (
+            "Worker энэ боломжийн талаар хараахан мэдээлээгүй байна — ажиллаж байгаа эсэхийг "
+            "шалгана уу."
+        )
+    elif not report.separation:
+        blocked = "Worker-т Demucs суугаагүй байна — worker сервисийг INSTALL_DUB=1-ээр дахин build хийнэ."
+    else:
+        blocked = None
+    return Capability(
+        name=SEPARATION,
+        label="Эх яриа арилгах",
+        provider=f"Demucs {report.model} (worker)" if report is not None else "Demucs (worker)",
+        powers="Монгол дуу оруулахад эх яриаг хөгжим, орчны чимээнээс салгаж бүрэн хасна.",
+        configured=report is not None and report.separation,
+        implemented=True,
+        blocked=blocked,
+    )
 
 
 def blocker(settings: Settings, capability: str) -> str | None:

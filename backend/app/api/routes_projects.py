@@ -20,13 +20,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import providers, r2, security, spend
+from app import providers, r2, security, spend, worker_report
 from app.ai.schema import count_limits, default_counts
 from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
 from app.jobs import queue
-from app.languages import needs_translation, translation_view, voice_over_on
+from app.languages import (
+    needs_translation,
+    removes_source_speech,
+    translation_view,
+    voice_over_on,
+)
 from app.models import Project
 from app.schemas import (
     CreateProjectIn,
@@ -445,6 +450,14 @@ def voice_view(db: Session, project: Project) -> dict:
     # gets renamed in one and not the other — and the page reads both.
     on = voice_over_on(project)
     blocked = providers.blocker(provider_settings.effective(db), providers.TTS) if on else None
+    if blocked is None and removes_source_speech(project):
+        # Only the worker knows whether it can separate; it has said so.
+        separation = providers.separation(worker_report.read(db))
+        if not separation.ready:
+            blocked = (
+                f"Эх яриаг арилгах боломжгүй: {separation.blocked} "
+                "Эсвэл «Намсгах»-ыг сонгож болно."
+            )
     return {"on": on, "blocked": blocked}
 
 

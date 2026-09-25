@@ -1485,3 +1485,183 @@ def test_a_youtube_plan_reads_the_lines_its_ranges_hold(world, project, db, monk
     asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
 
     assert said == ["Дараа.", "<closed>"]
+
+
+# --------------------------------------------------------------------------
+# The clean dub: the source speech removed under the voice
+# --------------------------------------------------------------------------
+
+def _remove_speech(db, project_id: str, how: str = "remove") -> None:
+    doc = load(db, project_id)
+    doc.export.source_speech = how
+    save(db, doc)
+    db.commit()
+
+
+def _fake_beds(monkeypatch, *, available: bool = True) -> list[dict]:
+    """Demucs as the worker would find it, and a separation that records what
+    it was asked for. The real one is exercised by the worker image's smoke
+    test in CI; here the question is what reaches it and what comes back."""
+    from app.audio import dub_bed
+
+    calls: list[dict] = []
+    monkeypatch.setattr(dub_bed, "available", lambda: available)
+
+    async def fake_prepare(ffmpeg, project_id, source, ranges, cache_dir, *, model_name, separate,
+                           check=None, on_progress=None):
+        calls.append({"source": Path(source), "ranges": list(ranges), "model": model_name})
+        beds = {dub_bed.range_key(s, e): cache_dir / f"bed-{s}-{e}.flac" for s, e in ranges}
+        return beds, dub_bed.BedReport(separated=1, seconds=5.0, cached=len(beds) - 1)
+
+    monkeypatch.setattr(dub_bed, "prepare", fake_prepare)
+    return calls
+
+
+def test_the_speech_is_removed_from_the_ranges_the_render_cuts(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    _remove_speech(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    _fake_voice(monkeypatch, world)
+    calls = _fake_beds(monkeypatch)
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    (call,) = calls
+    # The copy this worker downloaded — the file the render cuts — cut where
+    # the timeline cuts it.
+    assert call["ranges"] == [(0.0, 5.0)]
+    assert str(call["source"]) == world.rendered_clips[0].source_path
+    voice = world.render_kwargs["voice"]
+    assert voice.remove_speech and voice.bed_for(0.0, 5.0) is not None
+    # What it cost is in the export's result, beside what the voice cost.
+    assert (result["voice"]["beds_separated"], result["voice"]["beds_cached"]) == (1, 0)
+    assert result["voice"]["bed_seconds"] == 5.0
+
+
+def test_every_idea_picked_has_its_cuts_separated(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id, clips=False, suggestions=_suggestions())
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    _remove_speech(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    _fake_voice(monkeypatch, world)
+    calls = _fake_beds(monkeypatch)
+
+    asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    # Three shorts, each cut 0-5 and 10-20.
+    assert calls[0]["ranges"] == [(0.0, 5.0), (10.0, 20.0)] * 3
+
+
+def test_a_worker_without_demucs_refuses_before_a_character_is_paid(world, project, db, monkeypatch):
+    """Queued before this worker was deployed without Demucs: the voice would
+    be bought for an export that cannot be made the way it was asked for."""
+    from app import worker
+    from app.audio import dub_bed
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    _remove_speech(db, project.id)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    said = _fake_voice(monkeypatch, world)
+    calls = _fake_beds(monkeypatch, available=False)
+
+    with pytest.raises(dub_bed.DubUnavailable, match="INSTALL_DUB"):
+        asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+    assert said == [] and calls == []
+
+
+def test_a_worker_without_demucs_ends_the_export_at_once(world, project, db, monkeypatch):
+    """Every retry would meet the same image."""
+    from app import worker
+    from app.audio import dub_bed
+
+    async def refused(handle):
+        raise dub_bed.DubUnavailable("Demucs энэ worker-т суугаагүй байна")
+
+    monkeypatch.setitem(worker.HANDLERS, "export", refused)
+    job = _running_job(db, project.id, "export")
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    failed = db.get(Job, job.id)
+    assert failed.state == "failed" and "Demucs" in failed.error
+
+
+def test_the_ducked_voice_over_separates_nothing(world, project, db, monkeypatch):
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    _remove_speech(db, project.id, "duck")
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    _fake_voice(monkeypatch, world)
+    calls = _fake_beds(monkeypatch, available=False)
+
+    result = asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert calls == [] and not world.render_kwargs["voice"].remove_speech
+    assert result["voice"]["beds_separated"] == 0
+
+
+def test_a_video_without_sound_has_no_speech_to_remove(world, project, db, monkeypatch):
+    """The voice is all there is — nothing to separate, and nothing to refuse
+    over on a worker without Demucs."""
+    from app import worker
+
+    _ready_to_render(db, project.id)
+    _english_transcript(db, project.id, translations=("Сайн уу.", "Баяртай."))
+    _voice_over(db, project.id)
+    _remove_speech(db, project.id)
+    doc = load(db, project.id)
+    doc.video = doc.video.model_copy(update={"has_audio": False})
+    save(db, doc)
+    db.commit()
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    _fake_voice(monkeypatch, world)
+    calls = _fake_beds(monkeypatch, available=False)
+
+    asyncio.run(worker.handle_export(_handle(db, project.id, "export")))
+
+    assert calls == [] and not world.render_kwargs["voice"].remove_speech
+
+
+def test_the_worker_says_what_it_can_do(db, monkeypatch):
+    """The API cannot look inside the worker's image; this is how it knows."""
+    from app import worker, worker_report
+    from app.audio import dub_bed
+
+    monkeypatch.setattr(dub_bed, "available", lambda: False)
+    worker._publish_report()
+    monkeypatch.setattr(dub_bed, "available", lambda: True)
+    worker._publish_report()
+
+    db.expire_all()
+    report = worker_report.read(db)
+    # The latest word, in one row however many times it was said.
+    assert report is not None and report.separation is True
+    assert report.model == worker.get_settings().demucs_model
+    assert db.query(worker_report.Setting).filter_by(key=worker_report.KEY).count() == 1
+
+
+@pytest.mark.parametrize("value", [
+    "", "not json", "null", "[]", '{"separation": true}',
+    '{"separation": true, "model": "htdemucs", "at": "soon"}',
+])
+def test_a_report_nobody_can_read_is_unknown(db, value):
+    """Unknown, which the guard treats as "cannot" — never a crash on every
+    project page, and never a guess."""
+    from app import worker_report
+
+    db.add(worker_report.Setting(key=worker_report.KEY, value=value, updated_at=0.0))
+    db.commit()
+    assert worker_report.read(db) is None

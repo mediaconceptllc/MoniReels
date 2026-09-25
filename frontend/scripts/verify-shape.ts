@@ -179,6 +179,8 @@ const present: unknown[] = [
   raw.project.export.use_intro, raw.project.export.use_outro,
   raw.project.export.subtitle_language,
   raw.project.export.voice_over, raw.project.export.original_volume,
+  // Ducked or removed: the second is a worker's job, the first is not.
+  raw.project.export.source_speech,
   // A voice per speaker, sent whole; a speaker read in the default voice has
   // no entry.
   raw.project.export.speaker_voices,
@@ -245,6 +247,10 @@ const present: unknown[] = [
   raw.job_voiced.result.voice.characters, raw.job_voiced.result.voice.cached,
   raw.job_voiced.result.voice.missing, raw.job_voiced.result.voice.sped_up,
   raw.job_voiced.result.voice.cut,
+  // With the speech removed: the separation is worker time, and the reason
+  // an export ran long.
+  raw.job_voiced.result.voice.beds_separated, raw.job_voiced.result.voice.bed_seconds,
+  raw.job_voiced.result.voice.beds_cached,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs.

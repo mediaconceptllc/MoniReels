@@ -190,6 +190,11 @@ class Setting(Base):
     Credentials stay in the environment. The desktop build let an HTTP
     handler rewrite its own `.env`; on a public URL that is a credential
     takeover, so the write path for secrets simply does not exist here.
+
+    One row is not an operator's: `worker_report`, what the worker says it
+    can do (app.worker_report). Written by the worker only, and outside
+    app.provider_settings.EDITABLE, so no request reads it as a setting or
+    writes it.
     """
 
     __tablename__ = "settings"

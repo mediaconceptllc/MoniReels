@@ -67,6 +67,9 @@ export function JobHistory({
           const cost = job.result?.llm?.cost_usd;
           const ran = job.result?.elapsed_sec;
           const voice = job.result?.voice;
+          // Absent on an export made before the speech could be removed.
+          const separated = voice?.beds_separated ?? 0;
+          const bedsCached = voice?.beds_cached ?? 0;
           return (
             <li key={job.job_id} className="flex flex-col gap-1 px-4 py-2.5">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -103,6 +106,15 @@ export function JobHistory({
                   {voice.sped_up > 0 && ` · ${voice.sped_up} хурдасгасан`}
                   {voice.cut > 0 && ` · ${voice.cut} таслагдсан`}
                   {voice.missing > 0 && ` · ${voice.missing} орчуулгагүй`}
+                </p>
+              )}
+              {/* The separation is the one part of a dub that costs time
+                  rather than money — the reason an export ran long. */}
+              {separated + bedsCached > 0 && (
+                <p className="tabular text-xs text-ink-3">
+                  Эх яриа хассан: шинээр {separated} хэсэг
+                  {separated > 0 && ` (${duration(voice?.bed_seconds ?? 0)})`} · хадгалснаас{" "}
+                  {bedsCached}
                 </p>
               )}
             </li>

@@ -425,6 +425,85 @@ def test_the_voice_is_heard_over_the_original_kept_at_its_level(tmp_path):
     assert len(mixed) / (SAMPLE_RATE * 2) == pytest.approx(4.0, abs=0.1)
 
 
+@needs_ffmpeg
+def test_with_the_speech_removed_only_the_bed_and_the_voice_are_heard(tmp_path):
+    """The dub: the source's own sound is not in the mix at all — its speech
+    (here a 440 Hz tone) is gone, the bed (1500 Hz, the music left once the
+    speech is out) plays at its own level rather than the ducked one, and
+    the voice (880 Hz) is where it was placed. Through the same ffmpeg call
+    the render makes."""
+    from app.export.pipeline import _cut_and_normalize_clip
+    from app.timeline.models import Clip
+    from app.video.ffmpeg import discover_ffmpeg
+    from tests.test_export_pipeline import _Handle
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=4",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(src)],
+        check=True,
+    )
+    bed = tmp_path / "bed.flac"
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=1500:duration=4:sample_rate=44100",
+         "-ac", "2", "-c:a", "flac", str(bed)],
+        check=True,
+    )
+    line = _tone(tmp_path / "line.wav", 1.0, freq=880.0, amp=0.5)
+    voice_track = write_wav(tmp_path / "voice.wav", assemble([(2.0, _read_wav(line))], 4.0))
+
+    def render(out: Path, **voice) -> Path:
+        asyncio.run(_cut_and_normalize_clip(
+            discover_ffmpeg(), _Handle(),
+            Clip(id="c", source_path=str(src), start=0.0, end=4.0, order=0),
+            True, 320, 240, 25.0, 30, "ultrafast", "landscape", "pad", out, 0.0, 1.0, **voice,
+        ))
+        return out
+
+    def band(path: Path, freq: int) -> bytes:
+        narrow = f"bandpass=f={freq}:width_type=q:w=8"
+        return subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-i", str(path),
+             "-af", f"{narrow},{narrow}", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"],
+            check=True, capture_output=True,
+        ).stdout
+
+    plain = render(tmp_path / "plain.mp4")
+    bed_only = render(tmp_path / "bed_only.mp4", bed_path=bed)
+    dubbed = render(tmp_path / "dubbed.mp4", voice_path=voice_track, bed_path=bed, original_volume=0.2)
+
+    speech = _rms(band(plain, 440), 0.5, 1.5)
+    assert speech > 0.01
+    # The speech is gone — not lowered, gone — with a voice and without one.
+    assert _rms(band(dubbed, 440), 0.5, 1.5) < speech * 0.05
+    assert _rms(band(bed_only, 440), 0.5, 1.5) < speech * 0.05
+    # The bed at its own level: `original_volume` is the ducked original's,
+    # and there is no original under a dub.
+    assert _rms(band(dubbed, 1500), 0.5, 1.5) == pytest.approx(
+        _rms(band(bed_only, 1500), 0.5, 1.5), rel=0.1)
+    # The voice where it was placed, and nowhere else.
+    voice = band(dubbed, 880)
+    assert _rms(voice, 2.2, 2.8) > 3 * _rms(voice, 0.5, 1.5)
+    assert len(band(dubbed, 880)) / (SAMPLE_RATE * 2) == pytest.approx(4.0, abs=0.1)
+
+
+def test_a_bed_is_asked_for_only_while_the_speech_is_removed(tmp_path):
+    kept = VoiceOver(ffmpeg=Path("ffmpeg"), segments=[], audio={}, original_volume=0.2)
+    assert kept.bed_for(5.0, 9.0) is None
+
+    beds = {(5.0, 9.0): tmp_path / "bed.flac"}
+    removed = VoiceOver(ffmpeg=Path("ffmpeg"), segments=[], audio={}, original_volume=0.2,
+                        remove_speech=True, beds=beds)
+    assert removed.bed_for(5.0000001, 9.0) == tmp_path / "bed.flac"
+    # A clip with no bed would go out speaking the source language in an
+    # export that asked for it to be removed: never a quiet fall back.
+    with pytest.raises(voiceover.VoiceOverError):
+        removed.bed_for(20.0, 26.0)
+
+
 def test_voiceover_module_names_its_ceiling_in_one_place():
     """The tempo the placement allows is the one the decode applies."""
     assert voiceover.MAX_TEMPO <= 2.0  # atempo's own ceiling for one filter

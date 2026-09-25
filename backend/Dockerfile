@@ -37,8 +37,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# The clean dub — Demucs removing the source speech under the Mongolian
+# voice — is built into the WORKER only. Set INSTALL_DUB=1 as a variable on
+# the worker service: Railway passes a service variable into a Dockerfile
+# build only when an ARG names it, and the API service, which never sets it,
+# keeps the slim image (no torch: see requirements.txt for why).
+ARG INSTALL_DUB=0
+ARG DEMUCS_MODEL=htdemucs
+
+COPY requirements.txt requirements-dub.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && if [ "$INSTALL_DUB" = "1" ]; then pip install --no-cache-dir -r requirements-dub.txt; fi
+
+# The weights are baked in, not fetched on the first dub: a download in the
+# middle of an export is one more thing that can fail it, and a restart
+# would fetch them again. Before the app is copied, so a code change does
+# not throw this layer away. The path is the one the app reads
+# (app.config.Settings.model_cache_dir).
+ENV MODEL_CACHE_DIR=/opt/models
+RUN if [ "$INSTALL_DUB" = "1" ]; then \
+        python -c "import torch; torch.hub.set_dir('$MODEL_CACHE_DIR'); \
+from demucs.pretrained import get_model; get_model('$DEMUCS_MODEL')"; \
+    fi
 
 COPY alembic.ini ./
 COPY app ./app

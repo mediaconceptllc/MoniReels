@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# The clean dub: Demucs removes the source speech from each exported range
+# (app/audio/dub_bed.py). WORKER IMAGE ONLY — built in when the worker
+# service sets INSTALL_DUB=1 (see the Dockerfile); the API never imports it.
+#
+# Deliberately NOT the whole of requirements-ml.txt: silero-vad there
+# switches transcription over to VAD chunking the moment it is importable,
+# and the dub is no reason to change how speech is recognised.
+#
+# torch does not read the container's cgroup CPU limit; app.worker sizes
+# its thread pool from the real quota before torch is imported, and
+# dub_bed.separate_sync sets it again (app.config.heavy_threads).
+# ---------------------------------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchaudio==2.5.1+cpu
+demucs==4.0.1
+# Demucs hands its sources back as tensors; the bed leaves as numpy bytes.
+numpy==1.26.4

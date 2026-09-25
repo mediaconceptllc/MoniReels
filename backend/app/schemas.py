@@ -175,6 +175,8 @@ class ExportSettingsIn(BaseModel):
         | None
     ) = Field(default=None, max_length=50)
 
+    source_speech: Literal["duck", "remove"] | None = None
+
     @field_validator("speaker_voices")
     @classmethod
     def _default_is_no_entry(cls, value: dict[str, str] | None) -> dict[str, str] | None:

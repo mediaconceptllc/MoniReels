@@ -153,8 +153,14 @@ export interface ExportSettings {
   /** Read the Mongolian translation aloud over the video. Only for a video
    *  not in Mongolian; billed per character. */
   voice_over: boolean;
-  /** How loud the original sound stays under the voice, 0–1. */
+  /** How loud the original sound stays under the voice, 0–1. Only while the
+   *  speech is ducked: removed, what is left plays at its own level. */
   original_volume: number;
+  /** What happens to the speech the voice replaces: "duck" keeps the whole
+   *  original under the voice at `original_volume`; "remove" separates the
+   *  speech out on the worker (Demucs) and keeps the music and the room.
+   *  Ducked by default — it needs nothing the worker may not have. */
+  source_speech: "duck" | "remove";
   /** A voice per speaker: {transcript speaker label: ElevenLabs voice id}.
    *  Sent whole. A speaker with no entry — and a line with no speaker — is
    *  read in the default voice chosen on the admin page. */
@@ -249,6 +255,13 @@ export interface VoiceReport {
    *  the ones worth listening to before publishing. */
   sped_up: number;
   cut: number;
+  /** With the source speech removed: the cuts separated by this export and
+   *  the seconds of sound that took, and the cuts separated before. Worker
+   *  time rather than money — nothing is billed — but the reason an export
+   *  ran long. Absent on an export made before the choice existed. */
+  beds_separated?: number;
+  bed_seconds?: number;
+  beds_cached?: number;
 }
 
 export interface Job {
@@ -499,7 +512,8 @@ export type ProviderSettingsPatch = Partial<
  *  together — the code exists, a key is set, nothing is blocking it — and
  *  `blocked` says which one is missing, in the operator's language. */
 export interface Capability {
-  name: "stt" | "llm" | "tts";
+  /** `separation` is answered by the worker, not a key — admin view only. */
+  name: "stt" | "llm" | "tts" | "separation";
   label: string;
   ready: boolean;
   blocked: string | null;

@@ -236,17 +236,19 @@ async def test_every_idea_is_rendered_with_the_voice(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatch, tmp_path):
-    """A brand intro is not a range of the source and has no lines in it."""
+    """A brand intro is not a range of the source and has no lines in it —
+    nor any speech of the source's to remove."""
     from app.export import pipeline
     from app.timeline.models import Clip
 
-    cuts: list[tuple[str, object, float]] = []
+    cuts: list[tuple[str, object, float, object]] = []
 
     async def fake_probe(ffprobe, path):
         return {"fps": 30.0, "has_audio": True, "duration": 3.0}
 
-    async def fake_cut(binaries, handle, clip, has_audio, *args, voice_path=None, original_volume=1.0):
-        cuts.append((clip.source_path, voice_path, original_volume))
+    async def fake_cut(binaries, handle, clip, has_audio, *args, voice_path=None, original_volume=1.0,
+                       bed_path=None):
+        cuts.append((clip.source_path, voice_path, original_volume, bed_path))
 
     async def fake_concat(binaries, handle, paths, total, workdir, out_path):
         Path(out_path).write_bytes(b"mp4")
@@ -261,6 +263,9 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
             self.asked.append((start, end))
             out_path.write_bytes(b"wav")
             return out_path
+
+        def bed_for(self, start, end):
+            return Path(f"/beds/{start}-{end}.flac")
 
     monkeypatch.setattr(pipeline, "probe_video", fake_probe)
     monkeypatch.setattr(pipeline, "_cut_and_normalize_clip", fake_cut)
@@ -280,5 +285,7 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
 
     assert voice.asked == [(5.0, 9.0)]
     (intro_cut, content_cut) = cuts
-    assert intro_cut[0] == str(intro) and intro_cut[1] is None
+    assert intro_cut[0] == str(intro) and intro_cut[1] is None and intro_cut[3] is None
     assert content_cut[0] == "/src.mp4" and content_cut[1] is not None and content_cut[2] == 0.25
+    # The content is laid over the bed for exactly its own range.
+    assert content_cut[3] == Path("/beds/5.0-9.0.flac")
