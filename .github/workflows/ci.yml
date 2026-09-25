@@ -190,3 +190,42 @@ jobs:
             # config value into a crash loop rather than a clear error.
             python -c "import app.main, app.worker"
           '
+
+  dub-image:
+    name: Worker image with the clean dub
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The worker service is built with INSTALL_DUB=1 (docs/DEPLOY.md):
+      # torch, Demucs and the model's weights, baked in. The image above
+      # never has them, so it proves nothing about this one — and the backend
+      # tests fake the separation itself. This is the only place the real
+      # model runs before production.
+      #
+      # Its own cache scope: sharing the default one with the image above
+      # would have each build evict the other's layers, and these are the
+      # expensive ones.
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: false
+          load: true
+          tags: monireels-dub-ci:latest
+          build-args: |
+            INSTALL_DUB=1
+          cache-from: type=gha,scope=dub
+          cache-to: type=gha,scope=dub,mode=max
+
+      - name: The worker image can remove the speech
+        run: |
+          docker image inspect -f 'Image size: {{.Size}} bytes' monireels-dub-ci:latest
+          # --network none: the weights must already be IN the image. A worker
+          # that fetched them on its first dub would fail that dub whenever the
+          # download did, and fetch them again after every restart.
+          docker run --rm --network none monireels-dub-ci:latest sh -euc '
+            python -c "import app.main, app.worker"
+            python -m app.audio.dub_bed --smoke
+          '

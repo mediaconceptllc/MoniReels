@@ -105,6 +105,9 @@
     "result": {
       "elapsed_sec": 0.0,
       "voice": {
+        "bed_seconds": 0.0,
+        "beds_cached": 0,
+        "beds_separated": 0,
         "cached": 0,
         "characters": 0,
         "cut": 0,
@@ -176,6 +179,7 @@
       "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
+      "source_speech": "duck",
       "speaker_voices": {
         "*": ""
       },
@@ -218,6 +222,9 @@
         "result": {
           "elapsed_sec": 0.0,
           "voice": {
+            "bed_seconds": 0.0,
+            "beds_cached": 0,
+            "beds_separated": 0,
             "cached": 0,
             "characters": 0,
             "cut": 0,
@@ -448,6 +455,7 @@
       "original_volume": 0.0,
       "portrait_fill": "blur",
       "preset": "",
+      "source_speech": "duck",
       "speaker_voices": {
         "*": ""
       },
@@ -699,6 +707,16 @@
   },
   "providers": {
     "capabilities": [
+      {
+        "blocked": "",
+        "configured": false,
+        "implemented": false,
+        "label": "",
+        "name": "separation",
+        "powers": "",
+        "provider": "",
+        "ready": false
+      },
       {
         "blocked": "",
         "configured": false,

@@ -73,23 +73,33 @@ async def _cut_and_normalize_clip(
     progress_hi: float,
     voice_path: Path | None = None,
     original_volume: float = 1.0,
+    bed_path: Path | None = None,
 ) -> None:
     vf = build_video_filter(width, height, fps, orientation, portrait_fill)
     duration = clip.end - clip.start
 
     args = ["-ss", f"{clip.start:.3f}", "-to", f"{clip.end:.3f}", "-i", clip.source_path]
-    if voice_path is not None:
-        # The voice track is built on the clip's own timeline (0 = clip.start),
-        # so it takes no seek of its own. Video keeps its plain -vf; only the
-        # sound goes through the graph.
+    if voice_path is not None or bed_path is not None:
+        # The voice track and the bed are built on the clip's own timeline
+        # (0 = clip.start), so they take no seek of their own. Video keeps its
+        # plain -vf; only the sound goes through the graph. The source's own
+        # sound is not mapped at all when there is a bed: it still speaks.
         af = build_audio_filter(AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_LAYOUT)
+        voice_input = bed_input = None
+        if voice_path is not None:
+            args += ["-i", str(voice_path)]
+            voice_input = 1
+        if bed_path is not None:
+            args += ["-i", str(bed_path)]
+            bed_input = 2 if voice_path is not None else 1
         args += [
-            "-i", str(voice_path),
             "-map", "0:v", "-vf", vf,
-            "-filter_complex", build_voice_mix(af, original_volume, has_audio),
+            "-filter_complex", build_voice_mix(
+                af, original_volume, has_audio, voice_input=voice_input, bed_input=bed_input,
+            ),
             "-map", "[vo_mix]",
         ]
-        if not has_audio:
+        if not has_audio and bed_path is None:
             args += ["-shortest"]
     elif has_audio:
         af = build_audio_filter(AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_LAYOUT)
@@ -352,19 +362,22 @@ async def render_timeline(
             meta = await probe_video(binaries.ffprobe, Path(clip.source_path))  # type: ignore[arg-type]
             out_path = workdir / f"clip_{i:03d}.mp4"
             # Only the content speaks Mongolian: a brand intro or outro is
-            # not a range of the source and has no lines in it.
-            voice_path = None
+            # not a range of the source and has no lines in it — nor any
+            # speech of the source's to remove.
+            voice_path = bed_path = None
             if voice is not None and clip.source_path == transcript_source:
                 voice_path = await voice.track_for(
                     clip.start, clip.end, workdir / f"voice_{i:03d}.wav"
                 )
                 if voice_path is not None:
                     voice_paths.append(voice_path)
+                bed_path = voice.bed_for(clip.start, clip.end)
             await _cut_and_normalize_clip(
                 binaries, handle, clip, meta["has_audio"], width, height, target_fps,
                 crf, preset, orientation, portrait_fill, out_path, lo, hi,
                 voice_path=voice_path,
                 original_volume=voice.original_volume if voice is not None else 1.0,
+                bed_path=bed_path,
             )
             normalized_paths.append(out_path)
             clip_durations.append(clip.end - clip.start)

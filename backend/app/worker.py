@@ -15,6 +15,7 @@ the next is a full-CPU encode.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import signal
 import socket
@@ -23,17 +24,24 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app import worker_report
 from app.ai import usage as llm_usage
 from app.ai.openrouter_client import build_client as build_llm_client
 from app.ai.schema import count_limits, default_counts
 from app.ai.suggest import generate_suggestions
 from app.ai.translate import translate_transcript
+from app.audio import dub_bed
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
 from app.jobs import queue
 from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
-from app.languages import needs_translation, subtitle_segments, voice_over_on
+from app.languages import (
+    needs_translation,
+    removes_source_speech,
+    subtitle_segments,
+    voice_over_on,
+)
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
 from app.stt.factory import build_client as build_stt_client
@@ -450,7 +458,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     # render. Each clip bought is stored the moment it arrives, so a retry
     # pays only for what the failed attempt did not get.
     voice = (
-        await _prepare_voice(handle, project, ranges, workdir, binaries)
+        await _prepare_voice(handle, project, ranges, workdir, binaries, local)
         if voice_over_on(project) and project.transcript is not None
         else None
     )
@@ -532,9 +540,25 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
 
 
 async def _prepare_voice(
-    handle: JobHandle, project, ranges: list[tuple[float, float]], workdir: Path, binaries
+    handle: JobHandle,
+    project,
+    ranges: list[tuple[float, float]],
+    workdir: Path,
+    binaries,
+    source: Path,
 ) -> voiceover.VoiceOver:
     from app import provider_settings
+
+    remove_speech = removes_source_speech(project)
+    # Before a character is paid for: the voice would be bought for an export
+    # that cannot be made the way it was asked for. The page is told this
+    # before it queues (app.worker_report); an export queued before this
+    # worker was deployed without Demucs is the case that reaches here.
+    if remove_speech and not dub_bed.available():
+        raise dub_bed.DubUnavailable(
+            "Эх яриаг арилгах Demucs энэ worker-т суугаагүй байна — worker сервисийг "
+            "INSTALL_DUB=1-ээр дахин build хийнэ."
+        )
 
     with session_scope() as db:
         settings = provider_settings.effective(db)
@@ -552,12 +576,44 @@ async def _prepare_voice(
         )
     finally:
         await client.aclose()
-    return voiceover.VoiceOver(
+    voice = voiceover.VoiceOver(
         ffmpeg=binaries.ffmpeg,
         segments=project.transcript.segments,
         audio=audio,
         original_volume=project.export.original_volume,
         report=report,
+        remove_speech=remove_speech,
+    )
+    if remove_speech:
+        voice.beds, beds = await _prepare_beds(handle, ranges, workdir, binaries, source)
+        report.beds_separated = beds.separated
+        report.bed_seconds = beds.seconds
+        report.beds_cached = beds.cached
+    return voice
+
+
+async def _prepare_beds(
+    handle: JobHandle, ranges: list[tuple[float, float]], workdir: Path, binaries, source: Path
+) -> tuple[dict[tuple[float, float], Path], dub_bed.BedReport]:
+    """The rendered ranges without their speech, separated before the render
+    for the reason the voice is: a failure costs a download, not a render."""
+    settings = get_settings()
+
+    async def on_progress(p: float) -> None:
+        await handle.set_progress(0.10 + p * 0.10, stage="separating",
+                                  message="Removing the source speech")
+
+    await handle.set_progress(0.10, stage="separating", message="Removing the source speech")
+    separate = functools.partial(
+        dub_bed.separate_sync,
+        model_name=settings.demucs_model,
+        cache_dir=settings.resolved_model_cache_dir,
+        threads=heavy_threads(),
+    )
+    return await dub_bed.prepare(
+        binaries.ffmpeg, _project_id(handle), source, ranges, workdir / "beds",
+        model_name=settings.demucs_model, separate=separate,
+        check=handle.raise_if_cancelled, on_progress=on_progress,
     )
 
 
@@ -569,6 +625,8 @@ def _retry_cannot_help(error: Exception) -> bool:
     to be refused the same way. Settled at once, like a full disk, with the
     provider's reason as the error.
     """
+    if isinstance(error, dub_bed.DubUnavailable):
+        return True
     return isinstance(error, TtsError) and error.ends_the_run
 
 
@@ -693,6 +751,9 @@ async def _housekeeping(settings) -> None:
     """
     try:
         for label, work in (
+            # First: one row, and the API's clean-dub guard reads it. Behind
+            # a reap stuck on a dead worker's lock it would wait out that lock.
+            ("reporting what this worker can do", _publish_report),
             ("reaping stale jobs", lambda: queue.reap_stale()),
             ("purging old jobs", lambda: queue.purge_old(settings.job_keep_days)),
             ("deleting retired scratch", purge_trash),
@@ -728,6 +789,15 @@ def _abort_stale_uploads() -> int:
     from app import r2
 
     return r2.abort_stale_uploads()
+
+
+def _publish_report() -> int:
+    """What this worker can do, for the API to read (app.worker_report).
+    Every pass, not only at start: a worker redeployed without Demucs has
+    said so within a minute, before a producer asks it for a dub."""
+    with session_scope() as db:
+        worker_report.publish(db, worker_report.current())
+    return 0
 
 
 async def _drain(running: dict[asyncio.Task, Any], grace_s: int) -> None:
@@ -796,8 +866,9 @@ async def main() -> None:
 
     worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
     logger.info(
-        "Worker %s starting (threads=%d, concurrency=%d, separation=%s)",
+        "Worker %s starting (threads=%d, concurrency=%d, separation=%s, dub=%s)",
         worker_id, threads, settings.worker_concurrency, settings.enable_separation,
+        dub_bed.available(),
     )
     clear_all_workdirs()
 

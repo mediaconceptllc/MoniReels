@@ -77,7 +77,7 @@ SHAPE_DIR = Path(__file__).resolve().parents[2] / "frontend" / ".shape"
 _LITERAL = frozenset({
     "role", "state", "kind", "source", "orientation", "portrait_fill",
     "position", "capabilities.name", "subtitle_language", "project.language",
-    "used_for",
+    "used_for", "source_speech",
 })
 
 #: `Record<string, …>` in api.ts: the KEYS are data, not field names, so they

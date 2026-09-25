@@ -254,7 +254,7 @@ export default function ProjectPage() {
           : translationBlocked
             ? "Орчуулга дуустал"
             : voiceBlocked
-              ? "Монгол дуу тохируулаагүй"
+              ? "Монгол дуу бэлэн биш"
               : "Саналаас экспортлоно",
     },
   ];

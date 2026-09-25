@@ -119,7 +119,12 @@ async def transcribe_audio(
     workdir.mkdir(parents=True, exist_ok=True)
     speech_path = audio_path
 
-    if separation_available(settings):
+    # Only the VAD path reads the separated vocals: without VAD the provider
+    # is handed the original audio, and separating first would run the whole
+    # video through Demucs for nothing. Reachable since the worker can carry
+    # Demucs for the clean dub (INSTALL_DUB=1) and still have no VAD.
+    vad = vad_available()
+    if separation_available(settings) and vad:
         from app.audio.separation import SeparationError, separate_vocals
 
         vocals_path = workdir / "vocals.wav"
@@ -129,21 +134,24 @@ async def transcribe_audio(
                 audio_path,
                 vocals_path,
                 music_path,
-                settings.resolved_model_cache_dir
-                if hasattr(settings, "resolved_model_cache_dir")
-                else workdir / "models",
+                settings.resolved_model_cache_dir,
                 settings.demucs_model,
             )
             speech_path = vocals_path
         except SeparationError:
             logger.exception("Vocal separation failed; continuing on the unseparated audio")
     elif settings.enable_separation:
-        logger.warning("ENABLE_SEPARATION is set but demucs/torch are not installed; skipping separation")
+        logger.warning(
+            "ENABLE_SEPARATION is set but %s; skipping separation",
+            "Silero VAD is not installed, and only VAD reads the separated vocals"
+            if separation_available(settings)
+            else "demucs/torch are not installed",
+        )
 
     if on_progress:
         await on_progress(0.3)
 
-    if not vad_available():
+    if not vad:
         logger.info("Silero VAD unavailable; using the provider's pause-based chunking")
         return await _provider_chunking(client, audio_path, workdir, on_progress, ffmpeg_path)
 

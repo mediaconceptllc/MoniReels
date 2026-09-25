@@ -154,6 +154,11 @@ class Settings(BaseSettings):
     # Turn it on only on a worker service, never on the API service.
     enable_separation: bool = False
     demucs_model: str = "htdemucs"
+    # Where Demucs keeps its weights. The worker image built with
+    # INSTALL_DUB=1 bakes them in at /opt/models, so a dub never waits on —
+    # or fails on — a download in the middle of an export. Empty => under
+    # WORK_DIR, which a restart wipes.
+    model_cache_dir: str = ""
     # Hard ceiling for any torch/ffmpeg thread pool. 0 => derive from the
     # container's own cgroup quota (see heavy_threads).
     torch_threads: int = 0
@@ -199,6 +204,10 @@ class Settings(BaseSettings):
     @property
     def resolved_work_dir(self) -> Path:
         return Path(self.work_dir)
+
+    @property
+    def resolved_model_cache_dir(self) -> Path:
+        return Path(self.model_cache_dir) if self.model_cache_dir else self.resolved_work_dir / "models"
 
     @property
     def r2_account(self) -> str:

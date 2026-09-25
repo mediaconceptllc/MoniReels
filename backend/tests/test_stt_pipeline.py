@@ -112,6 +112,27 @@ async def test_separation_is_off_unless_explicitly_enabled(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_separation_is_skipped_when_nothing_would_read_it(tmp_path, monkeypatch):
+    """Only VAD reads the separated vocals. The worker built for the clean dub
+    (INSTALL_DUB=1) has Demucs and no VAD: separating there would put the
+    whole video through Demucs and hand the provider the original anyway."""
+    called = []
+
+    async def _separate(*args, **kwargs):
+        called.append(args)
+
+    monkeypatch.setattr("app.audio.separation.separate_vocals", _separate)
+    monkeypatch.setattr(pipeline_mod, "separation_available", lambda _settings: True)
+    monkeypatch.setattr(pipeline_mod, "vad_available", lambda: False)
+    client = _FakeSttClient()
+
+    result = await _run(client, tmp_path, settings=_settings(enable_separation=True))
+
+    assert called == []
+    assert result.full_text == "fallback" and len(client.fallback_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_falls_back_on_vad_error(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline_mod, "vad_available", lambda: True)
     monkeypatch.setattr(pipeline_mod, "torch_available", lambda: True)

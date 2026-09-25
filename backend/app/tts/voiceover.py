@@ -185,6 +185,12 @@ class VoiceReport:
     #: that reached the end of their clip and were cut there.
     sped_up: int = 0
     cut: int = 0
+    #: With the source speech removed (export.source_speech "remove"): ranges
+    #: Demucs separated for THIS export — worker CPU spent — the seconds of
+    #: sound they held, and ranges already separated by an earlier one.
+    beds_separated: int = 0
+    bed_seconds: float = 0.0
+    beds_cached: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -195,6 +201,9 @@ class VoiceReport:
             "missing": self.missing,
             "sped_up": self.sped_up,
             "cut": self.cut,
+            "beds_separated": self.beds_separated,
+            "bed_seconds": round(self.bed_seconds, 1),
+            "beds_cached": self.beds_cached,
         }
 
 
@@ -326,15 +335,41 @@ def write_wav(path: Path, pcm: bytes) -> Path:
 
 @dataclass
 class VoiceOver:
-    """The prepared voice for one export, and the level the original sound
-    keeps under it. `render_timeline` asks it for one track per clip."""
+    """The prepared voice for one export, and what it is laid over.
+    `render_timeline` asks it for one track per clip, and one bed.
+
+    The original stays under the voice at `original_volume` — unless
+    `remove_speech`, when each clip is laid over its bed instead: the
+    original with every voice taken out (app.audio.dub_bed), at its own
+    level."""
 
     ffmpeg: Path
     segments: list[Segment]
     audio: dict[str, Path]
     original_volume: float
     report: VoiceReport = field(default_factory=VoiceReport)
+    remove_speech: bool = False
+    #: {dub_bed.range_key: flac path}, one per rendered range.
+    beds: dict[tuple[float, float], Path] = field(default_factory=dict)
     _decoded: dict[Path, bytes] = field(default_factory=dict, repr=False)
+
+    def bed_for(self, start: float, end: float) -> Path | None:
+        """The speech-free sound of the clip [start, end), or None when the
+        speech is not being removed.
+
+        A clip with no bed while it is being removed is an error, never a
+        quiet fall back to the original: that clip would go out speaking the
+        source language under the Mongolian, in an export the producer asked
+        to have it removed from.
+        """
+        if not self.remove_speech:
+            return None
+        from app.audio.dub_bed import range_key
+
+        bed = self.beds.get(range_key(start, end))
+        if bed is None:
+            raise VoiceOverError(f"No speech-free bed was prepared for {start:.3f}-{end:.3f}")
+        return bed
 
     async def _natural(self, path: Path) -> bytes:
         if path not in self._decoded:

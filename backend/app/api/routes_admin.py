@@ -95,7 +95,7 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     Never raises. A provider being unreachable is itself the answer, and a
     diagnostics page that 500s tells the operator nothing.
     """
-    from app import provider_settings, providers
+    from app import provider_settings, providers, worker_report
     from app.stt import factory
 
     # Stored overrides included: a page that reports the environment while
@@ -130,7 +130,12 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
         # What serves what, and what an operator can do about each — the keys
         # sat in one list with no indication of which feature they powered,
         # and one of them powers nothing at all yet.
-        "capabilities": [c.to_dict() for c in providers.describe(settings)],
+        # The dub's separation last: the worker, not a key, decides it, and
+        # the worker says what it can do (app.worker_report).
+        "capabilities": [
+            c.to_dict()
+            for c in [*providers.describe(settings), providers.separation(worker_report.read(db))]
+        ],
         "stt": stt,
         "stt_providers": list(factory.PROVIDERS),
         # The key itself is never echoed — only whether one is present. The

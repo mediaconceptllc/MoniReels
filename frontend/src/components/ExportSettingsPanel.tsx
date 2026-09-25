@@ -211,21 +211,50 @@ export function ExportSettingsPanel({
             ElevenLabs-ээр, тэмдэгтээр нь төлбөртэй. Зөвхөн экспортлох хэсгүүдийн мөрийг, нэг
             удаа: дахин экспортлоход өмнө нь үүсгэснээ ашиглана.
           </p>
+          {/* What the voice does to the speech it replaces. Removing it is
+              the worker's job and costs its time, so the cost is said here —
+              and so is what goes with it: every voice, sung ones included. */}
+          {/* `grid-cols-1`, not a bare `grid`: an implicit column is as wide
+              as its widest option, and on a phone that ran past the card. */}
           {draft.voice_over && (
-            <Field
-              label={`Эх дууны түвшин — ${Math.round(draft.original_volume * 100)}%`}
-              hint="Монгол дууны доор эх дуу хэр сонсогдох вэ. 0% бол бүрэн чимээгүй."
-            >
-              <input
-                type="range"
-                min={0}
-                max={60}
-                step={5}
-                value={Math.round(draft.original_volume * 100)}
-                onChange={(e) => update("original_volume", Number(e.target.value) / 100)}
-                className={`${TAP} w-full accent-[var(--accent)]`}
-              />
-            </Field>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field
+                label="Эх яриа"
+                hint={
+                  draft.source_speech === "remove"
+                    ? "Эх яриаг хөгжим, орчны чимээнээс салгаж хасна (Demucs) — хөгжим, чимээ өөрийн түвшнээрээ үлдэнэ. Хүний бүх дуу хоолой хасагдана, хөгжим доторх дуулалт ч мөн. Салгалт сервер дээр явдаг тул экспорт удаашрана; нэг удаа салгасныг хадгалж, дахин экспортлоход ашиглана."
+                    : "Эх дуу бүхэлдээ — яриа, хөгжим, чимээ — монгол дууны доор намуухан сонсогдоно."
+                }
+              >
+                <Select
+                  value={draft.source_speech}
+                  onChange={(e) =>
+                    update("source_speech", e.target.value as ExportSettings["source_speech"])
+                  }
+                >
+                  <option value="duck">Намсгах — эх дуу доор нь сонсогдоно</option>
+                  <option value="remove">Арилгах — хөгжим, чимээ л үлдэнэ</option>
+                </Select>
+              </Field>
+              {/* Removed, nothing of the speech is left to set a level for:
+                  what remains plays as it was mixed. */}
+              {draft.source_speech === "duck" && (
+                <Field
+                  label={`Эх дууны түвшин — ${Math.round(draft.original_volume * 100)}%`}
+                  hint="Монгол дууны доор эх дуу хэр сонсогдох вэ. 0% бол бүрэн чимээгүй."
+                >
+                  <input
+                    type="range"
+                    min={0}
+                    max={60}
+                    step={5}
+                    value={Math.round(draft.original_volume * 100)}
+                    onChange={(e) => update("original_volume", Number(e.target.value) / 100)}
+                    className={`${TAP} w-full accent-[var(--accent)]`}
+                  />
+                </Field>
+              )}
+            </div>
           )}
           {draft.voice_over && (
             <SpeakerVoices

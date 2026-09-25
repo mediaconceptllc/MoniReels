@@ -46,6 +46,23 @@ def voice_over_on(project) -> bool:
     return needs_translation(project.language) and bool(project.export.voice_over)
 
 
+def removes_source_speech(project) -> bool:
+    """Whether this project's export takes the source speech out from under
+    the Mongolian voice (export.source_speech "remove") rather than ducking it.
+
+    A video with no sound has no speech to remove: the voice is all there is.
+    One definition, because the API's guard and the worker both ask — asked
+    two ways, the page refuses an export the worker would have made, or
+    queues one it cannot.
+    """
+    return (
+        voice_over_on(project)
+        and project.export.source_speech == "remove"
+        and project.video is not None
+        and bool(project.video.has_audio)
+    )
+
+
 def translation_uses(project) -> list[str]:
     """What this project's export would use the translation for — subtitles,
     the voice, both, or nothing. Named rather than collapsed to a yes/no,

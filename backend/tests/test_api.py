@@ -1851,6 +1851,139 @@ def test_a_voice_over_that_can_be_made_goes_ahead(client, db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# A clean dub: the source speech removed from under the voice, not ducked
+# ---------------------------------------------------------------------------
+
+def _worker_says(db, *, separation: bool) -> None:
+    """What the worker would publish about itself (app.worker_report)."""
+    import time
+
+    from app import worker_report
+
+    worker_report.publish(db, worker_report.WorkerReport(
+        separation=separation, model="htdemucs", at=time.time(),
+    ))
+    db.commit()
+
+
+def test_the_source_speech_is_ducked_unless_asked_and_only_two_ways_are_known(client, db):
+    alice = _user(db, "speechkeep")
+    row = _project_with_video(db, alice)
+    auth = _auth(client, "speechkeep")
+    # Every project exported before the choice existed sounds as it did.
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["export"]["source_speech"] == "duck"
+
+    body = {"export": {"source_speech": "remove"}}
+    saved = client.patch(f"/projects/{row.id}", json=body, headers=auth).json()["export"]
+    assert saved["source_speech"] == "remove"
+
+    muted = {"export": {"source_speech": "mute"}}
+    assert client.patch(f"/projects/{row.id}", json=muted, headers=auth).status_code == 422
+
+
+def test_removing_the_speech_waits_for_a_worker_that_says_it_can(client, db, monkeypatch):
+    """The API image never has Demucs; only the worker can answer, and until
+    it has, unknown is not "can"."""
+    row = _english_project(db, "cleandub", translations=("Сайн уу.", "Баяртай."),
+                           voice_over=True, source_speech="remove")
+    auth = _auth(client, "cleandub")
+
+    def blocked():
+        return client.get(f"/projects/{row.id}", headers=auth).json()["voice"]["blocked"]
+
+    # With no key there is no voice to lay on anything: that is said first.
+    _voice_ready(monkeypatch, ready=False)
+    assert "түлхүүр" in blocked()
+
+    _voice_ready(monkeypatch)
+    assert "мэдээлээгүй" in blocked()
+
+    _worker_says(db, separation=False)
+    # Names the fix, and the choice that works without it.
+    assert "INSTALL_DUB=1" in blocked() and "Намсгах" in blocked()
+
+    _worker_says(db, separation=True)
+    assert blocked() is None
+
+
+def test_a_ducked_voice_asks_nothing_of_the_worker(client, db, monkeypatch):
+    row = _english_project(db, "duckdub", translations=("Сайн уу.", "Баяртай."), voice_over=True)
+    _voice_ready(monkeypatch)
+    _worker_says(db, separation=False)
+    view = client.get(f"/projects/{row.id}", headers=_auth(client, "duckdub")).json()["voice"]
+    assert view == {"on": True, "blocked": None}
+
+
+def test_removing_the_speech_asks_nothing_while_the_voice_is_off(client, db, monkeypatch):
+    """The choice outlives the voice that needed it. Turned off, there is no
+    dub to clean — and an export refused for it would be refused for nothing."""
+    row = _english_project(db, "voiceoff", translations=("Сайн уу.", "Баяртай."),
+                           voice_over=False, source_speech="remove")
+    _with_suggestions(db, row)
+    _voice_ready(monkeypatch)
+    _worker_says(db, separation=False)
+    auth = _auth(client, "voiceoff")
+    assert client.get(f"/projects/{row.id}", headers=auth).json()["voice"] == {
+        "on": False, "blocked": None,
+    }
+    assert client.post(f"/projects/{row.id}/export-all", headers=auth).status_code == 200
+
+
+def test_a_video_without_sound_has_no_speech_to_remove(client, db, monkeypatch):
+    """The worker lays the voice alone there; refusing it would be refusing
+    an export that would have been made."""
+    row = _english_project(db, "mutedub", translations=("Сайн уу.", "Баяртай."),
+                           voice_over=True, source_speech="remove")
+    row.doc = {**row.doc, "video": {**row.doc["video"], "has_audio": False}}
+    db.commit()
+    _voice_ready(monkeypatch)
+    view = client.get(f"/projects/{row.id}", headers=_auth(client, "mutedub")).json()["voice"]
+    assert view == {"on": True, "blocked": None}
+
+
+def test_an_export_that_cannot_remove_the_speech_is_refused_before_it_starts(
+    client, db, monkeypatch,
+):
+    """Not queued to fail in the worker after the voice was bought, and not
+    exported with the English still under it: that is the export the producer
+    chose not to make."""
+    row = _english_project(db, "cleanno", translations=("Сайн уу.", "Баяртай."),
+                           voice_over=True, source_speech="remove")
+    _with_suggestions(db, row)
+    _voice_ready(monkeypatch)
+    _worker_says(db, separation=False)
+    auth = _auth(client, "cleanno")
+
+    for route in ("export-all", "export"):
+        if route == "export":
+            client.post(f"/projects/{row.id}/select", json={"ranges": [[0.0, 4.0]]}, headers=auth)
+        response = client.post(f"/projects/{row.id}/{route}", headers=auth)
+        assert response.status_code == 503, route
+        assert "INSTALL_DUB=1" in response.json()["detail"]
+
+    _worker_says(db, separation=True)
+    assert client.post(f"/projects/{row.id}/export-all", headers=auth).status_code == 200
+
+
+def test_the_admin_sees_whether_the_worker_can_remove_the_speech(client, db):
+    _user(db, "root", role="admin")
+
+    def separation():
+        body = client.get("/admin/providers", headers=_auth(client, "root")).json()
+        return next(c for c in body["capabilities"] if c["name"] == "separation")
+
+    # Listed before any worker has spoken: an operator looking for why the
+    # choice is refused finds the row that says so.
+    unknown = separation()
+    assert unknown["ready"] is False and "мэдээлээгүй" in unknown["blocked"]
+
+    _worker_says(db, separation=True)
+    ready = separation()
+    assert ready["ready"] is True and ready["blocked"] is None
+    assert "htdemucs" in ready["provider"]
+
+
+# ---------------------------------------------------------------------------
 # Choosing the voice
 # ---------------------------------------------------------------------------
 
