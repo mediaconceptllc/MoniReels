@@ -470,8 +470,15 @@ _RULES = " ".join(SYSTEM_PROMPT.split())
 def test_titles_hooks_and_captions_are_written_in_mongolian_whatever_the_video_is_in():
     """The rule was "the SAME LANGUAGE as the transcript" — which, for an
     English video, put English titles in front of a Mongolian audience."""
-    assert "`caption` in Mongolian (Cyrillic script)" in _RULES
+    assert "`caption` and `hashtags` in Mongolian (Cyrillic script)" in _RULES
     assert "SAME LANGUAGE as the transcript" not in _RULES
+
+
+def test_a_youtube_plan_is_written_in_mongolian_too():
+    """It was left out of the rule, and on an English video its title and its
+    one-line summary came back in English — on the card, and in the name of
+    the file the export writes."""
+    assert "a YouTube plan's `title` and `throughline` too" in _RULES
 
 
 def test_the_hook_quote_stays_in_the_language_it_was_copied_from():
@@ -491,12 +498,13 @@ def test_the_prompt_reference_shows_the_system_prompts_that_are_sent():
     decide why the model did what it did."""
     from pathlib import Path
 
-    from app.ai import punctuate, translate
+    from app.ai import localize, punctuate, translate
 
     reference = (Path(__file__).resolve().parents[2] / "docs" / "PROMPTS.md").read_text()
     for name, text in (
         ("prompts.SYSTEM_PROMPT", SYSTEM_PROMPT),
         ("punctuate.SYSTEM_PROMPT", punctuate.SYSTEM_PROMPT),
         ("translate.SYSTEM_PROMPT", translate.SYSTEM_PROMPT),
+        ("localize.SYSTEM_PROMPT", localize.SYSTEM_PROMPT),
     ):
         assert f"```\n{text}\n```" in reference, f"docs/PROMPTS.md-д {name} хуучирсан"

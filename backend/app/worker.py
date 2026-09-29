@@ -26,6 +26,7 @@ from typing import Any
 
 from app import worker_report
 from app.ai import usage as llm_usage
+from app.ai.localize import localize_suggestions
 from app.ai.openrouter_client import build_client as build_llm_client
 from app.ai.schema import count_limits, default_counts
 from app.ai.suggest import generate_suggestions
@@ -37,9 +38,12 @@ from app.jobs import queue
 from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
 from app.languages import (
+    lines_used,
     needs_translation,
     removes_source_speech,
     subtitle_segments,
+    suggested_ranges,
+    translation_holes,
     voice_over_on,
 )
 from app.models import Suggestions, Transcript, VideoMeta
@@ -276,6 +280,9 @@ async def handle_suggest(handle: JobHandle) -> dict:
             client, project.transcript, project.video.duration_sec,
             shorts=shorts, youtube=youtube,
         )
+        # Before anyone reads them: the cards in Mongolian, whatever the
+        # model wrote them in.
+        suggestions, localized = await _localize(client, suggestions)
     finally:
         await client.aclose()
 
@@ -286,7 +293,7 @@ async def handle_suggest(handle: JobHandle) -> dict:
         project.suggestions = suggestions
         save(db, project)
 
-    return {
+    result = {
         "shorts": len(suggestions.shorts),
         "youtube": len(suggestions.youtube),
         # What was asked for, beside what came back. The bill follows the ask
@@ -299,6 +306,59 @@ async def handle_suggest(handle: JobHandle) -> dict:
         # projected onto the next run (see app.spend.suggest_rate).
         "characters": len(project.transcript.full_text),
     }
+    if localized:
+        result["localized"] = localized
+    follow = _translate_suggested(project)
+    if follow:
+        result["translation"] = follow
+    return result
+
+
+async def _localize(client, suggestions: Suggestions) -> tuple[Suggestions, int]:
+    """The suggestion texts in Mongolian (app.ai.localize), or as they are.
+
+    Never a reason to fail: the ideas are already paid for, and a card in
+    English is worth far less than the ideas it names. The failure is logged
+    and the texts stay as the model wrote them.
+    """
+    try:
+        return await localize_suggestions(client, suggestions)
+    except Exception:  # noqa: BLE001 - the ideas are paid for; keep them whatever this does
+        logger.exception("Could not translate the suggestion texts; they stay as the model wrote them")
+        return suggestions, 0
+
+
+def _translate_suggested(project) -> dict | None:
+    """Queues the translation of the lines the new suggestions cut, when an
+    export of them would show or read one that has none yet.
+
+    After the suggestions, not before them: they are chosen from what was
+    said, so a translation run first bought the whole transcript to export
+    a few minutes of it. Only the lines an export of them uses
+    (languages.translation_holes) — the rest can still be translated from
+    the page — and only when the export uses the translation at all: a
+    producer who chose subtitles in the spoken language and no Mongolian
+    voice is not billed for a translation nothing shows.
+
+    Queued as its own job rather than run here, so the ideas are on the page
+    while it runs, a failure costs only the translation, and a re-run is the
+    same button as any other. Its dedupe key is the manual one: a translation
+    of the project already running is not paid for twice.
+    """
+    missing = translation_holes(project, suggested_ranges(project))
+    if not missing:
+        return None
+    try:
+        job_id = queue.enqueue(
+            "translate",
+            project_id=project.id,
+            payload={"force": False, "scope": "suggested"},
+            dedupe_key=f"translate:{project.id}",
+        )
+    except Exception:  # noqa: BLE001 - the ideas are saved; the page offers the translation itself
+        logger.exception("Could not queue the translation of the suggested lines")
+        return None
+    return {"job_id": job_id, "lines": missing}
 
 
 async def handle_translate(handle: JobHandle) -> dict:
@@ -312,6 +372,15 @@ async def handle_translate(handle: JobHandle) -> dict:
     if project.transcript is None or not project.transcript.segments:
         raise RuntimeError("Transcribe the video before translating it")
     force = (handle.payload or {}).get("force") is True
+    # "suggested": only the lines the suggestions cut — what follows a
+    # suggestion run on its own (_translate_suggested). Anything else, the
+    # whole transcript, as the page's button always did.
+    scope = "suggested" if (handle.payload or {}).get("scope") == "suggested" else "all"
+    only = (
+        {s.id for s in lines_used(project, suggested_ranges(project))}
+        if scope == "suggested"
+        else None
+    )
     read = project.transcript
 
     async def on_progress(p: float) -> None:
@@ -321,7 +390,7 @@ async def handle_translate(handle: JobHandle) -> dict:
     client = build_llm_client(settings)
     try:
         translated, report = await translate_transcript(
-            client, read, force=force, on_progress=on_progress
+            client, read, force=force, only=only, on_progress=on_progress
         )
     finally:
         await client.aclose()
@@ -352,7 +421,7 @@ async def handle_translate(handle: JobHandle) -> dict:
             applied += 1
         save(db, project)
 
-    return {**report.to_dict(), "applied": applied, "kept_edits": kept}
+    return {**report.to_dict(), "applied": applied, "kept_edits": kept, "scope": scope}
 
 
 async def handle_export_all(handle: JobHandle) -> dict:
@@ -366,8 +435,9 @@ async def handle_export(handle: JobHandle) -> dict:
 async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     from app import brand, r2
     from app.dbmodels import Output
+    from app.export.ideas import idea_ranges, pick_ideas
     from app.export.overlay import LogoOverlay
-    from app.export.pipeline import pick_ideas, render_all_ideas, render_timeline
+    from app.export.pipeline import render_all_ideas, render_timeline
 
     binaries = _require_ffmpeg()
     workdir = job_workdir(handle.job_id)
@@ -443,8 +513,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
                 "None of the selected ideas are still in this project: "
                 + "; ".join(skipped)
             )
-        ranges = [(c.start, c.end) for s in wanted.shorts for c in s.cuts]
-        ranges += [(r.start, r.end) for plan in wanted.youtube for r in plan.ranges]
+        ranges = idea_ranges(wanted)
     else:
         if not project.clips:
             raise RuntimeError("The timeline has no clips")

@@ -1,7 +1,7 @@
 # MoniReels — ашиглаж байгаа бүх Prompt
 
 Бүгд `backend/app/ai/`-д. Доорх нь **бодитоор илгээгддэг** текст —
-тогтмолууд орлуулагдсан, эх кодын мөр таслалт биш. Гурван SYSTEM prompt-ыг
+тогтмолууд орлуулагдсан, эх кодын мөр таслалт биш. Дөрвөн SYSTEM prompt-ыг
 `tests/test_ai_prompts.py` энэ файлтай үг үсгээр нь тулгана: кодод өөрчлөгдөөд
 энд өөрчлөгдөөгүй бол CI унана.
 
@@ -58,10 +58,11 @@ not summaries.
   "Today" / "In this video" / their equivalents.
 - `hook_quote` must be a verbatim substring copied from the transcript, taken from
   inside the `hook` cut. Do not paraphrase it.
-- Write `title`, `hook_text`, `on_screen_texts` and `caption` in Mongolian (Cyrillic
-  script): the audience is Mongolian whatever language the video is in. `hook_quote`
-  alone stays in the transcript's own language, because it is copied from it.
-  `role` and `why_it_works` stay in English.
+- Write `title`, `hook_text`, `on_screen_texts`, `caption` and `hashtags` in
+  Mongolian (Cyrillic script), and a YouTube plan's `title` and `throughline` too:
+  the audience is Mongolian whatever language the video is in. `hook_quote` alone
+  stays in the transcript's own language, because it is copied from it. `role` and
+  `why_it_works` stay in English.
 
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.
@@ -262,4 +263,38 @@ These lines came just before and are already translated. Keep names and terms th
 Translate these 1 lines:
 
 [2] (0.6s, at most 12 characters) Ready?
+```
+
+## 10. Саналын бичвэрийг монгол болгох SYSTEM prompt — `localize.SYSTEM_PROMPT`
+
+Хаана: `suggest` ажлын ТӨГСГӨЛД, санал хадгалагдахаас өмнө — ЗӨВХӨН монгол
+үсэг огт агуулаагүй бичвэр үлдсэн үед (`localize.needs_mongolian`). Загвар
+дүрмийг дагасан бол энэ дуудлага ОГТ явахгүй. `hook_quote` хэзээ ч
+орчуулагдахгүй: транскриптээс үгчлэн хуулсан ишлэл тул түүнтэй тулгагддаг.
+```
+You translate the texts of short-video suggestions into Mongolian for
+a Mongolian audience: titles, on-screen hooks, captions, hashtags and one-line
+summaries.
+
+Rules:
+- Write natural Mongolian in Cyrillic script, the way a Mongolian social-media
+  editor would write it — not word for word.
+- Keep each text what it is: a title stays a short title, a question stays a
+  question, a hashtag stays ONE hashtag that starts with # and has no spaces.
+- Keep names, brands, numbers and acronyms recognisable.
+- Return exactly one translation for EVERY text given, under the same index.
+
+Return JSON: {"texts": [{"i": <text index>, "text": "<Mongolian>"}]}
+```
+
+## 11. Саналын бичвэрийн хүсэлт — `localize.build_prompt`
+
+Бичвэр бүр ЮУ болохоо дагуулна: хэштэгийг өгүүлбэр болгон орчуулбал хэштэг
+биш болно. Хариултын хэштэг `#`-ээр эхэлж, хоосон зайгүй болгож цэгцлэгдэнэ.
+```
+Translate these 3 texts:
+
+[0] (hashtag) #compoundinterest
+[1] (video title) Why Most People Never Get Rich
+[2] (one-line summary) Three habits that decide what a salary becomes over thirty years.
 ```

@@ -24,6 +24,12 @@
  * translation mode what was said stays on screen above each line, read-only:
  * a translation is checked against the words, and a correction to the words
  * belongs on the other tab, where it clears the translation it invalidates.
+ *
+ * Translation opens on the lines the ideas cut (`focusIds`, the server's
+ * rule). They are what the translation after the suggestions translated and
+ * all an export needs; an hour of untranslated lines around them, every one
+ * marked as a hole, would bury the forty that matter. The rest is one tick
+ * away, and marked as not needed rather than missing.
  */
 
 import { useMemo, useRef, useState } from "react";
@@ -31,7 +37,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { timecode } from "@/lib/format";
 import type { Segment, SourceLanguage, TranslationStatus } from "@/lib/types";
-import { Alert, Badge, Button, TAP } from "@/components/ui";
+import { Alert, Badge, Button, Checkbox, TAP } from "@/components/ui";
 
 type Column = "text" | "translation";
 
@@ -50,6 +56,7 @@ export function TranscriptEditor({
   field = "text",
   language,
   translation,
+  focusIds,
 }: {
   projectId: string;
   segments: Segment[];
@@ -65,6 +72,9 @@ export function TranscriptEditor({
   language: SourceLanguage;
   /** The server's count. Absent reads as "nothing to translate". */
   translation?: TranslationStatus;
+  /** The lines an export of the ideas shows, by the server's rule. Empty or
+   *  absent: every line matters, as before there were ideas. */
+  focusIds?: string[];
 }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -77,6 +87,12 @@ export function TranscriptEditor({
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const translating = field === "translation";
+  const focus = useMemo(() => new Set(focusIds ?? []), [focusIds]);
+  const focusing = translating && focus.size > 0;
+  const [onlyFocus, setOnlyFocus] = useState(true);
+  const shown = focusing && onlyFocus ? segments.filter((s) => focus.has(s.id)) : segments;
+  // Holes that hold an export back — the cut lines once there are ideas.
+  const holes = focusing ? translation?.suggested_missing : translation?.missing;
 
   const changed = useMemo(
     () => segments.filter((s) => edits[s.id] !== undefined && edits[s.id] !== current(s, field)),
@@ -126,11 +142,15 @@ export function TranscriptEditor({
   const lines = (
     <div className="overflow-hidden rounded-lg border border-rule">
       <ul className="max-h-[34rem] divide-y divide-rule-soft overflow-y-auto">
-        {segments.map((segment) => {
+        {shown.map((segment) => {
           const value = edits[segment.id] ?? current(segment, field);
           const isChanged = value !== current(segment, field);
           const isPlaying = playing === segment.id;
-          const isMissing = translating && !value.trim() && !!segment.text.trim();
+          const untranslated = translating && !value.trim() && !!segment.text.trim();
+          // Only a line an export of the ideas shows is a hole. One no idea
+          // cuts is shown by nothing, and before there are ideas nothing is
+          // a hole yet: the lines they cut are translated after them.
+          const isMissing = untranslated && focus.has(segment.id);
           return (
             <li
               key={segment.id}
@@ -165,10 +185,18 @@ export function TranscriptEditor({
                   value={value}
                   rows={1}
                   lang={translating ? "mn" : language}
-                  placeholder={isMissing ? "Орчуулагдаагүй" : undefined}
+                  placeholder={
+                    !untranslated
+                      ? undefined
+                      : focusing && !isMissing
+                        ? "Орчуулагдаагүй — саналд ороогүй"
+                        : "Орчуулагдаагүй"
+                  }
                   aria-label={`${timecode(segment.start)} мөрийн ${translating ? "орчуулга" : "текст"}`}
                   onChange={(e) => setEdits((prev) => ({ ...prev, [segment.id]: e.target.value }))}
-                  className={`${TAP} field-sizing-content w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink placeholder:text-warn ${
+                  className={`${TAP} field-sizing-content w-full resize-y rounded border bg-transparent px-2 py-1.5 text-sm text-ink ${
+                    isMissing ? "placeholder:text-warn" : "placeholder:text-ink-3"
+                  } ${
                     isChanged
                       ? "border-warn/60"
                       : isMissing
@@ -192,9 +220,7 @@ export function TranscriptEditor({
             {translating ? "Монгол орчуулга" : "Хадмал текст"}
           </h3>
           <span className="tabular text-xs text-ink-3">
-            {translating && translation?.missing
-              ? `${translation.missing} мөр орчуулагдаагүй`
-              : `${segments.length} мөр`}
+            {translating && holes ? `${holes} мөр орчуулагдаагүй` : `${shown.length} мөр`}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -211,6 +237,12 @@ export function TranscriptEditor({
           </Button>
         </div>
       </div>
+
+      {focusing && (
+        <Checkbox checked={onlyFocus} onChange={setOnlyFocus}>
+          Зөвхөн саналд орсон мөрүүд ({focus.size} / нийт {segments.length})
+        </Checkbox>
+      )}
 
       {/* An honest caveat rather than a silent one: when a chunk held several
           sentences, the split between them inside that chunk was estimated.

@@ -204,11 +204,15 @@ export const api = {
   /** Translate what was said into Mongolian subtitles. Without `force` only
    *  lines that have no translation are sent — which is also how a run that
    *  failed part-way is finished without paying for the rest again. `force`
-   *  sends every line and replaces hand edits. */
-  translate: (id: string, force = false) =>
+   *  sends every line and replaces hand edits. `scope: "suggested"` sends
+   *  only the lines the suggestions cut — what runs by itself after them. */
+  translate: (
+    id: string,
+    { force = false, scope = "all" }: { force?: boolean; scope?: "all" | "suggested" } = {},
+  ) =>
     request<{ job_id: string }>(`/projects/${id}/translate`, {
       method: "POST",
-      body: JSON.stringify({ force }),
+      body: JSON.stringify({ force, scope }),
     }),
 
   /** Asks for `counts` ideas; omit them and the server applies what the

@@ -86,10 +86,11 @@ not summaries.
   "Today" / "In this video" / their equivalents.
 - `hook_quote` must be a verbatim substring copied from the transcript, taken from
   inside the `hook` cut. Do not paraphrase it.
-- Write `title`, `hook_text`, `on_screen_texts` and `caption` in Mongolian (Cyrillic
-  script): the audience is Mongolian whatever language the video is in. `hook_quote`
-  alone stays in the transcript's own language, because it is copied from it.
-  `role` and `why_it_works` stay in English.
+- Write `title`, `hook_text`, `on_screen_texts`, `caption` and `hashtags` in
+  Mongolian (Cyrillic script), and a YouTube plan's `title` and `throughline` too:
+  the audience is Mongolian whatever language the video is in. `hook_quote` alone
+  stays in the transcript's own language, because it is copied from it. `role` and
+  `why_it_works` stay in English.
 
 ## Method (do this internally before answering)
 1. List every distinct story in the video with its segment range.

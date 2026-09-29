@@ -210,6 +210,10 @@ const present: unknown[] = [
   raw.project.translation.needed, raw.project.translation.lines,
   raw.project.translation.translated, raw.project.translation.missing,
   raw.project.translation.blocks_export, raw.project.translation.used_for,
+  // The lines the suggestions cut: what follows them on its own, what the
+  // export asks about, and which rows the editor opens on.
+  raw.project.translation.suggested_lines, raw.project.translation.suggested_missing,
+  raw.project.translation.suggested_ids,
   // Whether the export reads a Mongolian voice and why it cannot right now —
   // the voice guard's own verdict, as for the translation above.
   raw.project.voice.on, raw.project.voice.blocked,

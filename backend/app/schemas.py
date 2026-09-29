@@ -312,6 +312,10 @@ class TranslateIn(BaseModel):
     says so before the click."""
 
     force: bool = False
+    #: "all", every line of the transcript, or "suggested", only the lines
+    #: the suggestions cut (app.languages.lines_used) — what the translation
+    #: that follows the suggestions runs, and all an export of them needs.
+    scope: Literal["all", "suggested"] = "all"
 
 
 class SuggestIn(BaseModel):
