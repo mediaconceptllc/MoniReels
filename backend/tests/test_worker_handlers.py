@@ -114,6 +114,8 @@ class Recorder:
             full_text="Сайн байна уу.",
         )
         self.suggestions = _suggestions()
+        #: The suggestion sets handed to app.ai.localize, in order.
+        self.localized: list[Suggestions] = []
 
 
 def _suggestions(*, youtube: bool = False) -> Suggestions:
@@ -208,6 +210,13 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "build_llm_client", build_llm)
     monkeypatch.setattr(worker, "transcribe_audio", fake_transcribe)
     monkeypatch.setattr(worker, "generate_suggestions", fake_suggest)
+
+    async def fake_localize(client, suggestions):
+        # Every card already Mongolian: what a compliant model sends back.
+        rec.localized.append(suggestions)
+        return suggestions, 0
+
+    monkeypatch.setattr(worker, "localize_suggestions", fake_localize)
     monkeypatch.setattr(worker, "separation_available", lambda s: False)
 
     async def fake_caps(ffmpeg):
@@ -556,6 +565,149 @@ def test_suggestions_are_stored_and_counted(world, project, db):
         "requested_youtube": 0,
         "characters": len(world.transcript.full_text),
     }
+    # Every set is looked at for text a producer would read in English.
+    assert world.localized == [world.suggestions]
+
+
+def _transcribed(db, project_id: str, transcript: Transcript) -> None:
+    doc = load(db, project_id)
+    doc.transcript = transcript
+    save(db, doc)
+    db.commit()
+
+
+def test_the_cards_are_stored_in_mongolian(world, project, db, monkeypatch):
+    from app import worker
+
+    _with_video(db, project.id)
+    _transcribed(db, project.id, world.transcript)
+
+    async def localize(client, suggestions):
+        out = suggestions.model_copy(deep=True)
+        out.shorts[0].title = "Богино 0"
+        return out, 1
+
+    monkeypatch.setattr(worker, "localize_suggestions", localize)
+    result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    db.expire_all()
+    assert load(db, project.id).suggestions.shorts[0].title == "Богино 0"
+    assert result["localized"] == 1
+
+
+def test_cards_that_could_not_be_translated_still_keep_the_ideas(world, project, db, monkeypatch):
+    """The ideas are paid for; English on a card is not worth losing them."""
+    from app import worker
+
+    _with_video(db, project.id)
+    _transcribed(db, project.id, world.transcript)
+
+    async def broken(client, suggestions):
+        raise RuntimeError("the model is down")
+
+    monkeypatch.setattr(worker, "localize_suggestions", broken)
+    result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    db.expire_all()
+    assert [s.title for s in load(db, project.id).suggestions.shorts] == ["Short 0", "Short 1", "Short 2"]
+    assert "localized" not in result and world.llm_closed
+
+
+def _spoken_in_english(db, project_id: str, *, translated: bool = False) -> None:
+    """Three lines: two inside the first cut of every idea (0-5s), one far
+    outside every cut (30-32s)."""
+    doc = load(db, project_id)
+    doc.language = "en"
+    doc.transcript = Transcript(
+        language="eng",
+        segments=[
+            Segment(id="a", start=0.0, end=2.0, text="Hello there.",
+                    translation="Сайн уу." if translated else None),
+            Segment(id="b", start=2.0, end=4.0, text="Goodbye now.",
+                    translation="Баяртай." if translated else None),
+            Segment(id="far", start=30.0, end=32.0, text="Nobody cut this."),
+        ],
+        full_text="Hello there. Goodbye now. Nobody cut this.",
+    )
+    save(db, doc)
+    db.commit()
+
+
+def _queued_translations(db, project_id: str) -> list[Job]:
+    db.expire_all()
+    return db.query(Job).filter_by(project_id=project_id, kind="translate", state="queued").all()
+
+
+def test_an_english_video_has_the_lines_its_ideas_cut_translated_next(world, project, db):
+    """After the suggestions, not before them — and only what they cut: the
+    translation used to buy the whole transcript to export a minute of it."""
+    from app import worker
+
+    _with_video(db, project.id)
+    _spoken_in_english(db, project.id)
+
+    result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    (job,) = _queued_translations(db, project.id)
+    assert result["translation"] == {"job_id": job.id, "lines": 2}
+    assert queue.payload_of(job) == {"force": False, "scope": "suggested"}
+    # The page's own key: a translation already running is not bought twice.
+    assert job.dedupe_key == f"translate:{project.id}"
+
+
+def test_a_translation_already_queued_is_the_one_that_follows(world, project, db):
+    from app import worker
+
+    _with_video(db, project.id)
+    _spoken_in_english(db, project.id)
+    earlier = queue.enqueue("translate", project_id=project.id, dedupe_key=f"translate:{project.id}")
+
+    result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    assert result["translation"]["job_id"] == earlier
+    assert len(_queued_translations(db, project.id)) == 1
+
+
+@pytest.mark.parametrize("case", ["mongolian", "already translated", "nothing shows it"])
+def test_nothing_follows_when_nothing_needs_translating(world, project, db, case):
+    """"Nothing shows it": English subtitles and no Mongolian voice — a
+    translation nobody would see is not bought on the producer's behalf."""
+    from app import worker
+
+    _with_video(db, project.id)
+    if case == "mongolian":
+        _transcribed(db, project.id, world.transcript)
+    else:
+        _spoken_in_english(db, project.id, translated=case == "already translated")
+    if case == "nothing shows it":
+        doc = load(db, project.id)
+        doc.export.subtitle_language = "source"
+        save(db, doc)
+        db.commit()
+
+    result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    assert "translation" not in result
+    assert _queued_translations(db, project.id) == []
+
+
+def test_a_translation_that_cannot_be_queued_still_keeps_the_ideas(world, project, db, monkeypatch):
+    from app import worker
+
+    _with_video(db, project.id)
+    _spoken_in_english(db, project.id)
+
+    handle = _handle(db, project.id, "suggest")
+
+    def full(*args, **kwargs):
+        raise RuntimeError("the queue is down")
+
+    monkeypatch.setattr(worker.queue, "enqueue", full)
+    result = asyncio.run(worker.handle_suggest(handle))
+
+    db.expire_all()
+    assert load(db, project.id).suggestions is not None
+    assert "translation" not in result
 
 
 # ==========================================================================
@@ -1173,12 +1325,18 @@ def _fake_translation(monkeypatch, worker, *, during=None):
 
     seen: dict = {}
 
-    async def fake(client, transcript, *, force=False, on_progress=None):
+    async def fake(client, transcript, *, force=False, only=None, on_progress=None):
         seen["force"] = force
+        seen["only"] = only
         if during:
             during()
-        segs = [s.model_copy(update={"translation": f"мн:{s.text}"}) for s in transcript.segments]
-        return transcript.model_copy(update={"segments": segs}), Report(len(segs), len(segs), len(segs), 0, 0)
+        segs = [
+            s.model_copy(update={"translation": f"мн:{s.text}"})
+            if only is None or s.id in only else s
+            for s in transcript.segments
+        ]
+        asked = sum(1 for s in transcript.segments if only is None or s.id in only)
+        return transcript.model_copy(update={"segments": segs}), Report(len(segs), asked, asked, 0, 0)
 
     monkeypatch.setattr(worker, "translate_transcript", fake)
     return seen
@@ -1238,6 +1396,42 @@ def test_force_reaches_the_translation(world, project, db, monkeypatch):
                        project_id=project.id, payload={"force": True})
     asyncio.run(worker.handle_translate(handle))
     assert seen["force"] is True
+
+
+def test_the_translation_after_the_suggestions_buys_only_the_lines_they_cut(
+    world, project, db, monkeypatch,
+):
+    from app import worker
+
+    _spoken_in_english(db, project.id)
+    doc = load(db, project.id)
+    doc.suggestions = world.suggestions
+    save(db, doc)
+    db.commit()
+    seen = _fake_translation(monkeypatch, worker)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={"scope": "suggested"})
+
+    result = asyncio.run(worker.handle_translate(handle))
+
+    db.expire_all()
+    segs = load(db, project.id).transcript.segments
+    assert seen["only"] == {"a", "b"}
+    assert [s.translation for s in segs] == ["мн:Hello there.", "мн:Goodbye now.", None]
+    assert result["scope"] == "suggested" and result["applied"] == 2
+
+
+def test_the_pages_translation_is_still_the_whole_transcript(world, project, db, monkeypatch):
+    from app import worker
+
+    _spoken_in_english(db, project.id)
+    seen = _fake_translation(monkeypatch, worker)
+    handle = JobHandle(job_id=_running_job(db, project.id, "translate").id, kind="translate",
+                       project_id=project.id, payload={})
+
+    result = asyncio.run(worker.handle_translate(handle))
+
+    assert seen["only"] is None and result["scope"] == "all" and result["applied"] == 3
 
 
 def test_a_mongolian_video_is_not_translated(world, project, db, monkeypatch):

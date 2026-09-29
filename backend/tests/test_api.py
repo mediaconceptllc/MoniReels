@@ -1541,7 +1541,7 @@ def test_translating_queues_a_job_that_fills_only_the_gaps_by_default(client, db
     row = _english_project(db, "translator", monkeypatch=monkeypatch)
     response = client.post(f"/projects/{row.id}/translate", headers=_auth(client, "translator"))
     assert response.status_code == 200
-    assert _queued_payload(db, response.json()["job_id"]) == {"force": False}
+    assert _queued_payload(db, response.json()["job_id"]) == {"force": False, "scope": "all"}
 
 
 def test_force_travels_to_the_job(client, db, monkeypatch):
@@ -1549,7 +1549,26 @@ def test_force_travels_to_the_job(client, db, monkeypatch):
     response = client.post(
         f"/projects/{row.id}/translate", json={"force": True}, headers=_auth(client, "forcer")
     )
-    assert _queued_payload(db, response.json()["job_id"]) == {"force": True}
+    assert _queued_payload(db, response.json()["job_id"]) == {"force": True, "scope": "all"}
+
+
+def test_the_lines_the_suggestions_cut_can_be_translated_on_their_own(client, db, monkeypatch):
+    """What the translation after the suggestions runs — and the button that
+    finishes it, when a run left some behind."""
+    row = _english_project(db, "scoper", monkeypatch=monkeypatch)
+    auth = _auth(client, "scoper")
+    body = {"scope": "suggested"}
+
+    # Nothing is cut before there are suggestions: refused, not a free job.
+    none = client.post(f"/projects/{row.id}/translate", json=body, headers=auth)
+    assert none.status_code == 400
+
+    _with_suggestions(db, row)
+    response = client.post(f"/projects/{row.id}/translate", json=body, headers=auth)
+    assert _queued_payload(db, response.json()["job_id"]) == {"force": False, "scope": "suggested"}
+
+    wrong = {"scope": "everything"}
+    assert client.post(f"/projects/{row.id}/translate", json=wrong, headers=auth).status_code == 422
 
 
 def test_a_mongolian_video_is_not_sent_for_translation(client, db, monkeypatch):
@@ -1637,6 +1656,54 @@ def test_an_export_whose_mongolian_subtitles_would_have_holes_is_refused(client,
     assert "1 мөр" in response.json()["detail"]
 
 
+def _with_a_line_far_from_the_cuts(db, row, *, cut: bool = False) -> None:
+    """A third line at 30-32s, untranslated. `cut` adds a second idea that
+    cuts it; otherwise no idea does."""
+    project = load(db, row.id)
+    from app.models import Cut, Segment, ShortIdea
+
+    project.transcript.segments.append(Segment(id="far", start=30.0, end=32.0, text="Far away."))
+    if cut:
+        project.suggestions.shorts.append(ShortIdea(
+            id="sh2", title="t2", hook_text="h", hook_quote="q", caption="c", why_it_works="w",
+            cuts=[Cut(start=29.5, end=33.0, role="hook", reason="r")],
+        ))
+    save(db, project)
+    db.commit()
+
+
+def test_a_line_no_idea_cuts_never_holds_the_export_back(client, db, monkeypatch):
+    """The translation after the suggestions translates what they cut and
+    nothing else — so a line nobody cut is a line nobody sees."""
+    row = _english_project(db, "farline", translations=("Сайн уу.", "Баяртай."), monkeypatch=monkeypatch)
+    _with_suggestions(db, row)
+    _with_a_line_far_from_the_cuts(db, row)
+    auth = _auth(client, "farline")
+
+    view = client.get(f"/projects/{row.id}", headers=auth).json()["translation"]
+    assert (view["missing"], view["suggested_lines"], view["suggested_missing"]) == (1, 2, 0)
+    assert view["suggested_ids"] == ["a", "b"] and view["blocks_export"] is False
+    assert client.post(f"/projects/{row.id}/export-all", headers=auth).status_code == 200
+
+
+def test_an_export_of_some_ideas_asks_only_about_their_lines(client, db, monkeypatch):
+    row = _english_project(db, "pickline", translations=("Сайн уу.", "Баяртай."), monkeypatch=monkeypatch)
+    _with_suggestions(db, row)
+    _with_a_line_far_from_the_cuts(db, row, cut=True)
+    auth = _auth(client, "pickline")
+
+    everything = client.post(f"/projects/{row.id}/export-all", headers=auth)
+    assert everything.status_code == 409 and "1 мөр" in everything.json()["detail"]
+    view = client.get(f"/projects/{row.id}", headers=auth).json()["translation"]
+    # The page's buttons export every idea, and the page is told so.
+    assert view["blocks_export"] is True and view["suggested_missing"] == 1
+
+    ready = client.post(f"/projects/{row.id}/export-all", json={"shorts": ["sh1"]}, headers=auth)
+    assert ready.status_code == 200
+    held = client.post(f"/projects/{row.id}/export-all", json={"shorts": ["sh2"]}, headers=auth)
+    assert held.status_code == 409
+
+
 def test_a_hand_cut_timeline_is_held_to_the_same_rule(client, db, monkeypatch):
     """The "cut it myself" export renders the same subtitles as the ideas do.
     Guarded on one route and not the other, holes would ship from the one
@@ -1703,7 +1770,7 @@ def test_a_mongolian_video_has_nothing_to_translate(client, db):
     row = _project_with_video(db, alice)
     view = client.get(f"/projects/{row.id}", headers=_auth(client, "mnview")).json()["translation"]
     assert view == {"needed": False, "lines": 0, "translated": 0, "missing": 0, "blocks_export": False,
-                    "used_for": []}
+                    "used_for": [], "suggested_lines": 0, "suggested_missing": 0, "suggested_ids": []}
 
 
 def test_the_subtitle_language_is_a_setting(client, db):

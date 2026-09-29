@@ -209,6 +209,29 @@ async def test_force_sends_every_line_again():
 
 
 @pytest.mark.asyncio
+async def test_only_the_lines_named_are_sent_and_in_the_order_they_were_said():
+    """The translation that follows the suggestions pays for the lines they
+    cut, not for the hour of video around them."""
+    t = _transcript(6)
+    client = FakeClient()
+    out, report = await translate_transcript(client, t, only={"s4", "s1", "s2"})
+
+    asked = client.calls[0]["user"].split("Translate these")[1]
+    assert [line[:3] for line in asked.splitlines() if line.startswith("[")] == ["[1]", "[2]", "[4]"]
+    assert [s.translation is not None for s in out.segments] == [False, True, True, False, True, False]
+    assert report.asked == 3 and report.lines == 6
+
+
+@pytest.mark.asyncio
+async def test_a_line_named_that_is_already_translated_is_not_paid_for_again():
+    t = _transcript(3)
+    t.segments[1] = t.segments[1].model_copy(update={"translation": "бий"})
+    client = FakeClient()
+    _, report = await translate_transcript(client, t, only={"s1"})
+    assert client.calls == [] and report.asked == 0
+
+
+@pytest.mark.asyncio
 async def test_nothing_to_translate_makes_no_call():
     t = _transcript(2)
     t.segments = [s.model_copy(update={"translation": "бий"}) for s in t.segments]

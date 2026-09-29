@@ -27,7 +27,7 @@ gaps, so recovering from a failure is never another full bill.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 
 from app.ai.llm_client import LLMClient
@@ -220,6 +220,7 @@ async def translate_transcript(
     transcript: Transcript,
     *,
     force: bool = False,
+    only: Collection[str] | None = None,
     on_progress: Callable[[float], Awaitable[None]] | None = None,
 ) -> tuple[Transcript, Report]:
     """Translates the lines that need it — or every line, with `force`.
@@ -229,11 +230,17 @@ async def translate_transcript(
     not the transcript. With it, every line is sent again — and a line whose
     chunk fails this time keeps the translation it had, because a failure
     must never leave a line worse off than it started.
+
+    `only`, when given, is the ids of the lines that may be sent at all — the
+    lines the suggestions cut (app.languages.lines_used). They stay in
+    transcript order, so a cut still reaches the model as consecutive lines.
     """
     segments = transcript.segments
     todo = [
         i for i, seg in enumerate(segments)
-        if (seg.text or "").strip() and (force or not seg.translation)
+        if (seg.text or "").strip()
+        and (force or not seg.translation)
+        and (only is None or seg.id in only)
     ]
     if not todo:
         return transcript, Report(len(segments), 0, 0, 0, 0)

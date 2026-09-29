@@ -365,6 +365,14 @@ export interface TranslationStatus {
   lines: number;
   translated: number;
   missing: number;
+  /** The lines the suggestions cut, counted by the server's one rule (a line
+   *  touching a cut counts): what the translation that follows the
+   *  suggestions translates, and all an export of them needs. */
+  suggested_lines: number;
+  suggested_missing: number;
+  suggested_ids: string[];
+  /** The export guard's verdict for exporting EVERY suggestion — what the
+   *  page's export buttons do. Only the suggested lines count. */
   blocks_export: boolean;
   /** What the export would use the translation for. The way out of a gap
    *  depends on it: subtitles can go out in the spoken language, a Mongolian

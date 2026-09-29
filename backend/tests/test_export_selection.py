@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.dbmodels import Job, Project, User
-from app.export.pipeline import pick_ideas
+from app.export.ideas import pick_ideas
 from app.jobs import queue
 from app.models import Cut, KeepRange, ShortIdea, Suggestions, VideoMeta, YoutubePlan
 from app.security import hash_password

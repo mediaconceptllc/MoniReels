@@ -82,17 +82,18 @@ export default function ProjectPage() {
   // The furthest step that actually has content, so returning to a project
   // lands where the work is rather than at the beginning, and a job that
   // gets further moves the page along with it.
+  //
+  // The ideas, not their translation, even once it is done: it follows them
+  // on its own, and the next decision is which of them to export.
   const furthest: Stage | null = !project
     ? null
     : outputs.length
       ? "outputs"
       : project.suggestions?.shorts.length
         ? "suggestions"
-        : project.translation.needed && project.translation.translated
-          ? "translation"
-          : project.transcript?.segments.length
-            ? "transcript"
-            : "source";
+        : project.transcript?.segments.length
+          ? "transcript"
+          : "source";
   // Only when that step CHANGES. Every save refreshes the project, and the
   // settings live on the first tab: moving on each refresh threw the producer
   // off the panel they had just saved, before they could see it was saved.
@@ -180,11 +181,12 @@ export default function ProjectPage() {
   // per-idea export on the suggestions tab. The ways forward named are the
   // ones that work: subtitles can go out in the spoken language, a Mongolian
   // voice has nothing else to read.
+  // Counted over the lines the ideas cut — the only ones an export shows.
   const translationBlocked = !translation.blocks_export
     ? null
     : translation.used_for.includes("voice")
-      ? `${translation.missing} мөр орчуулагдаагүй байна — монгол дуу орчуулгыг уншдаг. «Орчуулга» алхмыг дуусгана уу, эсвэл Экспортын тохиргооноос монгол дууг унтраана уу.`
-      : `${translation.missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`;
+      ? `Саналын ${translation.suggested_missing} мөр орчуулагдаагүй байна — монгол дуу орчуулгыг уншдаг. «Орчуулга» алхмыг дуусгана уу, эсвэл Экспортын тохиргооноос монгол дууг унтраана уу.`
+      : `Саналын ${translation.suggested_missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`;
   const voiceOn = project.voice.on;
   const voiceBlocked = project.voice.blocked;
   const exportBlocked = translationBlocked ?? voiceBlocked;
@@ -211,24 +213,6 @@ export default function ProjectPage() {
           ? "Дараагийн алхам"
           : "Видео бэлдэж дуустал",
     },
-    // Only for a video not in Mongolian. After the text it translates and
-    // before the ideas: a producer choosing clips reads them in Mongolian.
-    ...(translation.needed
-      ? [
-          {
-            key: "translation",
-            label: "Орчуулга",
-            state: !hasTranscript ? "blocked" : translation.missing ? "current" : "done",
-            detail: !hasTranscript
-              ? "Текст бэлдсэний дараа"
-              : translation.missing
-                ? `${translation.translated}/${translation.lines} мөр${
-                    translation.blocks_export ? "" : " · заавал биш"
-                  }`
-                : `${translation.lines} мөр монголоор`,
-          } satisfies StageDef,
-        ]
-      : []),
     {
       key: "suggestions",
       label: "Санал",
@@ -239,6 +223,38 @@ export default function ProjectPage() {
           ? "Дараагийн алхам"
           : "Текст бэлдсэний дараа",
     },
+    // Only for a video not in Mongolian. After the ideas, not before them:
+    // they are chosen from what was said, and the translation that follows
+    // them on its own buys only the lines they cut — not the hour of video
+    // around a minute of export.
+    ...(translation.needed
+      ? [
+          {
+            key: "translation",
+            label: "Орчуулга",
+            state: !hasTranscript
+              ? "blocked"
+              : translation.lines > 0 && translation.missing === 0
+                ? "done"
+                : !hasSuggestions
+                  ? "blocked"
+                  : translation.suggested_missing
+                    ? "current"
+                    : "done",
+            detail: !hasTranscript
+              ? "Текст бэлдсэний дараа"
+              : translation.lines > 0 && translation.missing === 0
+                ? `${translation.lines} мөр монголоор`
+                : !hasSuggestions
+                  ? "Саналын дараа өөрөө"
+                  : translation.suggested_missing
+                    ? `${translation.suggested_lines - translation.suggested_missing}/${
+                        translation.suggested_lines
+                      } мөр${translation.blocks_export ? "" : " · заавал биш"}`
+                    : `Саналын ${translation.suggested_lines} мөр монголоор`,
+          } satisfies StageDef,
+        ]
+      : []),
     {
       key: "outputs",
       label: "Бэлэн видео",
@@ -324,26 +340,40 @@ export default function ProjectPage() {
           loading: busy,
         };
       case "translation": {
+        // The lines the ideas cut come first: they are all an export needs,
+        // and what runs on its own after the suggestions — this is the same
+        // run, for when that one left some behind (or an edit cleared them).
+        const cutLines = hasSuggestions && translation.suggested_missing > 0;
         // With nothing missing the only move left is starting OVER, which
         // replaces hand-corrected lines too — so that one asks first.
         const redo = hasTranscript && translation.missing === 0;
         const partial = translation.missing > 0 && translation.missing < translation.lines;
         return {
-          label: redo
-            ? "Дахин орчуулах"
-            : partial
-              ? `Үлдсэн ${translation.missing} мөрийг орчуулах`
-              : "Монгол руу орчуулах",
+          label: cutLines
+            ? `Саналын ${translation.suggested_missing} мөрийг орчуулах`
+            : redo
+              ? "Дахин орчуулах"
+              : partial
+                ? `Үлдсэн ${translation.missing} мөрийг орчуулах`
+                : "Бүтэн текстийг орчуулах",
           note: !hasTranscript
             ? "Эхлээд яриаг текст болгоно."
+            : cutLines
+              ? "Зөвхөн саналд орсон хэсгүүдийн орчуулагдаагүй мөрүүдийг — экспортод хэрэгтэй нь тэд. Оролдлого тутам төлбөртэй."
+              : redo
+                ? "Бүх мөрийг шинээр орчуулна — гараар зассан орчуулга ч солигдоно. Оролдлого тутам төлбөртэй."
+                : partial && hasSuggestions
+                  ? "Саналд ороогүй мөрүүдийг — экспортод хэрэггүй, бүтэн текст хэрэгтэй үед л. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
+                  : partial
+                    ? "Зөвхөн орчуулагдаагүй мөрүүдийг. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
+                    : !hasSuggestions
+                      ? "Санал гарсны дараа саналд орсон мөрүүд өөрөө орчуулагдана. Энэ товч бүтэн текстийг одоо орчуулна — урт видеонд зардал их. Оролдлого тутам төлбөртэй."
+                      : "Үгчлэн биш, утгаар нь — мөр бүрийг уншиж амжих урттай. Оролдлого тутам төлбөртэй.",
+          onRun: cutLines
+            ? () => void run(() => api.translate(projectId, { scope: "suggested" }))
             : redo
-              ? "Бүх мөрийг шинээр орчуулна — гараар зассан орчуулга ч солигдоно. Оролдлого тутам төлбөртэй."
-              : partial
-                ? "Зөвхөн орчуулагдаагүй мөрүүдийг. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
-                : "Үгчлэн биш, утгаар нь — мөр бүрийг уншиж амжих урттай. Оролдлого тутам төлбөртэй.",
-          onRun: redo
-            ? () => setConfirmRedo(true)
-            : () => void run(() => api.translate(projectId)),
+              ? () => setConfirmRedo(true)
+              : () => void run(() => api.translate(projectId)),
           disabled: !hasTranscript || !translation.lines || running,
           loading: busy,
         };
@@ -367,10 +397,10 @@ export default function ProjectPage() {
         // nothing at all.
         if (!hasVideo) return undefined;
         if (!hasTranscript) return actionFor("transcript");
+        if (!hasSuggestions) return actionFor("suggestions");
         // Only when the export would need it: a producer who chose
         // subtitles in the spoken language is not steered into a paid run.
         if (translation.blocks_export) return actionFor("translation");
-        if (!hasSuggestions) return actionFor("suggestions");
         return actionFor("outputs");
     }
   }
@@ -499,6 +529,7 @@ export default function ProjectPage() {
               sourceUrl={project.media.source_url}
               language={project.language}
               translation={translation}
+              focusIds={translation.suggested_ids}
               onSaved={() => void refresh()}
             />
           ) : (
@@ -551,7 +582,7 @@ export default function ProjectPage() {
             confirmLabel="Дахин орчуулах"
             onConfirm={() => {
               setConfirmRedo(false);
-              void run(() => api.translate(projectId, true));
+              void run(() => api.translate(projectId, { force: true }));
             }}
             onCancel={() => setConfirmRedo(false)}
           />

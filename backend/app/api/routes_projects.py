@@ -25,10 +25,14 @@ from app.ai.schema import count_limits, default_counts
 from app.config import get_settings
 from app.db import get_db
 from app.dbmodels import Output, SubtitleTemplate
+from app.export.ideas import idea_ranges, pick_ideas
 from app.jobs import queue
 from app.languages import (
     needs_translation,
     removes_source_speech,
+    suggested_ranges,
+    translation_holes,
+    translation_uses,
     translation_view,
     voice_over_on,
 )
@@ -414,7 +418,7 @@ def _require_provider(db: Session, capability: str) -> None:
         raise HTTPException(status_code=503, detail=reason)
 
 
-def _require_translation_ready(project: Project) -> None:
+def _require_translation_ready(project: Project, ranges: list[tuple[float, float]]) -> None:
     """Refuse a render whose Mongolian subtitles or voice would have holes.
 
     Checked before the render rather than discovered in it: an export is
@@ -423,12 +427,15 @@ def _require_translation_ready(project: Project) -> None:
     names the ways forward that actually work — switching the subtitles to the
     source language fixes nothing while a Mongolian voice still reads the
     translation.
+
+    Only the lines of `ranges` — what this export cuts — are asked about
+    (languages.translation_holes): the rest of the transcript is never on
+    screen, and the translation that follows the suggestions leaves it alone.
     """
-    view = translation_view(project)
-    if not view["blocks_export"]:
+    missing = translation_holes(project, ranges)
+    if not missing:
         return
-    missing = view["missing"]
-    if "voice" in view["used_for"]:
+    if "voice" in translation_uses(project):
         detail = (
             f"{missing} мөр орчуулагдаагүй байна. Монгол дуу орчуулгыг уншдаг тул эхлээд "
             "монгол руу орчуулна уу, эсвэл монгол дууг унтраана уу."
@@ -520,22 +527,30 @@ def translate(
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
-    """Translate a non-Mongolian transcript into Mongolian subtitles.
+    """Translate a non-Mongolian transcript into Mongolian subtitles — all of
+    it, or only the lines the suggestions cut (`scope`).
 
     Refused for a Mongolian video rather than run as a no-op: a paid call
-    whose answer is the text it was given is a bill for nothing.
+    whose answer is the text it was given is a bill for nothing. The same for
+    the suggested lines of a project with no suggestions.
+
+    One dedupe key for both scopes: a translation of the project is one job
+    at a time, so a second click never bills the same lines twice.
     """
     project = _require_project(db, project_id, principal)
     if not needs_translation(project.language):
         raise HTTPException(status_code=400, detail="Энэ видео монгол хэлтэй — орчуулах шаардлагагүй.")
     if project.transcript is None or not project.transcript.segments:
         raise HTTPException(status_code=400, detail="Эхлээд яриаг таниулна уу.")
+    scope = body.scope if body else "all"
+    if scope == "suggested" and not suggested_ranges(project):
+        raise HTTPException(status_code=400, detail="Санал алга — эхлээд санал боловсруулна уу.")
     _require_provider(db, providers.LLM)
     return {
         "job_id": queue.enqueue(
             "translate",
             project_id=project_id,
-            payload={"force": bool(body and body.force)},
+            payload={"force": bool(body and body.force), "scope": scope},
             dedupe_key=f"translate:{project_id}",
         )
     }
@@ -748,8 +763,6 @@ def export_all(
     project = _require_project(db, project_id, principal)
     if project.suggestions is None or not (project.suggestions.shorts or project.suggestions.youtube):
         raise HTTPException(status_code=400, detail="Экспортлох санал алга.")
-    _require_translation_ready(project)
-    _require_voice_ready(db, project)
 
     pick: dict = {}
     if body and body.shorts is not None:
@@ -774,6 +787,12 @@ def export_all(
 
     if pick and not (pick.get("shorts") or pick.get("youtube")):
         raise HTTPException(status_code=400, detail="Нэг ч санал сонгогдоогүй байна.")
+
+    # The worker's own selection (export.ideas.pick_ideas), so the lines asked
+    # about here are exactly the lines it will render.
+    wanted, _ = pick_ideas(project.suggestions, {"pick": pick} if pick else {})
+    _require_translation_ready(project, idea_ranges(wanted))
+    _require_voice_ready(db, project)
 
     # The selection is part of the job's identity. Without it, exporting one
     # short and then another while the first is queued would hand back the
@@ -800,7 +819,7 @@ def export_timeline(
     project = _require_project(db, project_id, principal)
     if not project.clips:
         raise HTTPException(status_code=400, detail="Timeline дээр клип алга.")
-    _require_translation_ready(project)
+    _require_translation_ready(project, [(c.start, c.end) for c in project.clips])
     _require_voice_ready(db, project)
     # No dedupe key: re-exporting the same timeline after changing render
     # settings is a normal thing to want, unlike re-running a paid stage.

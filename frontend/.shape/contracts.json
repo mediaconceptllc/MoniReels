@@ -405,6 +405,9 @@
       "lines": 0,
       "missing": 0,
       "needed": false,
+      "suggested_ids": [],
+      "suggested_lines": 0,
+      "suggested_missing": 0,
       "translated": 0,
       "used_for": []
     },

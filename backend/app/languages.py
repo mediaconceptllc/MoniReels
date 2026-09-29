@@ -85,14 +85,60 @@ def untranslated_lines(project) -> int:
     return sum(1 for s in transcript.segments if (s.text or "").strip() and not s.translation)
 
 
+def lines_used(project, ranges: list[tuple[float, float]]) -> list:
+    """The transcript lines an export of `ranges` shows or reads: every line
+    with words that overlaps a range, even by an edge.
+
+    The edge counts because the subtitles take it — a line straddling a cut is
+    split at the cut and shown (app.subtitle.shift). The voice reads a subset
+    of these, the lines whose middle is inside (app.tts.voiceover.lines_in),
+    so what is translated for the subtitles is translated for the voice.
+
+    One rule for the three that ask: the translation that follows the
+    suggestions, the export guard, and the page.
+    """
+    transcript = project.transcript
+    if transcript is None or not ranges:
+        return []
+    return [
+        s for s in transcript.segments
+        if (s.text or "").strip() and any(s.end > start and s.start < end for start, end in ranges)
+    ]
+
+
+def suggested_ranges(project) -> list[tuple[float, float]]:
+    """Every stretch of the source the current suggestions cut."""
+    from app.export.ideas import idea_ranges
+
+    return idea_ranges(project.suggestions)
+
+
+def translation_holes(project, ranges: list[tuple[float, float]]) -> int:
+    """Lines an export of `ranges` would show or read with no translation —
+    none when that export uses no translation at all.
+
+    Only the export's own lines: a line nobody cut is a line nobody sees, and
+    refusing an export over it would make the whole transcript a price of
+    exporting thirty seconds of it.
+    """
+    if not translation_uses(project):
+        return 0
+    return sum(1 for s in lines_used(project, ranges) if not s.translation)
+
+
 def translation_view(project) -> dict:
     """What the project page shows about translation, from the rules the
     routes enforce.
 
-    `blocks_export` is the export guard's own verdict, not an input to it: a
-    page that worked the rule out for itself would be a second copy of it,
-    and the first change to either would disable a button the server would
-    have accepted — or leave one enabled for a click it then refuses.
+    `blocks_export` is the export guard's own verdict for exporting every
+    suggestion — what the page's export buttons do; a producer's pick only
+    narrows it — not an input to it: a page that worked the rule out for
+    itself would be a second copy of it, and the first change to either would
+    disable a button the server would have accepted, or leave one enabled for
+    a click it then refuses.
+
+    `suggested_*` are the lines the suggestions cut: what the translation that
+    follows the suggestions translates, and all an export of them needs.
     """
     needed = needs_translation(project.language)
     transcript = project.transcript
@@ -101,12 +147,17 @@ def translation_view(project) -> dict:
     )
     missing = untranslated_lines(project) if needed else 0
     uses = translation_uses(project)
+    ranges = suggested_ranges(project)
+    suggested = lines_used(project, ranges) if needed else []
     return {
         "needed": needed,
         "lines": lines,
         "translated": lines - missing if needed else 0,
         "missing": missing,
-        "blocks_export": bool(uses) and missing > 0,
+        "suggested_lines": len(suggested),
+        "suggested_missing": sum(1 for s in suggested if not s.translation),
+        "suggested_ids": [s.id for s in suggested],
+        "blocks_export": translation_holes(project, ranges) > 0,
         "used_for": uses,
     }
 
