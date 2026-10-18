@@ -113,7 +113,11 @@ def make_token(user: User) -> str:
 def decode_token(token: str) -> dict:
     settings = get_settings()
     try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        # Every token this API mints carries all three; one without them was
+        # not minted here, and a missing `exp` would otherwise never expire.
+        return jwt.decode(
+            token, settings.jwt_secret, algorithms=["HS256"], options={"require": ["exp", "iat", "sub"]}
+        )
     except jwt.ExpiredSignatureError as e:
         raise AuthError("Нэвтрэх хугацаа дууссан байна. Дахин нэвтэрнэ үү.") from e
     except jwt.InvalidTokenError as e:
@@ -173,8 +177,12 @@ def client_ip(request: Request) -> str:
     A client can send the header itself and a proxy APPENDS rather than
     replaces, so the FIRST entry may be attacker-chosen. Railway puts exactly
     one proxy in front, so the last entry is the one it added.
+
+    Every header line counts, not only the first: a client that sends its
+    own X-Forwarded-For line ahead of the proxy's would otherwise have its
+    line read and the proxy's ignored.
     """
-    forwarded = request.headers.get("x-forwarded-for", "")
+    forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
     if forwarded:
         parts = [p.strip() for p in forwarded.split(",") if p.strip()]
         if parts:

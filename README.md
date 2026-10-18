@@ -88,7 +88,8 @@
 cd backend
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 createdb monireels && createdb monireels_test
-export DATABASE_URL=postgresql://localhost/monireels JWT_SECRET=dev-secret
+# JWT_SECRET нь 32 байтаас богино бол API асахгүй.
+export DATABASE_URL=postgresql://localhost/monireels JWT_SECRET=dev-secret-at-least-32-bytes-long
 .venv/bin/alembic upgrade head
 .venv/bin/python -m app.main            # API  → :8000/docs
 .venv/bin/python -m app.worker          # Worker (тусдаа терминал!)

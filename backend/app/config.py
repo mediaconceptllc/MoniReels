@@ -37,14 +37,26 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "production"
 
-    # Comma-separated exact origins. "*" is refused in production by
-    # main.py: credentials + wildcard is rejected by every browser anyway,
-    # and the desktop build's blanket "*" was only ever safe because the
-    # server was bound to loopback.
+    # Comma-separated exact origins. "*" is refused at startup by main.py:
+    # with credentials allowed, Starlette answers a wildcard by echoing back
+    # whatever origin asked — every site on the internet, not "any site the
+    # browser permits". The desktop build's blanket "*" was only ever safe
+    # because the server was bound to loopback.
     cors_origins: str = ""
+    # The largest request body the API will read. FastAPI parses a JSON body
+    # BEFORE the route's dependencies check the token, so without a ceiling
+    # an anonymous 30 MB POST was read whole into the one API process (heap
+    # 122 MB, measured). Media never comes through here (presigned R2), so
+    # every legitimate body is small; the transcript edit is the one that can
+    # carry a few thousand lines.
+    max_body_bytes: int = 1 * 1024 * 1024
+    max_transcript_body_bytes: int = 16 * 1024 * 1024
 
     # ---- data --------------------------------------------------------
     database_url: str = ""
+    # At least 32 bytes, or the API refuses to start (main.startup_problems):
+    # HS256 tokens are only as strong as this, and an empty one let tokens
+    # signed with an empty key through. DEPLOY.md's recipe makes 64.
     jwt_secret: str = ""
     jwt_hours: int = 12
     # Creates the first admin at startup ONLY when the users table is

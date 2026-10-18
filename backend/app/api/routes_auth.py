@@ -67,10 +67,19 @@ def change_password(
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> TokenOut:
+    # The current password is checked with the same ~100ms PBKDF2 as a
+    # login, so this is bounded the same way — per account, since only the
+    # holder of this account's token can try.
+    if not ratelimit.password_change_allowed(principal.id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Нууц үг солих оролдлого хэт олон боллоо. Хэдэн минутын дараа дахин оролдоно уу.",
+        )
     user = db.get(User, principal.id)
     if user is None or not verify_password(body.current_password, user.pw_salt, user.pw_hash):
         raise _bad_credentials("Одоогийн нууц үг буруу байна.")
 
+    ratelimit.password_change_succeeded(principal.id)
     salt, digest = hash_password(body.new_password)
     user.pw_salt, user.pw_hash = salt, digest
     # Every token issued before now stops working. That is the entire point

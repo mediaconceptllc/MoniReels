@@ -126,6 +126,26 @@ def test_changing_a_password_invalidates_older_tokens(client, db):
     assert client.get("/auth/me", headers=fresh).status_code == 200
 
 
+def test_password_change_guesses_are_rate_limited(client, db):
+    """The current password is checked with the same ~100ms PBKDF2 as a
+    login; unbounded, one stolen token was a free password oracle that also
+    ate the API's CPU (15 wrong guesses in a row, no 429)."""
+    from app import ratelimit
+
+    _user(db, "alice")
+    auth = _auth(client, "alice")
+    codes = [
+        client.post(
+            "/auth/password",
+            json={"current_password": "not-the-password", "new_password": "brandnewpassword"},
+            headers=auth,
+        ).status_code
+        for _ in range(ratelimit.PASSWORD_MAX_ATTEMPTS + 1)
+    ]
+    assert codes[:-1] == [401] * ratelimit.PASSWORD_MAX_ATTEMPTS
+    assert codes[-1] == 429
+
+
 def test_auth_refusals_are_said_in_mongolian(client, db):
     """The page shows these words as they come: a wrong password used to read
     "Incorrect username or password" in a product whose every other line is
