@@ -34,13 +34,13 @@ TERMINAL = ("done", "failed", "canceled")
 def _owned_job(db: Session, job_id: str, principal: Principal) -> Job:
     job = db.get(Job, job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     if job.project_id and not principal.is_admin:
         project = db.get(Project, job.project_id)
         # 404 rather than 403: whether someone else's job exists is not
         # information this caller is entitled to.
         if project is None or project.owner_id != principal.id:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+            raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     return job
 
 

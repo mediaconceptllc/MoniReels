@@ -11,7 +11,8 @@
     "verify-shape": "node scripts/check-shape-data.mjs && tsc --noEmit -p tsconfig.shape.json && tsx scripts/verify-shape.ts",
     "check-ui": "node scripts/check-ui.mjs",
     "check-sse": "tsx scripts/check-sse.ts",
-    "check-auth": "tsx scripts/check-auth.ts"
+    "check-auth": "tsx scripts/check-auth.ts",
+    "check-copy": "tsx scripts/check-copy.ts"
   },
   "dependencies": {
     "next": "^15.1.0",

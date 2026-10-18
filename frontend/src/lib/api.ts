@@ -11,6 +11,7 @@
  *    connection whose server is working perfectly.
  */
 
+import { describeValidation } from "./messages";
 import type {
   BrandAsset,
   BrandSettings,
@@ -145,10 +146,8 @@ async function detailOf(response: Response): Promise<string> {
     const body = await response.json();
     const detail = body?.detail;
     if (typeof detail === "string") return detail;
-    // FastAPI validation errors arrive as a list of {loc, msg}.
-    if (Array.isArray(detail)) {
-      return detail.map((d: { msg?: string }) => d.msg ?? "Буруу утга").join("; ");
-    }
+    // FastAPI validation errors arrive as a list of {type, loc, msg}.
+    if (Array.isArray(detail)) return describeValidation(detail);
   } catch {
     /* fall through to the status text */
   }

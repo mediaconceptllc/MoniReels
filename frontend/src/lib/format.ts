@@ -54,15 +54,28 @@ export function usd(amount: number): string {
   return "<$0.0001";
 }
 
-const RELATIVE = new Intl.RelativeTimeFormat("mn", { numeric: "auto" });
-
-export function relativeTime(epochSeconds: number): string {
-  const diff = epochSeconds * 1000 - Date.now();
-  const minutes = Math.round(diff / 60000);
-  if (Math.abs(minutes) < 60) return RELATIVE.format(minutes, "minute");
+/** "5 минутын өмнө", written out by hand.
+ *
+ *  It was `Intl.RelativeTimeFormat("mn")`, which Chromium does not ship
+ *  Mongolian data for: it falls back to English, so every card, job row and
+ *  profile line read "-1 h", "-8 d" or "yesterday" in an interface that is
+ *  otherwise entirely Mongolian. Mongolian needs no plural rules here — the
+ *  genitive before өмнө / дараа is the same for every number. */
+export function relativeTime(epochSeconds: number, now: number = Date.now()): string {
+  const diff = epochSeconds * 1000 - now;
+  const past = diff <= 0;
+  const minutes = Math.round(Math.abs(diff) / 60000);
+  const say = (n: number, unit: string) => `${n} ${unit} ${past ? "өмнө" : "дараа"}`;
+  if (minutes < 1) return past ? "дөнгөж сая" : "удахгүй";
+  if (minutes < 60) return say(minutes, "минутын");
   const hours = Math.round(minutes / 60);
-  if (Math.abs(hours) < 24) return RELATIVE.format(hours, "hour");
-  return RELATIVE.format(Math.round(hours / 24), "day");
+  if (hours < 24) return say(hours, "цагийн");
+  const days = Math.round(hours / 24);
+  if (days === 1) return past ? "өчигдөр" : "маргааш";
+  if (days < 30) return say(days, "өдрийн");
+  const date = new Date(epochSeconds * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}`;
 }
 
 /** What a video can be spoken in, as the producer reads it. Typed by the

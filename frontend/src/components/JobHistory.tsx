@@ -16,6 +16,7 @@
 
 import { duration, relativeTime, usd } from "@/lib/format";
 import { JOB_LABELS } from "@/lib/jobs";
+import { explainJobError } from "@/lib/job-errors";
 import type { Job, JobState, ProjectSpend } from "@/lib/types";
 import { Badge, TAP } from "@/components/ui";
 
@@ -92,9 +93,17 @@ export function JobHistory({
                 </span>
               </div>
               {/* The reason a job failed used to survive exactly one page
-                  view. It is the most useful line in the whole panel. */}
+                  view. It is the most useful line in the whole panel — said
+                  first in words, then as the worker recorded it. */}
               {job.error && (
-                <p className="font-mono text-[11px] leading-snug text-tally">{job.error}</p>
+                <>
+                  {job.state === "failed" && (
+                    <p className="text-xs leading-snug text-tally">{explainJobError(job.error).message}</p>
+                  )}
+                  <p className="font-mono text-[11px] leading-snug text-tally [overflow-wrap:anywhere]">
+                    {job.error}
+                  </p>
+                </>
               )}
               {/* The lines a voice-over had to hurry or cut are the ones to
                   listen to before publishing — counted, so nobody has to

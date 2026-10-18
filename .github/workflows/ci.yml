@@ -142,6 +142,12 @@ jobs:
       - run: npm run check-sse
       - run: npm run check-auth
 
+      # The interface is Mongolian; the worker and the browser are not. Known
+      # worker errors must map to Mongolian with the right "retry helps?" flag,
+      # relative times must not fall back to Intl's English, and validation
+      # lists must not leak Pydantic's English.
+      - run: npm run check-copy
+
       # A placeholder is fine: NEXT_PUBLIC_API_URL is baked in at build time
       # and nothing here calls it. What is being checked is that the build
       # compiles, not that it can reach a server.
