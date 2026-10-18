@@ -65,20 +65,41 @@ def build_xfade_filtergraph(n_clips: int, xfade_name: str, plan: TransitionPlan)
     if n_clips < 2:
         raise ValueError("build_xfade_filtergraph requires at least 2 clips")
 
-    parts: list[str] = []
-    v_label = "0:v"
-    a_label = "0:a"
-    for i in range(1, n_clips):
-        next_v = f"{i}:v"
-        next_a = f"{i}:a"
-        out_v = f"v{i}" if i < n_clips - 1 else "vout"
-        out_a = f"a{i}" if i < n_clips - 1 else "aout"
-        offset = plan.offsets[i - 1]
-        parts.append(
-            f"[{v_label}][{next_v}]xfade=transition={xfade_name}:duration={plan.duration:.3f}:"
-            f"offset={offset:.3f}[{out_v}]"
-        )
-        parts.append(f"[{a_label}][{next_a}]acrossfade=d={plan.duration:.3f}:c1=tri:c2=tri[{out_a}]")
-        v_label, a_label = out_v, out_a
-
+    video = video_xfade_chain([f"{i}:v" for i in range(n_clips)], xfade_name, plan.duration, plan.offsets)
+    audio = audio_crossfade_chain([f"{i}:a" for i in range(n_clips)], plan.duration)
+    # Interleaved per join, as it always was: one string, two chains.
+    parts = [part for pair in zip(video, audio, strict=True) for part in pair]
     return ";".join(parts), "vout", "aout"
+
+
+def video_xfade_chain(
+    labels: list[str], xfade_name: str, duration: float, offsets: list[float], digits: int = 3
+) -> list[str]:
+    """The video half of the join: one xfade per pair, ending in [vout].
+
+    `digits` is how precisely each offset is written. A whole join keeps the
+    3 it always had; a batch of one (see app.export.pipeline) writes its
+    offsets relative to where the batch starts and needs more, so that each
+    transition still starts on the very frame it would in a single pass.
+    """
+    parts: list[str] = []
+    current = labels[0]
+    for i in range(1, len(labels)):
+        out = f"v{i}" if i < len(labels) - 1 else "vout"
+        parts.append(
+            f"[{current}][{labels[i]}]xfade=transition={xfade_name}:duration={duration:.3f}:"
+            f"offset={offsets[i - 1]:.{digits}f}[{out}]"
+        )
+        current = out
+    return parts
+
+
+def audio_crossfade_chain(labels: list[str], duration: float) -> list[str]:
+    """The audio half of the join: one acrossfade per pair, ending in [aout]."""
+    parts: list[str] = []
+    current = labels[0]
+    for i in range(1, len(labels)):
+        out = f"a{i}" if i < len(labels) - 1 else "aout"
+        parts.append(f"[{current}][{labels[i]}]acrossfade=d={duration:.3f}:c1=tri:c2=tri[{out}]")
+        current = out
+    return parts
