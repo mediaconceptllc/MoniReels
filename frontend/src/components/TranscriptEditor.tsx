@@ -32,7 +32,8 @@
  * away, and marked as not needed rather than missing.
  */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { Ref } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { timecode } from "@/lib/format";
@@ -47,17 +48,26 @@ function current(segment: Segment, field: Column): string {
   return field === "translation" ? (segment.translation ?? "") : segment.text;
 }
 
+/** What the page may ask of an open editor: to save, from the rail's pinned
+ *  button, when the editor's own one has scrolled away with its list. */
+export interface EditorHandle {
+  save: () => Promise<void>;
+}
+
 export function TranscriptEditor({
+  ref,
   projectId,
   segments,
   timingsEstimated,
   sourceUrl,
   onSaved,
+  onDirtyChange,
   field = "text",
   language,
   translation,
   focusIds,
 }: {
+  ref?: Ref<EditorHandle>;
   projectId: string;
   segments: Segment[];
   timingsEstimated: boolean;
@@ -65,6 +75,10 @@ export function TranscriptEditor({
    *  which case the editor is the plain list it always was. */
   sourceUrl?: string | null;
   onSaved: () => void;
+  /** How many lines hold an unsaved correction. The page holds actions that
+   *  read the SAVED text — the ideas, the translation, every export — and
+   *  warns before a link or a closed tab would drop the rest. */
+  onDirtyChange?: (count: number) => void;
   /** Which words are being corrected: what was said, or its translation. */
   field?: Column;
   /** What was said is in this language — set on the lines so a browser
@@ -102,6 +116,13 @@ export function TranscriptEditor({
   // translation, because it translated words that are no longer there.
   const willClear = translating ? 0 : changed.filter((s) => s.translation).length;
 
+  useEffect(() => {
+    onDirtyChange?.(changed.length);
+  }, [changed.length, onDirtyChange]);
+  // Gone is clean: an editor that leaves the page takes its edits with it,
+  // and a count left behind would hold the export shut for nothing.
+  useEffect(() => () => onDirtyChange?.(0), [onDirtyChange]);
+
   function playFrom(segment: Segment) {
     const video = videoRef.current;
     if (!video) return;
@@ -118,7 +139,12 @@ export function TranscriptEditor({
     setPlaying((prev) => (prev === (current?.id ?? null) ? prev : current?.id ?? null));
   }
 
+  useImperativeHandle(ref, () => ({ save }));
+
   async function save() {
+    // Two buttons reach this — the editor's own and the rail's pinned copy —
+    // and a second press mid-save would send the same lines twice.
+    if (saving || changed.length === 0) return;
     setSaving(true);
     setError(null);
     try {

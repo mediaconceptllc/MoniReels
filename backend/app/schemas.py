@@ -318,6 +318,19 @@ class TranslateIn(BaseModel):
     scope: Literal["all", "suggested"] = "all"
 
 
+class TranscribeIn(BaseModel):
+    """`force` is required once the project has a transcript.
+
+    Recognising again replaces the whole transcript — every hand correction
+    and every translation with it — and is billed again. That used to be one
+    unconfirmed click on the stage's only button (on a phone, pinned to the
+    bottom of the screen); the page now asks first, and the server refuses a
+    replacement nobody confirmed.
+    """
+
+    force: bool = False
+
+
 class SuggestIn(BaseModel):
     """How many ideas to ask for. Either field omitted keeps what the button
     always did — three of each where the video can hold them — so a client
@@ -332,6 +345,9 @@ class SuggestIn(BaseModel):
 
     shorts: int | None = Field(default=None, ge=1, le=MAX_SHORT_COUNT)
     youtube: int | None = Field(default=None, ge=0, le=MAX_YOUTUBE_COUNT)
+    #: Required once the project has suggestions: a new set replaces them
+    #: and is billed again (see TranscribeIn).
+    force: bool = False
 
 
 class ExportSelectionIn(BaseModel):

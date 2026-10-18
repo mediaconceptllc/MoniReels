@@ -557,8 +557,9 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     # the id it needs to follow the job.
     # All four say `{ job_id }`, and each is declared separately in api.ts —
     # a rename in any one of them leaves that button unable to follow its job.
-    shape["transcribe_started"] = send("POST", f"/projects/{row.id}/transcribe")
-    shape["suggest_started"] = send("POST", f"/projects/{row.id}/suggest")
+    # Replacing a transcript or a set of ideas is confirmed (`force`).
+    shape["transcribe_started"] = send("POST", f"/projects/{row.id}/transcribe", json={"force": True})
+    shape["suggest_started"] = send("POST", f"/projects/{row.id}/suggest", json={"force": True})
     shape["export_started"] = send("POST", f"/projects/{row.id}/export")
     shape["export_all_started"] = send("POST", f"/projects/{row.id}/export-all")
     # Last, because it changes the project: a Mongolian video has nothing to

@@ -11,10 +11,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode, RefObject } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
-import { duration, LANGUAGE_LABELS } from "@/lib/format";
+import { duration, LANGUAGE_LABELS, usd } from "@/lib/format";
+import { useLeaveGuard } from "@/lib/unsaved";
 import type { Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
 import {
@@ -35,7 +37,17 @@ import { OutputList } from "@/components/OutputList";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Shell } from "@/components/Shell";
 import { SuggestionList } from "@/components/SuggestionList";
-import { TranscriptEditor } from "@/components/TranscriptEditor";
+import { TranscriptEditor, type EditorHandle } from "@/components/TranscriptEditor";
+
+/** What is on screen and not yet sent, per editor. Counted, not flagged: a
+ *  confirmation that says "3 мөр" is one the producer can weigh. */
+interface Unsaved {
+  text: number;
+  translation: number;
+  export: boolean;
+  style: boolean;
+}
+const CLEAN: Unsaved = { text: 0, translation: 0, export: false, style: false };
 
 export default function ProjectPage() {
   const { user, loading: authLoading } = useRequireAuth();
@@ -51,6 +63,17 @@ export default function ProjectPage() {
   const [tab, setTab] = useState<Stage>("source");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRedo, setConfirmRedo] = useState(false);
+  const [confirmTranscribe, setConfirmTranscribe] = useState(false);
+  const [confirmSuggest, setConfirmSuggest] = useState(false);
+  const [unsaved, setUnsaved] = useState<Unsaved>(CLEAN);
+  const [savingEdits, setSavingEdits] = useState(false);
+  const textEditor = useRef<EditorHandle>(null);
+  const translationEditor = useRef<EditorHandle>(null);
+  // Every stage opened so far stays mounted, hidden, rather than unmounted on
+  // the next click. Unmounting is what dropped a half-corrected transcript
+  // the moment the producer glanced at the ideas: its edits lived in the
+  // editor, and the editor was gone.
+  const [opened, setOpened] = useState<Stage[]>([]);
   // The producer's choice, or null for "the default". Kept across the refresh
   // every settled job triggers — a count chosen and then silently reset to
   // three by the page reloading itself would be a choice that did not stick.
@@ -78,6 +101,44 @@ export default function ProjectPage() {
   useEffect(() => {
     if (user) void refresh();
   }, [user, refresh]);
+
+  // Stable, so an editor's report effect runs when its COUNT changes, not on
+  // every render of this page.
+  const onTextDirty = useCallback(
+    (text: number) => setUnsaved((u) => (u.text === text ? u : { ...u, text })),
+    [],
+  );
+  const onTranslationDirty = useCallback(
+    (translation: number) =>
+      setUnsaved((u) => (u.translation === translation ? u : { ...u, translation })),
+    [],
+  );
+  const onExportDirty = useCallback(
+    (dirty: boolean) => setUnsaved((u) => (u.export === dirty ? u : { ...u, export: dirty })),
+    [],
+  );
+  const onStyleDirty = useCallback(
+    (dirty: boolean) => setUnsaved((u) => (u.style === dirty ? u : { ...u, style: dirty })),
+    [],
+  );
+  const guard = useLeaveGuard(
+    unsaved.text > 0 || unsaved.translation > 0 || unsaved.export || unsaved.style,
+  );
+
+  // A translation tab left open on a video since declared Mongolian has no
+  // cell to belong to; it falls back to the text it would have translated.
+  const view: Stage = tab === "translation" && !project?.translation.needed ? "transcript" : tab;
+
+  useEffect(() => {
+    setOpened((prev) => (prev.includes(view) ? prev : [...prev, view]));
+    // A hidden panel keeps its player, and a player keeps playing: the sound
+    // of a video nobody can see, with no control on screen to stop it.
+    document
+      .querySelectorAll<HTMLMediaElement>(
+        "[data-stage-panel][hidden] video, [data-stage-panel][hidden] audio",
+      )
+      .forEach((media) => media.pause());
+  }, [view]);
 
   // The furthest step that actually has content, so returning to a project
   // lands where the work is rather than at the beginning, and a job that
@@ -114,6 +175,17 @@ export default function ProjectPage() {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** The rail's pinned save. The editor reports its own failure in place,
+   *  beside the lines it could not save. */
+  async function saveEdits(editor: RefObject<EditorHandle | null>) {
+    setSavingEdits(true);
+    try {
+      await editor.current?.save();
+    } finally {
+      setSavingEdits(false);
     }
   }
 
@@ -173,9 +245,6 @@ export default function ProjectPage() {
   // instead, the page would disable a button the server accepts — or offer
   // one it refuses — the first time either rule changed.
   const translation = project.translation;
-  // A translation tab left open on a video since declared Mongolian has no
-  // cell to belong to; it falls back to the text it would have translated.
-  const view: Stage = tab === "translation" && !translation.needed ? "transcript" : tab;
 
   // Said where the producer meets it: in the export's own cell and above the
   // per-idea export on the suggestions tab. The ways forward named are the
@@ -189,7 +258,23 @@ export default function ProjectPage() {
       : `Саналын ${translation.suggested_missing} мөр орчуулагдаагүй тул монгол хадмалд цоорхой гарна. «Орчуулга» алхмыг дуусгана уу, эсвэл Эх видео → Экспортын тохиргооноос хадмалыг ярьсан хэлээр нь гаргана уу.`;
   const voiceOn = project.voice.on;
   const voiceBlocked = project.voice.blocked;
-  const exportBlocked = translationBlocked ?? voiceBlocked;
+
+  // Every action that reads the SAVED project — the ideas, a translation,
+  // an export — would act on what was saved, not on what is on screen. Held
+  // until it is saved, with the reason where the button is.
+  const unsavedParts = [
+    unsaved.text ? `текстийн ${unsaved.text} мөр` : "",
+    unsaved.translation ? `орчуулгын ${unsaved.translation} мөр` : "",
+    unsaved.export ? "экспортын тохиргоо" : "",
+    unsaved.style ? "хадмалын загвар" : "",
+  ].filter(Boolean);
+  const unsavedList = unsavedParts.join(", ");
+  const exportUnsaved = unsavedList
+    ? `${unsavedList[0].toUpperCase()}${unsavedList.slice(1)} хадгалагдаагүй байна — экспорт хадгалсан хувилбараар гарна. Эхлээд хадгална уу.`
+    : null;
+  const textUnsaved = unsaved.text ? `Текстийн ${unsaved.text} мөр хадгалагдаагүй байна` : null;
+  const exportBlocked = exportUnsaved ?? translationBlocked ?? voiceBlocked;
+  const pending = (n: number) => (n ? ` · ${n} хадгалаагүй` : "");
 
   // Every cell says what it HOLDS, in the producer's terms — and a stage that
   // cannot run yet says why in its own cell, rather than as a footnote under
@@ -200,7 +285,9 @@ export default function ProjectPage() {
       label: "Эх видео",
       state: hasVideo ? "done" : "current",
       detail: hasVideo
-        ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}`
+        ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}${
+            unsaved.export || unsaved.style ? " · хадгалаагүй" : ""
+          }`
         : "Боловсруулагдаж байна",
     },
     {
@@ -208,7 +295,7 @@ export default function ProjectPage() {
       label: "Текст",
       state: hasTranscript ? "done" : hasVideo ? "current" : "blocked",
       detail: hasTranscript
-        ? `${segments} мөр`
+        ? `${segments} мөр${pending(unsaved.text)}`
         : hasVideo
           ? "Дараагийн алхам"
           : "Видео бэлдэж дуустал",
@@ -244,7 +331,7 @@ export default function ProjectPage() {
             detail: !hasTranscript
               ? "Текст бэлдсэний дараа"
               : translation.lines > 0 && translation.missing === 0
-                ? `${translation.lines} мөр монголоор`
+                ? `${translation.lines} мөр монголоор${pending(unsaved.translation)}`
                 : !hasSuggestions
                   ? "Саналын дараа өөрөө"
                   : translation.suggested_missing
@@ -267,11 +354,13 @@ export default function ProjectPage() {
         ? `${outputs.length} файл`
         : !hasSuggestions
           ? "Саналын дараа"
-          : translationBlocked
-            ? "Орчуулга дуустал"
-            : voiceBlocked
-              ? "Монгол дуу бэлэн биш"
-              : "Саналаас экспортлоно",
+          : exportUnsaved
+            ? "Хадгалаагүй өөрчлөлттэй"
+            : translationBlocked
+              ? "Орчуулга дуустал"
+              : voiceBlocked
+                ? "Монгол дуу бэлэн биш"
+                : "Саналаас экспортлоно",
     },
   ];
 
@@ -302,11 +391,47 @@ export default function ProjectPage() {
   // just clicked, disabled with its reason when it cannot run, is an answer.
   const running = busy || !!activeJob;
 
+  /** Unsaved lines make SAVING the next move — and on a phone the editor's
+   *  own button has scrolled away with the list above three hundred lines. */
+  function saveAction(
+    editor: RefObject<EditorHandle | null>,
+    label: string,
+    secondary?: RailAction["secondary"],
+  ): RailAction {
+    return {
+      label,
+      secondary,
+      note: "Хадгалаагүй засвар санал, орчуулга, экспортод орохгүй. Хуудаснаас гарахад анхааруулна.",
+      onRun: () => void saveEdits(editor),
+      disabled: savingEdits,
+      loading: savingEdits,
+    };
+  }
+
   function actionFor(stage: Stage): RailAction | undefined {
     switch (stage) {
-      case "transcript":
+      case "transcript": {
+        // A finished stage moves the producer ON. Starting it over replaces
+        // every line — hand corrections and translations with them — and is
+        // billed again, so it is the secondary button and it asks first.
+        const again = {
+          label: "Яриаг дахин таних…",
+          onRun: () => setConfirmTranscribe(true),
+          disabled: running,
+        };
+        if (hasTranscript && unsaved.text) {
+          return saveAction(textEditor, `Засварыг хадгалах (${unsaved.text} мөр)`, again);
+        }
+        if (hasTranscript) {
+          return {
+            label: "Санал руу шилжих",
+            note: "Текст бэлэн — засаад хадгалж, санал руу шилжинэ. «Дахин таних» бүх мөрийг, гар засвар, орчуулгатай нь солино.",
+            onRun: () => setTab("suggestions"),
+            secondary: again,
+          };
+        }
         return {
-          label: hasTranscript ? "Яриаг дахин таних" : "Яриаг текст болгох",
+          label: "Яриаг текст болгох",
           note: hasVideo
             ? "Илтгэгч тус бүрээр, үгийн нарийвчлалтай хугацаатай. Оролдлого тутам төлбөртэй."
             : "Видео бэлдэж дуустал хүлээнэ үү.",
@@ -314,14 +439,32 @@ export default function ProjectPage() {
           disabled: !hasVideo || running,
           loading: busy,
         };
-      case "suggestions":
+      }
+      case "suggestions": {
+        if (hasSuggestions) {
+          const next: Stage = translation.blocks_export ? "translation" : "outputs";
+          return {
+            label: next === "translation" ? "Орчуулга руу шилжих" : "Бэлэн видео руу шилжих",
+            note: textUnsaved
+              ? `${textUnsaved} — шинэ санал хадгалсан текстээс гарна. Эхлээд хадгална уу.`
+              : "Санал бэлэн — доороос сонгож экспортлоно. «Санал дахин авах» одоогийн саналыг бүхэлд нь солино.",
+            onRun: () => setTab(next),
+            secondary: {
+              label: "Санал дахин авах…",
+              onRun: () => setConfirmSuggest(true),
+              disabled: running || !!textUnsaved,
+            },
+          };
+        }
         return {
-          label: hasSuggestions ? "Санал дахин авах" : "Санал боловсруулах",
-          note: hasTranscript
-            ? `${segments} мөр текстээс ${counts.shorts} богино видео${
-                counts.youtube ? ` ба ${counts.youtube} YouTube хураангуй` : ""
-              } санал болгоно. Материал хүрэлцэхгүй бол цөөнийг гаргана — сул санал нэмж тоог гүйцээхгүй. Оролдлого тутам төлбөртэй.`
-            : "Эхлээд яриаг текст болгоно.",
+          label: "Санал боловсруулах",
+          note: textUnsaved
+            ? `${textUnsaved} — санал хадгалсан текстээс гарна. Эхлээд хадгална уу.`
+            : hasTranscript
+              ? `${segments} мөр текстээс ${counts.shorts} богино видео${
+                  counts.youtube ? ` ба ${counts.youtube} YouTube хураангуй` : ""
+                } санал болгоно. Материал хүрэлцэхгүй бол цөөнийг гаргана — сул санал нэмж тоог гүйцээхгүй. Оролдлого тутам төлбөртэй.`
+              : "Эхлээд яриаг текст болгоно.",
           control: hasTranscript ? (
             <SuggestCounts
               limits={limits}
@@ -336,10 +479,17 @@ export default function ProjectPage() {
           // than a confident wrong one.
           cost: suggestCost,
           onRun: () => void run(() => api.suggest(projectId, counts)),
-          disabled: !hasTranscript || running,
+          disabled: !hasTranscript || running || !!textUnsaved,
           loading: busy,
         };
+      }
       case "translation": {
+        if (hasTranscript && unsaved.translation) {
+          return saveAction(
+            translationEditor,
+            `Орчуулгыг хадгалах (${unsaved.translation} мөр)`,
+          );
+        }
         // The lines the ideas cut come first: they are all an export needs,
         // and what runs on its own after the suggestions — this is the same
         // run, for when that one left some behind (or an edit cleared them).
@@ -358,23 +508,25 @@ export default function ProjectPage() {
                 : "Бүтэн текстийг орчуулах",
           note: !hasTranscript
             ? "Эхлээд яриаг текст болгоно."
-            : cutLines
-              ? "Зөвхөн саналд орсон хэсгүүдийн орчуулагдаагүй мөрүүдийг — экспортод хэрэгтэй нь тэд. Оролдлого тутам төлбөртэй."
-              : redo
-                ? "Бүх мөрийг шинээр орчуулна — гараар зассан орчуулга ч солигдоно. Оролдлого тутам төлбөртэй."
-                : partial && hasSuggestions
-                  ? "Саналд ороогүй мөрүүдийг — экспортод хэрэггүй, бүтэн текст хэрэгтэй үед л. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
-                  : partial
-                    ? "Зөвхөн орчуулагдаагүй мөрүүдийг. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
-                    : !hasSuggestions
-                      ? "Санал гарсны дараа саналд орсон мөрүүд өөрөө орчуулагдана. Энэ товч бүтэн текстийг одоо орчуулна — урт видеонд зардал их. Оролдлого тутам төлбөртэй."
-                      : "Үгчлэн биш, утгаар нь — мөр бүрийг уншиж амжих урттай. Оролдлого тутам төлбөртэй.",
+            : textUnsaved
+              ? `${textUnsaved} — орчуулга хадгалсан текстээс хийгдэнэ. Эхлээд хадгална уу.`
+              : cutLines
+                ? "Зөвхөн саналд орсон хэсгүүдийн орчуулагдаагүй мөрүүдийг — экспортод хэрэгтэй нь тэд. Оролдлого тутам төлбөртэй."
+                : redo
+                  ? "Бүх мөрийг шинээр орчуулна — гараар зассан орчуулга ч солигдоно. Оролдлого тутам төлбөртэй."
+                  : partial && hasSuggestions
+                    ? "Саналд ороогүй мөрүүдийг — экспортод хэрэггүй, бүтэн текст хэрэгтэй үед л. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
+                    : partial
+                      ? "Зөвхөн орчуулагдаагүй мөрүүдийг. Орчуулагдсан нь, гараар зассан нь ч хэвээр үлдэнэ. Оролдлого тутам төлбөртэй."
+                      : !hasSuggestions
+                        ? "Санал гарсны дараа саналд орсон мөрүүд өөрөө орчуулагдана. Энэ товч бүтэн текстийг одоо орчуулна — урт видеонд зардал их. Оролдлого тутам төлбөртэй."
+                        : "Үгчлэн биш, утгаар нь — мөр бүрийг уншиж амжих урттай. Оролдлого тутам төлбөртэй.",
           onRun: cutLines
             ? () => void run(() => api.translate(projectId, { scope: "suggested" }))
             : redo
               ? () => setConfirmRedo(true)
               : () => void run(() => api.translate(projectId)),
-          disabled: !hasTranscript || !translation.lines || running,
+          disabled: !hasTranscript || !translation.lines || running || !!textUnsaved,
           loading: busy,
         };
       }
@@ -406,6 +558,16 @@ export default function ProjectPage() {
   }
 
   const action = actionFor(view);
+
+  // Mounted from the first visit on and hidden, never unmounted, so nothing
+  // typed into one is lost by looking at another (see `opened`). Fixed slots
+  // in a fixed order: React keeps a panel's state only while it stays put.
+  const panel = (stage: Stage, content: ReactNode) =>
+    stage === view || opened.includes(stage) ? (
+      <div data-stage-panel hidden={stage !== view}>
+        {content}
+      </div>
+    ) : null;
 
   return (
     <Shell>
@@ -447,7 +609,8 @@ export default function ProjectPage() {
           ) : undefined}
         </PipelineRail>
 
-        {view === "source" && (
+        {panel(
+          "source",
           <div className="flex flex-col gap-6">
             {project.media.source_url ? (
               <video
@@ -472,6 +635,7 @@ export default function ProjectPage() {
                 speakers={project.speakers}
                 hasTranscript={hasTranscript}
                 onSaved={() => void refresh()}
+                onDirtyChange={onExportDirty}
               />
             </Card>
             <Card className="p-5">
@@ -496,14 +660,17 @@ export default function ProjectPage() {
                 projectId={projectId}
                 style={project.subtitle_style}
                 onSaved={() => void refresh()}
+                onDirtyChange={onStyleDirty}
               />
             </Card>
-          </div>
+          </div>,
         )}
 
-        {view === "transcript" &&
-          (hasTranscript ? (
+        {panel(
+          "transcript",
+          hasTranscript ? (
             <TranscriptEditor
+              ref={textEditor}
               projectId={projectId}
               segments={project.transcript!.segments}
               timingsEstimated={project.transcript!.timings_estimated}
@@ -511,36 +678,44 @@ export default function ProjectPage() {
               language={project.language}
               translation={translation}
               onSaved={() => void refresh()}
+              onDirtyChange={onTextDirty}
             />
           ) : (
             <Empty
               title="Текст хараахан алга"
               hint="«Яриаг текст болгох» дарж эхлүүлнэ үү."
             />
-          ))}
+          ),
+        )}
 
-        {view === "translation" &&
-          (hasTranscript ? (
-            <TranscriptEditor
-              field="translation"
-              projectId={projectId}
-              segments={project.transcript!.segments}
-              timingsEstimated={project.transcript!.timings_estimated}
-              sourceUrl={project.media.source_url}
-              language={project.language}
-              translation={translation}
-              focusIds={translation.suggested_ids}
-              onSaved={() => void refresh()}
-            />
-          ) : (
-            <Empty
-              title="Орчуулах текст хараахан алга"
-              hint="Эхлээд «Яриаг текст болгох» дарна."
-            />
-          ))}
+        {translation.needed &&
+          panel(
+            "translation",
+            hasTranscript ? (
+              <TranscriptEditor
+                ref={translationEditor}
+                field="translation"
+                projectId={projectId}
+                segments={project.transcript!.segments}
+                timingsEstimated={project.transcript!.timings_estimated}
+                sourceUrl={project.media.source_url}
+                language={project.language}
+                translation={translation}
+                focusIds={translation.suggested_ids}
+                onSaved={() => void refresh()}
+                onDirtyChange={onTranslationDirty}
+              />
+            ) : (
+              <Empty
+                title="Орчуулах текст хараахан алга"
+                hint="Эхлээд «Яриаг текст болгох» дарна."
+              />
+            ),
+          )}
 
-        {view === "suggestions" &&
-          (hasSuggestions ? (
+        {panel(
+          "suggestions",
+          hasSuggestions ? (
             <SuggestionList
               suggestions={project.suggestions!}
               sourceUrl={project.media.source_url}
@@ -553,10 +728,12 @@ export default function ProjectPage() {
               title="Санал хараахан алга"
               hint="Текст бэлэн болсны дараа «Санал боловсруулах» дарна."
             />
-          ))}
+          ),
+        )}
 
-        {view === "outputs" && (
-          <OutputList projectId={projectId} outputs={outputs} onChanged={() => void refresh()} />
+        {panel(
+          "outputs",
+          <OutputList projectId={projectId} outputs={outputs} onChanged={() => void refresh()} />,
         )}
 
         {project.transcript?.timings_estimated && view === "source" && (
@@ -585,6 +762,69 @@ export default function ProjectPage() {
               void run(() => api.translate(projectId, { force: true }));
             }}
             onCancel={() => setConfirmRedo(false)}
+          />
+        )}
+
+        {/* The counted list is the point: a transcript is often an hour of
+            hand correction, and this used to be one unconfirmed tap. The
+            ideas and the rendered videos are kept — only the text goes. */}
+        {confirmTranscribe && (
+          <ConfirmDialog
+            title="Яриаг дахин таних уу?"
+            lose={[
+              `${segments} мөр текст — гараар зассан нь ч мөн`,
+              translation.translated ? `${translation.translated} мөрийн монгол орчуулга` : "",
+              unsaved.text ? `Хадгалаагүй ${unsaved.text} мөрийн засвар` : "",
+              unsaved.translation ? `Хадгалаагүй ${unsaved.translation} мөрийн орчуулга` : "",
+            ].filter(Boolean)}
+            confirmLabel="Дахин таних"
+            onConfirm={() => {
+              setConfirmTranscribe(false);
+              void run(() => api.transcribe(projectId, { force: true }));
+            }}
+            onCancel={() => setConfirmTranscribe(false)}
+          >
+            <p className="text-sm text-ink-2">
+              Таних нь дахин төлбөртэй. Санал, бэлэн видео хэвээр үлдэнэ.
+            </p>
+          </ConfirmDialog>
+        )}
+
+        {/* The counts are chosen here, where the replacement is confirmed:
+            on a finished stage they no longer sit in the rail. */}
+        {confirmSuggest && (
+          <ConfirmDialog
+            title="Санал дахин авах уу?"
+            lose={[`Одоогийн ${shorts} богино · ${plans} хураангуйн санал`]}
+            confirmLabel="Санал дахин авах"
+            onConfirm={() => {
+              setConfirmSuggest(false);
+              void run(() => api.suggest(projectId, counts, { force: true }));
+            }}
+            onCancel={() => setConfirmSuggest(false)}
+          >
+            <SuggestCounts limits={limits} value={counts} onChange={setChosen} />
+            <p className="text-sm text-ink-2">
+              {suggestCost
+                ? `Дахин төлбөр гарна — ≈ ${usd(suggestCost.usd)}, өмнөх ${suggestCost.samples} гүйлтийн хэмжилтээр.`
+                : "Дахин төлбөр гарна."}{" "}
+              Бэлэн видео хэвээр үлдэнэ.
+            </p>
+          </ConfirmDialog>
+        )}
+
+        {guard.leaveTo && (
+          <ConfirmDialog
+            title="Хадгалаагүй өөрчлөлтийг орхих уу?"
+            lose={[
+              unsaved.text ? `Текстийн ${unsaved.text} мөрийн засвар` : "",
+              unsaved.translation ? `Орчуулгын ${unsaved.translation} мөр` : "",
+              unsaved.export ? "Экспортын тохиргооны өөрчлөлт" : "",
+              unsaved.style ? "Хадмалын загварын өөрчлөлт" : "",
+            ].filter(Boolean)}
+            confirmLabel="Орхиод гарах"
+            onConfirm={guard.leave}
+            onCancel={guard.stay}
           />
         )}
 

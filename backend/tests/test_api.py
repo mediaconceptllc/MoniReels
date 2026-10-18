@@ -1522,7 +1522,9 @@ def test_an_english_video_is_refused_when_scribe_cannot_hear_it(client, db, monk
     monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
     row = _english_project(db, "noscribe")
 
-    response = client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "noscribe"))
+    response = client.post(
+        f"/projects/{row.id}/transcribe", json={"force": True}, headers=_auth(client, "noscribe")
+    )
     assert response.status_code == 503
     assert "ElevenLabs Scribe" in response.json()["detail"]
 
@@ -1534,7 +1536,9 @@ def test_an_english_video_is_accepted_when_scribe_can_hear_it(client, db, monkey
     settings = get_settings().model_copy(update={"stt_provider": "duudlaga", "elevenlabs_api_key": "el-key"})
     monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
     row = _english_project(db, "scribe")
-    assert client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "scribe")).status_code == 200
+    auth = _auth(client, "scribe")
+    response = client.post(f"/projects/{row.id}/transcribe", json={"force": True}, headers=auth)
+    assert response.status_code == 200
 
 
 def test_translating_queues_a_job_that_fills_only_the_gaps_by_default(client, db, monkeypatch):
@@ -2231,3 +2235,59 @@ def test_the_speakers_voice_list_says_why_it_is_empty(client, db, monkeypatch):
 
 def test_the_speakers_voice_list_needs_a_login(client):
     assert client.get("/projects/tts/voices").status_code == 401
+
+
+
+# ---------------------------------------------------------------------------
+# Replacing finished work is confirmed
+# ---------------------------------------------------------------------------
+
+
+def test_recognising_again_must_be_confirmed(client, db, monkeypatch):
+    """Recognising again replaces the whole transcript — hand corrections and
+    translations with it — and is billed again. It used to be one
+    unconfirmed click on the stage's only button."""
+    from app import provider_settings
+    from app.config import get_settings
+    from app.dbmodels import Job
+
+    settings = get_settings().model_copy(
+        update={"stt_provider": "elevenlabs", "elevenlabs_api_key": "el-key"}
+    )
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+    row = _english_project(db, "redoaudio", translations=("Сайн уу.", None))
+    auth = _auth(client, "redoaudio")
+
+    refused = client.post(f"/projects/{row.id}/transcribe", headers=auth)
+    assert refused.status_code == 409
+    assert "2 мөр" in refused.json()["detail"]
+    assert db.query(Job).filter(Job.project_id == row.id).count() == 0
+
+    confirmed = client.post(f"/projects/{row.id}/transcribe", json={"force": True}, headers=auth)
+    assert confirmed.status_code == 200
+
+
+def test_a_project_without_a_transcript_needs_no_confirmation(client, db, monkeypatch):
+    from app import provider_settings
+    from app.config import get_settings
+
+    settings = get_settings().model_copy(
+        update={"stt_provider": "elevenlabs", "elevenlabs_api_key": "el-key"}
+    )
+    monkeypatch.setattr(provider_settings, "effective", lambda _db: settings)
+    owner = _user(db, "firstaudio")
+    row = _project_with_video(db, owner)
+    first = client.post(f"/projects/{row.id}/transcribe", headers=_auth(client, "firstaudio"))
+    assert first.status_code == 200
+
+
+def test_new_suggestions_must_be_confirmed_when_there_are_some(client, db, monkeypatch):
+    row = _suggestable(db, monkeypatch, "redoideas", duration_sec=600.0)
+    auth = _auth(client, "redoideas")
+    _with_suggestions(db, row)
+
+    refused = client.post(f"/projects/{row.id}/suggest", headers=auth)
+    assert refused.status_code == 409
+    assert "санал аль хэдийн бий" in refused.json()["detail"]
+
+    assert client.post(f"/projects/{row.id}/suggest", json={"force": True}, headers=auth).status_code == 200

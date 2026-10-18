@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui";
 
 export function ConfirmDialog({
@@ -26,6 +27,7 @@ export function ConfirmDialog({
   busy = false,
   onConfirm,
   onCancel,
+  children,
 }: {
   title: string;
   /** What goes, counted. Empty is fine — some things really do stand alone. */
@@ -34,6 +36,9 @@ export function ConfirmDialog({
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /** What the run will ask for and charge, set in the same place it is
+   *  confirmed — a new set of ideas is chosen here, not before. */
+  children?: ReactNode;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -64,6 +69,8 @@ export function ConfirmDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <p className="font-display text-base font-semibold text-ink">{title}</p>
+
+        {children}
 
         {lose && lose.length > 0 && (
           <div className="rounded-md border border-tally/40 bg-tally-soft px-3.5 py-3">
