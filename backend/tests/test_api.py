@@ -146,6 +146,29 @@ def test_password_change_guesses_are_rate_limited(client, db):
     assert codes[-1] == 429
 
 
+def test_auth_refusals_are_said_in_mongolian(client, db):
+    """The page shows these words as they come: a wrong password used to read
+    "Incorrect username or password" in a product whose every other line is
+    Mongolian, and a mistyped current password "Current password is
+    incorrect"."""
+    _user(db, "alice")
+    wrong = client.post("/auth/login", json={"username": "alice", "password": "wrongwrongwrong"})
+    assert wrong.json()["detail"] == "Нэвтрэх нэр эсвэл нууц үг буруу байна."
+
+    mistyped = client.post(
+        "/auth/password",
+        json={"current_password": "not-the-password", "new_password": "brandnewpassword"},
+        headers=_auth(client, "alice"),
+    )
+    assert mistyped.status_code == 401
+    assert mistyped.json()["detail"] == "Одоогийн нууц үг буруу байна."
+
+    missing = client.get("/auth/me")
+    assert missing.json()["detail"] == "Нэвтрэх шаардлагатай."
+    expired = client.get("/auth/me", headers={"Authorization": "Bearer not.a.token"})
+    assert expired.json()["detail"].startswith("Нэвтрэлт хүчингүй")
+
+
 def test_protected_routes_reject_a_missing_token(client):
     assert client.get("/projects").status_code == 401
     assert client.get("/jobs/queue").status_code == 401

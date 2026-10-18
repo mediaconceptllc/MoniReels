@@ -135,6 +135,13 @@ jobs:
       # having if the next component cannot quietly opt out of it.
       - run: npm run check-ui
 
+      # Two client paths whose failure is silent. The job stream split on
+      # "\n\n" while the server frames with CRLF, so no event was ever read
+      # and every job fell back to polling after eight seconds; and every 401
+      # was read as an expired session, including a mistyped password.
+      - run: npm run check-sse
+      - run: npm run check-auth
+
       # A placeholder is fine: NEXT_PUBLIC_API_URL is baked in at build time
       # and nothing here calls it. What is being checked is that the build
       # compiles, not that it can reach a server.

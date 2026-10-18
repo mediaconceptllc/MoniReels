@@ -12,6 +12,8 @@ the two levers that matter, and both stay operator-controlled per project.
 """
 from __future__ import annotations
 
+from app.config import heavy_threads
+
 LANDSCAPE_SIZE = (1920, 1080)
 PORTRAIT_SIZE = (1080, 1920)
 
@@ -20,6 +22,18 @@ AUDIO_CHANNEL_LAYOUT = "stereo"
 AUDIO_BITRATE = "192k"
 
 VIDEO_ENCODER = "libx264"
+
+# Thread counts, set on every run rather than left to ffmpeg. Its defaults
+# are per core it can SEE — the host's, not the container's quota (see
+# config.heavy_threads) — so on a large host every decoder and x264 started
+# dozens of threads, each with its own frames in flight. MEASURED at the
+# audit: 9.07 GB for one xfade join of 28 clips, the worker's production peak.
+#: x264 past this many threads is barely faster at 1080p; its memory is not.
+ENCODER_THREADS_MAX = 8
+#: One input decoded at a time: a clip being cut, the overlay pass.
+DECODER_THREADS = 4
+#: Several decoded at once — every input of an xfade graph runs together.
+DECODER_THREADS_MULTI = 2
 
 
 def resolve_dimensions(orientation: str) -> tuple[int, int]:
@@ -40,7 +54,31 @@ def build_video_encoder_args(crf: int, preset: str) -> list[str]:
     every phone and browser fails on it outright, which to a user is
     indistinguishable from a broken export.
     """
-    return ["-c:v", VIDEO_ENCODER, "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
+    return [
+        "-c:v", VIDEO_ENCODER, "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+        "-threads", str(encoder_threads()),
+    ]
+
+
+def encoder_threads() -> int:
+    return max(1, min(heavy_threads(), ENCODER_THREADS_MAX))
+
+
+def decoder_thread_args(inputs: int = 1) -> list[str]:
+    """`-threads` for the `-i` right after it.
+
+    An input option, so it belongs in front of EVERY input it limits: one
+    `-threads` before the first of six inputs leaves the other five at
+    ffmpeg's default.
+    """
+    cap = DECODER_THREADS if inputs <= 1 else DECODER_THREADS_MULTI
+    return ["-threads", str(max(1, min(heavy_threads(), cap)))]
+
+
+def filter_thread_args() -> list[str]:
+    """Global options: the filters' own worker threads, -vf and -filter_complex."""
+    n = str(encoder_threads())
+    return ["-filter_threads", n, "-filter_complex_threads", n]
 
 
 def build_audio_encoder_args() -> list[str]:

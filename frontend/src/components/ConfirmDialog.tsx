@@ -68,7 +68,7 @@ export function ConfirmDialog({
         className="flex w-full max-w-md flex-col gap-4 rounded-lg border border-rule bg-surface p-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="font-display text-base font-semibold text-ink">{title}</p>
+        <p className="font-display text-base font-semibold text-ink [overflow-wrap:anywhere]">{title}</p>
 
         {children}
 

@@ -573,8 +573,11 @@ export default function ProjectPage() {
     <Shell>
       <div className="flex flex-col gap-6 pb-20 sm:pb-0">
         <header className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl font-semibold tracking-tight">{project.name}</h1>
+          {/* The same file-name title widened this heading to 1114px on a phone. */}
+          <div className="min-w-0 flex-1">
+            <h1 className="font-display text-2xl font-semibold tracking-tight [overflow-wrap:anywhere]">
+              {project.name}
+            </h1>
             <p className="tabular mt-1 text-sm text-ink-3">
               {hasVideo
                 ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}`

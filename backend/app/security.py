@@ -34,7 +34,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 class AuthError(HTTPException):
-    def __init__(self, detail: str = "Not authenticated") -> None:
+    def __init__(self, detail: str = "Нэвтрэх шаардлагатай.") -> None:
         super().__init__(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=detail,
@@ -119,9 +119,9 @@ def decode_token(token: str) -> dict:
             token, settings.jwt_secret, algorithms=["HS256"], options={"require": ["exp", "iat", "sub"]}
         )
     except jwt.ExpiredSignatureError as e:
-        raise AuthError("Token has expired") from e
+        raise AuthError("Нэвтрэх хугацаа дууссан байна. Дахин нэвтэрнэ үү.") from e
     except jwt.InvalidTokenError as e:
-        raise AuthError("Invalid token") from e
+        raise AuthError("Нэвтрэлт хүчингүй байна. Дахин нэвтэрнэ үү.") from e
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def current_user(
 
     user = db.get(User, payload.get("sub", ""))
     if user is None or not user.active:
-        raise AuthError("Account is not active")
+        raise AuthError("Энэ бүртгэл хаагдсан байна.")
 
     # A password change invalidates every token issued under the previous
     # serial. Checking only `exp` would leave a stolen token working for
@@ -151,7 +151,7 @@ def current_user(
     # is deliberate — a migration must not sign out everyone who is already
     # logged in.
     if payload.get("ser", 0) != (user.token_serial or 0):
-        raise AuthError("Session ended because the password was changed")
+        raise AuthError("Нууц үг солигдсон тул нэвтрэлт дууссан. Дахин нэвтэрнэ үү.")
 
     return Principal(id=user.id, username=user.username, role=user.role)
 

@@ -75,12 +75,17 @@ export default function ProjectsPage() {
             />
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {/* A name defaults to the FILE name — underscores, no spaces — and a
+              grid track with no base size grows to fit one unbroken word: at
+              360px every card measured 739px and the page scrolled sideways.
+              One column by default, tracks allowed to shrink, the name allowed
+              to break anywhere and clamped to two lines (whole on hover). */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {projects?.map((project) => (
               <Link
                 key={project.id}
                 href={`/projects/${project.id}`}
-                className={`${TAP} block`}
+                className={`${TAP} block min-w-0`}
               >
                 <Card className="flex h-full flex-col overflow-hidden transition-colors hover:border-accent">
                   {/* Import has always made a thumbnail; the list never asked
@@ -108,7 +113,10 @@ export default function ProjectsPage() {
                     )}
                   </div>
                   <div className="flex flex-1 flex-col gap-2 p-3.5">
-                    <p className="font-display text-[15px] font-medium leading-snug text-ink">
+                    <p
+                      title={project.name}
+                      className="line-clamp-2 font-display text-[15px] font-medium leading-snug text-ink [overflow-wrap:anywhere]"
+                    >
                       {project.name}
                     </p>
                     {/* One state, not four badges of equal weight competing to

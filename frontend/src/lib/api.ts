@@ -86,6 +86,18 @@ export function setToken(token: string | null): void {
   }
 }
 
+/** Calls whose 401 is about the password just typed, not about the session.
+ *  Treating them like an expired session told someone who mistyped their
+ *  password that their login had "expired" — and on the profile page it
+ *  deleted a perfectly good token while the header still showed them signed
+ *  in. Their answer is the server's own words, and the stored token stays. */
+const CREDENTIAL_CHECKS = new Set(["/auth/login", "/auth/password"]);
+
+/** Fired when a stored session stops working mid-page, so the app can ask
+ *  for the password again over the page instead of navigating away from
+ *  whatever unsaved work is on it. */
+export const SESSION_EXPIRED = "monireels:session-expired";
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(init.headers);
@@ -110,9 +122,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (response.status === 401) {
+    if (!token || CREDENTIAL_CHECKS.has(path)) {
+      throw new ApiError(401, await detailOf(response));
+    }
     // Either expired, or ended by a password change. Both mean the same
     // thing to this client: the stored token is worthless, drop it.
     setToken(null);
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(SESSION_EXPIRED));
     throw new ApiError(401, "Нэвтрэх хугацаа дууссан байна. Дахин нэвтэрнэ үү.");
   }
 
