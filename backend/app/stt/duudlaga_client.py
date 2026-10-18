@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import TypeVar
 
 import httpx
 
+from app import metering
 from app.models import Transcript
 from app.stt.base import SttProvider
 from app.stt.chunking import (
@@ -429,6 +431,9 @@ class DuudlagaClient(SttProvider):
         falls back to the original bytes and stops guessing for the rest of
         the job, rather than failing a chunk that WAV would have transcribed.
         """
+        # Measured on the WAV, whichever bytes go out: an Opus file carries no
+        # header this can read, and the audio is the same length either way.
+        seconds = _seconds_of(wav_path)
         if self._send_compressed:
             compressed = wav_path.with_suffix(".opus")
             try:
@@ -437,7 +442,9 @@ class DuudlagaClient(SttProvider):
                 )
                 # `skip_no_speech=False` so an empty verdict on the compressed
                 # bytes comes back as an error to check rather than as "".
-                return await self._post_file(compressed, "audio/ogg", skip_no_speech=False)
+                return await self._post_file(
+                    compressed, "audio/ogg", seconds=seconds, skip_no_speech=False
+                )
             except DuudlagaError as e:
                 if e.means_no_speech:
                     # Do not take this one on trust. The first span the API
@@ -463,9 +470,11 @@ class DuudlagaClient(SttProvider):
             finally:
                 compressed.unlink(missing_ok=True)
 
-        return await self._post_file(wav_path, "audio/wav")
+        return await self._post_file(wav_path, "audio/wav", seconds=seconds)
 
-    async def _post_file(self, path: Path, content_type: str, skip_no_speech: bool = True) -> str:
+    async def _post_file(
+        self, path: Path, content_type: str, *, seconds: float = 0.0, skip_no_speech: bool = True
+    ) -> str:
         url = f"{self._config.base_url.rstrip('/')}{TRANSCRIBE_PATH}"
         files = {"file": (path.name, path.read_bytes(), content_type)}
         # The documented request carries only the file. `model` is sent only
@@ -485,6 +494,9 @@ class DuudlagaClient(SttProvider):
                 return ""
             raise error
 
+        # Only an answered request is billed audio; a refused one (including
+        # the "no speech" verdict above) bought nothing.
+        metering.record_stt(provider="duudlaga", model=self._config.model, seconds=seconds)
         return self._parse_response(response.json())
 
     @staticmethod
@@ -570,6 +582,16 @@ def build_client(settings) -> DuudlagaClient:
             concurrency=settings.duudlaga_concurrency,
         )
     )
+
+
+def _seconds_of(wav_path: Path) -> float:
+    try:
+        return wav_duration_sec(wav_path)
+    except (wave.Error, EOFError, OSError):
+        # Every real chunk is a WAV ffmpeg just wrote; this guards the meter,
+        # which must never be the reason a transcription fails.
+        logger.warning("Could not read the length of %s for the usage ledger", wav_path.name)
+        return 0.0
 
 
 def _backoff(attempt: int) -> float:

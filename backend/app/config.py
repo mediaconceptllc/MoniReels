@@ -18,7 +18,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com"
@@ -157,6 +157,29 @@ class Settings(BaseSettings):
     #: "duudlaga" or "elevenlabs". One name, checked at startup, so "which
     #: recogniser is running" has an answer that is not "read the code".
     stt_provider: str = "duudlaga"
+
+    # ---- What a unit of speech costs, when the operator says so ------
+    # OpenRouter reports the price of every call it answers; the speech
+    # providers do not, and their prices depend on a plan this system cannot
+    # see. So these are the operator's to set, and unset means UNKNOWN: the
+    # usage ledger then records the minutes and characters with a null price
+    # and the report says "тодорхойгүй", never $0 — a zero there would read
+    # as "free", the most expensive kind of wrong.
+    duudlaga_usd_per_minute: float | None = Field(default=None, ge=0)
+    elevenlabs_stt_usd_per_minute: float | None = Field(default=None, ge=0)
+    elevenlabs_tts_usd_per_1k_chars: float | None = Field(default=None, ge=0)
+
+    @field_validator(
+        "duudlaga_usd_per_minute",
+        "elevenlabs_stt_usd_per_minute",
+        "elevenlabs_tts_usd_per_1k_chars",
+        mode="before",
+    )
+    @classmethod
+    def _blank_rate_is_unset(cls, value: object) -> object:
+        # A variable created on the platform and left empty is "not set", not
+        # a reason for the API to refuse to start.
+        return None if isinstance(value, str) and not value.strip() else value
 
     # ---- audio pipeline ----------------------------------------------
     # Demucs is OFF by default. On a shared container torch does not read

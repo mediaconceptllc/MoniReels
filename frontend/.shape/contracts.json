@@ -895,5 +895,80 @@
   "upload_complete": {
     "job_id": "",
     "project_id": ""
+  },
+  "usage": {
+    "month_totals": [
+      {
+        "audio_seconds": 0.0,
+        "characters": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.0,
+        "month": "",
+        "prompt_tokens": 0,
+        "requests": 0,
+        "unpriced_requests": 0
+      }
+    ],
+    "months": 0,
+    "rates": {
+      "duudlaga_usd_per_minute": null,
+      "elevenlabs_stt_usd_per_minute": null,
+      "elevenlabs_tts_usd_per_1k_chars": null
+    },
+    "rows": [
+      {
+        "audio_seconds": 0.0,
+        "characters": 0,
+        "completion_tokens": 0,
+        "cost_usd": 0.0,
+        "kind": "llm",
+        "month": "",
+        "prompt_tokens": 0,
+        "provider": "",
+        "requests": 0,
+        "unpriced_requests": 0,
+        "user_id": "",
+        "username": ""
+      },
+      {
+        "audio_seconds": 0.0,
+        "characters": 0,
+        "completion_tokens": 0,
+        "cost_usd": null,
+        "kind": "stt",
+        "month": "",
+        "prompt_tokens": 0,
+        "provider": "",
+        "requests": 0,
+        "unpriced_requests": 0,
+        "user_id": "",
+        "username": ""
+      },
+      {
+        "audio_seconds": 0.0,
+        "characters": 0,
+        "completion_tokens": 0,
+        "cost_usd": null,
+        "kind": "tts",
+        "month": "",
+        "prompt_tokens": 0,
+        "provider": "",
+        "requests": 0,
+        "unpriced_requests": 0,
+        "user_id": null,
+        "username": null
+      }
+    ],
+    "since": 0.0,
+    "timezone": "",
+    "totals": {
+      "audio_seconds": 0.0,
+      "characters": 0,
+      "completion_tokens": 0,
+      "cost_usd": 0.0,
+      "prompt_tokens": 0,
+      "requests": 0,
+      "unpriced_requests": 0
+    }
   }
 }

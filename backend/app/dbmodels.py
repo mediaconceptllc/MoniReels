@@ -225,6 +225,42 @@ class SubtitleTemplate(Base):
     created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
 
 
+class UsageEvent(Base):
+    """What one job attempt bought from one paid provider (app.metering).
+
+    Append-only, and deliberately without foreign keys: a job row is purged
+    after `job_keep_days` and a project can be deleted, and neither may take
+    the record of money already spent with it. Nothing updates or deletes a
+    row here — `queue.purge_old` touches `jobs` only.
+
+    `cost_usd` NULL means the price is unknown (no rate configured, or the
+    provider stated none) — never zero, which would read as free.
+    """
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    job_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="", server_default="")
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)  # llm | stt | tts
+    model: Mapped[str] = mapped_column(String(120), nullable=False, default="", server_default="")
+    requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    completion_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    audio_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    characters: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+Index("ix_usage_created", UsageEvent.created_at)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 

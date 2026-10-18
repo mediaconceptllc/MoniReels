@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app import metering
 from app.utils import provider_errors
 from app.utils.logging import get_logger
 
@@ -191,6 +192,8 @@ class ElevenLabsTts:
             raise _error(response)
         if not response.content:
             raise TtsError("ElevenLabs хоосон дуу буцаалаа.", status=response.status_code)
+        # Characters as sent — what ElevenLabs bills, whitespace trimmed.
+        metering.record_tts(provider="elevenlabs", model=self.config.model, characters=len(text))
         return response.content
 
     async def voices(self) -> list[dict]:

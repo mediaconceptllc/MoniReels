@@ -27,6 +27,7 @@ from difflib import get_close_matches
 
 import httpx
 
+from app import metering
 from app.ai import usage as usage_meter
 from app.ai.llm_client import LLMError
 from app.utils import provider_errors
@@ -292,11 +293,23 @@ class OpenRouterClient:
 
     def _record_usage(self, data: dict) -> None:
         usage = data.get("usage") or {}
+        model = data.get("model") or self._config.model
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
         usage_meter.record(
-            model=data.get("model") or self._config.model,
-            prompt=int(usage.get("prompt_tokens") or 0),
-            completion=int(usage.get("completion_tokens") or 0),
+            model=model,
+            prompt=prompt,
+            completion=completion,
             cost=float(usage.get("cost") or 0.0),
+        )
+        # The ledger keeps "no price stated" apart from "cost nothing": a
+        # missing `cost` is NULL there, never the zero the job summary shows.
+        cost = usage.get("cost")
+        metering.record_llm(
+            model=model,
+            prompt=prompt,
+            completion=completion,
+            cost=float(cost) if isinstance(cost, int | float) else None,
         )
 
 

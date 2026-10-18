@@ -32,6 +32,7 @@ from pathlib import Path
 
 import httpx
 
+from app import metering
 from app.models import Segment, Transcript
 from app.stt.base import SttProvider
 from app.stt.chunking import text_to_transcript
@@ -123,7 +124,11 @@ class ElevenLabsSttClient(SttProvider):
                 status=response.status_code,
             )
 
-        return build_transcript(response.json(), wav_duration(wav_path))
+        duration = wav_duration(wav_path)
+        # Counted once the provider has answered: an error status is not
+        # billed audio, and the ledger records what was bought.
+        metering.record_stt(provider="elevenlabs", model=self._config.model, seconds=duration)
+        return build_transcript(response.json(), duration)
 
     async def account_info(self) -> dict:
         """Subscription and quota, so "will this run" is answerable before a

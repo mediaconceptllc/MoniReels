@@ -33,6 +33,7 @@ import type {
   SubtitleTemplate,
   TokenResponse,
   TtsVoices,
+  UsageReport,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -297,6 +298,10 @@ export const api = {
     ),
 
   brand: () => request<BrandSettings>("/admin/brand"),
+
+  /** The spend ledger, whole UTC months back from this one. Admin only on
+   *  the server. */
+  usageReport: (months: number) => request<UsageReport>(`/admin/usage?months=${months}`),
 
   /** What can and cannot run. Readable by anyone signed in — the warning has
    *  to appear on the page with the paid button, and that page is not

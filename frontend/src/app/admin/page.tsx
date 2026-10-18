@@ -7,6 +7,7 @@ import { errorMessage, useRequireAuth } from "@/lib/auth";
 import type { Capability, ProviderSettings, ProviderSettingsPatch } from "@/lib/types";
 import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TextInput } from "@/components/ui";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
+import { UsageReportCard } from "@/components/UsageReportCard";
 import { VoiceOverCard } from "@/components/VoiceOverCard";
 import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
@@ -285,6 +286,8 @@ export default function AdminPage() {
         <VoiceOverCard settings={settings} onSaved={() => void load()} />
 
         <BrandAssetsCard />
+
+        <UsageReportCard />
 
       </div>
     </Shell>

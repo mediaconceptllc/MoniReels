@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
-from app.api import routes_admin, routes_auth, routes_jobs, routes_projects
+from app.api import routes_admin, routes_auth, routes_jobs, routes_projects, routes_usage
 from app.bodylimit import BodyLimit
 from app.config import Settings, get_settings
 from app.db import session_scope
@@ -209,6 +209,7 @@ app.include_router(routes_auth.router)
 app.include_router(routes_projects.router)
 app.include_router(routes_jobs.router)
 app.include_router(routes_admin.router)
+app.include_router(routes_usage.router)
 
 
 @app.get("/health")
