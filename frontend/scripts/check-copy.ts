@@ -88,8 +88,10 @@ if (relativeTime((now - 26 * 3600000) / 1000, now) !== "өчигдөр") problem
 
 // Node ships Mongolian locale data and Chromium does not: in Node,
 // Intl.RelativeTimeFormat("mn") says "1 цагийн өмнө", in the browser the same
-// call resolves to en-US and says "1 hour ago". The behaviour check above
-// therefore cannot see that regression — only the source can.
+// call resolves to en-US and says "1 hour ago" — and so does every Intl call
+// for "mn" (MEASURED in Chromium: month "October", weekday "Saturday"), along
+// with toLocaleString("mn-MN"), which is Intl underneath. The behaviour check
+// above therefore cannot see that regression — only the source can.
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
@@ -99,7 +101,10 @@ function sources(dir: string): string[] {
 for (const path of sources(join(__dirname, "..", "src"))) {
   // Comments are dropped first: format.ts says, in one, what it replaced.
   const code = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
-  if (/Intl\.(RelativeTimeFormat|DateTimeFormat|NumberFormat)\(\s*["']mn/.test(code)) {
+  if (
+    /Intl\.(RelativeTimeFormat|DateTimeFormat|NumberFormat|ListFormat|PluralRules)\(\s*["']mn/.test(code) ||
+    /\.toLocale(?:Date|Time)?String\(\s*["']mn/.test(code)
+  ) {
     problems.push(`${path}: Intl with "mn" falls back to English in Chromium — write the words out`);
   }
 }
