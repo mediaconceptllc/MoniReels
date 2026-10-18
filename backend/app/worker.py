@@ -828,9 +828,12 @@ async def _run_job(job) -> None:
     finally:
         beat.cancel()
         # Before anything else here that could raise: this is the one record
-        # of what a failed, canceled or abandoned attempt bought.
-        await _record_spend(job, meter)
-        clear_job_workdir(job.id)
+        # of what a failed, canceled or abandoned attempt bought. The workdir
+        # is cleared even if a second cancellation lands mid-write.
+        try:
+            await _record_spend(job, meter)
+        finally:
+            clear_job_workdir(job.id)
 
 
 async def _record_spend(job, meter: metering.Meter) -> None:

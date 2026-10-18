@@ -46,8 +46,11 @@ const RATE_SETTINGS: { field: keyof UsageReport["rates"]; env: string }[] = [
   { field: "elevenlabs_tts_usd_per_1k_chars", env: "ELEVENLABS_TTS_USD_PER_1K_CHARS" },
 ];
 
-const count = new Intl.NumberFormat("mn");
-const minutes = new Intl.NumberFormat("mn", { maximumFractionDigits: 1 });
+// "en-US" on purpose: CLDR's Mongolian number format is the same 1,234.5,
+// and Chromium ships no "mn" data, so "mn" would only have been en-US by
+// fallback — and asking for "mn" reads as if the page set Mongolian words.
+const count = new Intl.NumberFormat("en-US");
+const minutes = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
 function monthLabel(month: string): string {
   const [year, m] = month.split("-");
