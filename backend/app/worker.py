@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app import worker_report
+from app import metering, worker_report
 from app.ai import usage as llm_usage
 from app.ai.localize import localize_suggestions
 from app.ai.openrouter_client import build_client as build_llm_client
@@ -773,6 +773,7 @@ async def _run_job(job) -> None:
     handle = JobHandle(job.id, job.kind, job.project_id, queue.payload_of(job), attempt=job.attempts)
     settle = functools.partial(queue.finish, job.id, attempt=job.attempts)
     usage = llm_usage.start()
+    meter = metering.start()
     beat = asyncio.create_task(_heartbeat_loop(handle))
     started = time.time()
     try:
@@ -826,7 +827,31 @@ async def _run_job(job) -> None:
         )
     finally:
         beat.cancel()
-        clear_job_workdir(job.id)
+        # Before anything else here that could raise: this is the one record
+        # of what a failed, canceled or abandoned attempt bought. The workdir
+        # is cleared even if a second cancellation lands mid-write.
+        try:
+            await _record_spend(job, meter)
+        finally:
+            clear_job_workdir(job.id)
+
+
+async def _record_spend(job, meter: metering.Meter) -> None:
+    """Write the attempt's spend to the ledger, whatever became of the job.
+
+    Never raises: a ledger that cannot be written must not turn a finished
+    job into a crashed loop. The numbers then go to the log instead, which
+    is worse than the table and better than nowhere.
+    """
+    try:
+        await asyncio.to_thread(
+            metering.flush, meter, job_id=job.id, job_kind=job.kind, project_id=job.project_id
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.exception(
+            "Could not write the usage ledger for job %s (%s); it spent: %s",
+            job.id, job.kind, metering.describe(meter),
+        )
 
 
 async def _housekeeping(settings) -> None:

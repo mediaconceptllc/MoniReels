@@ -55,6 +55,7 @@ import type {
   SubtitleTemplate,
   TokenResponse,
   TtsVoices,
+  UsageReport,
 } from "../src/lib/types";
 
 /* ------------------------------------------------------------------ *
@@ -79,6 +80,7 @@ const brand = contracts.brand as BrandSettings;
 const brandEmpty = contracts.brand_empty as BrandSettings;
 const fonts = contracts.fonts as SubtitleFonts;
 const templateSaved = contracts.template_saved as SubtitleTemplate;
+const usage = contracts.usage as UsageReport;
 
 /**
  * The admin providers view, declared inline in api.ts rather than in types.ts
@@ -296,6 +298,18 @@ const present: unknown[] = [
   raw.brand_empty.logo, raw.brand_empty.intro, raw.brand_empty.outro,
   raw.brand_upload_url.key, raw.brand_upload_url.url,
 
+  // the spend ledger: every column the admin table draws, and the null
+  // beside a price, which it draws as "тодорхойгүй" rather than $0
+  raw.usage.months, raw.usage.timezone,
+  raw.usage.rows.map((r) => [
+    r.month, r.provider, r.kind, r.user_id, r.username, r.requests, r.prompt_tokens,
+    r.completion_tokens, r.audio_seconds, r.characters, r.cost_usd, r.unpriced_requests,
+  ]),
+  raw.usage.month_totals.map((m) => [m.month, m.requests, m.cost_usd, m.unpriced_requests]),
+  raw.usage.totals.requests, raw.usage.totals.cost_usd, raw.usage.totals.unpriced_requests,
+  raw.usage.rates.duudlaga_usd_per_minute, raw.usage.rates.elevenlabs_stt_usd_per_minute,
+  raw.usage.rates.elevenlabs_tts_usd_per_1k_chars,
+
   // subtitles
   raw.fonts.families, raw.fonts.default,
   raw.templates.templates.map((t) => [t.id, t.name, t.created_at, t.style.font_family]),
@@ -366,6 +380,6 @@ console.log(
 void [
   token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices,
   projectVoices, queue,
-  providerSettings, readiness, brand, brandEmpty, fonts, templateSaved,
+  providerSettings, readiness, brand, brandEmpty, fonts, templateSaved, usage,
   providers, writes, present,
 ];
