@@ -647,3 +647,41 @@ export interface SubtitleTemplate {
   style: SubtitleStyle;
   created_at: number;
 }
+
+/** What a group of ledger rows adds up to. `cost_usd` is the KNOWN part —
+ *  null when nothing in the group had a price — and `unpriced_requests`
+ *  counts the requests that had none. Those are unknown, never free. */
+export interface UsageTotals {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  audio_seconds: number;
+  characters: number;
+  cost_usd: number | null;
+  unpriced_requests: number;
+}
+
+/** One UTC month × provider × kind × user of the spend ledger. The user is
+ *  the project's owner; null when the project was deleted mid-job. */
+export interface UsageRow extends UsageTotals {
+  month: string;
+  provider: string;
+  kind: "llm" | "stt" | "tts";
+  user_id: string | null;
+  username: string | null;
+}
+
+export interface UsageReport {
+  months: number;
+  since: number;
+  timezone: string;
+  rows: UsageRow[];
+  month_totals: (UsageTotals & { month: string })[];
+  totals: UsageTotals;
+  /** The operator's speech prices in effect now; null = not configured. */
+  rates: {
+    duudlaga_usd_per_minute: number | null;
+    elevenlabs_stt_usd_per_minute: number | null;
+    elevenlabs_tts_usd_per_1k_chars: number | null;
+  };
+}

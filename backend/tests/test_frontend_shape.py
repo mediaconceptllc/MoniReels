@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.dbmodels import Job, Output, Project, User
+from app.dbmodels import Job, Output, Project, UsageEvent, User
 from app.jobs import kinds
 from app.models import (
     Clip,
@@ -459,6 +459,22 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
             },
             attempts=1, created_at=time.time(), finished_at=time.time(),
         ),
+        # The spend ledger: a priced row, an unpriced one, and one nobody owns
+        # any more — so `cost_usd` and `username` are each checked on both
+        # sides of their `| null`.
+        UsageEvent(
+            created_at=time.time(), user_id=user.id, job_kind="suggest", provider="openrouter",
+            kind="llm", model="example/model", requests=2, prompt_tokens=7000,
+            completion_tokens=900, cost_usd=0.0312,
+        ),
+        UsageEvent(
+            created_at=time.time(), user_id=user.id, job_kind="transcribe", provider="duudlaga",
+            kind="stt", requests=3, audio_seconds=90.0, cost_usd=None,
+        ),
+        UsageEvent(
+            created_at=time.time(), user_id=None, job_kind="export_all", provider="elevenlabs",
+            kind="tts", requests=1, characters=640, cost_usd=None,
+        ),
     ])
     db.commit()
 
@@ -532,6 +548,7 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
             },
         ),
         "providers": get("/admin/providers"),
+        "usage": get("/admin/usage?months=1"),
         "tts_voices": _voices(monkeypatch, get),
         # The producer's thinner list for a speaker's voice — with a default
         # voice set, so `default_voice_id` is checked on its string side (the

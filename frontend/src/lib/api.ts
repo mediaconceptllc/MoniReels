@@ -11,6 +11,7 @@
  *    connection whose server is working perfectly.
  */
 
+import { describeValidation } from "./messages";
 import type {
   AdminJobsPage,
   AdminUser,
@@ -37,6 +38,7 @@ import type {
   SubtitleTemplate,
   TokenResponse,
   TtsVoices,
+  UsageReport,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -149,10 +151,8 @@ async function detailOf(response: Response): Promise<string> {
     const body = await response.json();
     const detail = body?.detail;
     if (typeof detail === "string") return detail;
-    // FastAPI validation errors arrive as a list of {loc, msg}.
-    if (Array.isArray(detail)) {
-      return detail.map((d: { msg?: string }) => d.msg ?? "Буруу утга").join("; ");
-    }
+    // FastAPI validation errors arrive as a list of {type, loc, msg}.
+    if (Array.isArray(detail)) return describeValidation(detail);
   } catch {
     /* fall through to the status text */
   }
@@ -331,6 +331,10 @@ export const api = {
     request<{ requeued: boolean }>(`/admin/jobs/${jobId}/retry`, { method: "POST" }),
 
   brand: () => request<BrandSettings>("/admin/brand"),
+
+  /** The spend ledger, whole UTC months back from this one. Admin only on
+   *  the server. */
+  usageReport: (months: number) => request<UsageReport>(`/admin/usage?months=${months}`),
 
   /** What can and cannot run. Readable by anyone signed in — the warning has
    *  to appear on the page with the paid button, and that page is not

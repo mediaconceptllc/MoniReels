@@ -9,6 +9,7 @@ import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TAP, TextInput } 
 import { AdminJobs } from "@/components/AdminJobs";
 import { AdminUsers } from "@/components/AdminUsers";
 import { BrandAssetsCard } from "@/components/BrandAssetsCard";
+import { UsageReportCard } from "@/components/UsageReportCard";
 import { VoiceOverCard } from "@/components/VoiceOverCard";
 import { Shell } from "@/components/Shell";
 import { CapabilityTable } from "@/components/CapabilityTable";
@@ -144,11 +145,12 @@ function SttBalanceCard({ stt }: { stt: SttStatus }) {
   );
 }
 
-type Tab = "settings" | "users" | "jobs";
+type Tab = "settings" | "users" | "jobs" | "usage";
 const TABS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Үйлчилгээ" },
   { id: "users", label: "Хэрэглэгчид" },
   { id: "jobs", label: "Ажлууд" },
+  { id: "usage", label: "Зарлага" },
 ];
 
 /** The tab is kept in the address, so a reload or a link lands on it. A hash
@@ -305,6 +307,7 @@ export default function AdminPage() {
         >
           {tab === "users" && user && <AdminUsers meId={user.id} />}
           {tab === "jobs" && <AdminJobs />}
+          {tab === "usage" && <UsageReportCard />}
 
           {tab === "settings" && (
             <>
