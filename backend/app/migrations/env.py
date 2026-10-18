@@ -11,7 +11,14 @@ from app.db import normalize_url
 from app.dbmodels import Base
 
 config = context.config
-if config.config_file_name is not None:
+# Only the CLI (`alembic upgrade head`) takes its logging from alembic.ini.
+# The API runs these migrations IN-PROCESS at startup (app.migrate), after
+# setup_logging() and after uvicorn configured its own loggers — and
+# fileConfig, with its default disable_existing_loggers=True, disables every
+# logger that already exists and puts the root back at WARNING on stderr.
+# That is how the production API went silent: no request lines, no
+# tracebacks, not even "API ready".
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

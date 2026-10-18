@@ -330,6 +330,41 @@ def test_admin_routes_are_closed_to_editors(client, db):
     assert client.get("/admin/users", headers=_auth(client, "root")).status_code == 200
 
 
+def test_an_admin_reset_takes_the_new_password_in_the_body(client, db):
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+    old = _auth(client, "alice")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        json={"new_password": "resetbyadmin1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 200
+    assert client.get("/auth/me", headers=old).status_code == 401
+    _auth(client, "alice", "resetbyadmin1")
+
+
+def test_an_admin_reset_refuses_a_password_in_the_query_string(client, db):
+    """The request line is what access logs record. A reset that still
+    worked from `?new_password=` would put the password into every log
+    between the browser and the API the moment logging works again."""
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        params={"new_password": "leakedviaurl1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 422
+    assert "leakedviaurl1" not in reset.text
+    # Nothing changed: the old password still signs in.
+    _auth(client, "alice")
+
+
 def test_provider_status_reports_an_unconfigured_provider(client, db):
     _user(db, "root", role="admin")
     response = client.get("/admin/providers", headers=_auth(client, "root"))
