@@ -25,7 +25,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from app.api import routes_admin, routes_auth, routes_jobs, routes_projects
-from app.config import get_settings
+from app.bodylimit import BodyLimit
+from app.config import Settings, get_settings
 from app.db import session_scope
 from app.dbmodels import User
 from app.security import client_ip, hash_password
@@ -62,10 +63,44 @@ def _bootstrap_admin() -> None:
         logger.info("Created the bootstrap admin account %r", settings.bootstrap_admin_username)
 
 
+JWT_SECRET_MIN_BYTES = 32
+
+
+def startup_problems(settings: Settings) -> list[str]:
+    """Configuration this API must not serve with, in words an operator can
+    act on — and never the values themselves.
+
+    Refusing to start is louder than a warning on purpose: both of these
+    LOOK like a working deployment. A short or empty JWT secret signs and
+    accepts tokens normally (an empty one accepts tokens anyone can sign),
+    and a wildcard origin works perfectly for the real frontend while
+    answering every other site too.
+    """
+    problems = []
+    if len(settings.jwt_secret.encode()) < JWT_SECRET_MIN_BYTES:
+        problems.append(
+            f"JWT_SECRET is shorter than {JWT_SECRET_MIN_BYTES} bytes (or unset). Generate one with "
+            '`python -c "import secrets; print(secrets.token_urlsafe(48))"`. '
+            "Changing it signs everyone out once."
+        )
+    if "*" in settings.cors_origin_list:
+        problems.append(
+            'CORS_ORIGINS contains "*". List the frontend\'s exact origin(s), comma-separated, '
+            "for example https://<your-app>.vercel.app."
+        )
+    return problems
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     settings = get_settings()
+
+    problems = startup_problems(settings)
+    if problems:
+        for problem in problems:
+            logger.error("Refusing to start: %s", problem)
+        raise RuntimeError("Unsafe configuration: " + " | ".join(problems))
 
     binaries = discover_ffmpeg()
     app.state.ffmpeg = binaries
@@ -106,7 +141,9 @@ def _configure_cors(application: FastAPI) -> None:
     just fail confusingly.
     """
     settings = get_settings()
-    origins = settings.cors_origin_list
+    # A wildcard never reaches the middleware, even if startup_problems were
+    # bypassed: with credentials on, Starlette echoes ANY origin back.
+    origins = [o for o in settings.cors_origin_list if o != "*"]
     if not origins:
         logger.warning(
             "CORS_ORIGINS is empty — the browser client will be blocked. Set it to your Vercel URL."
@@ -121,6 +158,13 @@ def _configure_cors(application: FastAPI) -> None:
     )
 
 
+# Added before CORS so CORS wraps it: a 413 still carries the CORS headers,
+# and the browser shows the reason instead of an opaque network error.
+app.add_middleware(
+    BodyLimit,
+    default=get_settings().max_body_bytes,
+    transcript=get_settings().max_transcript_body_bytes,
+)
 _configure_cors(app)
 
 
