@@ -13,6 +13,7 @@
  */
 
 import { API_BASE, api, getToken } from "./api";
+import { takeEvents } from "./sse";
 import type { Job } from "./types";
 
 const POLL_MS = 1500;
@@ -96,15 +97,11 @@ async function streamJob(
     if (done) return;
     buffer += decoder.decode(value, { stream: true });
 
-    // Events are separated by a blank line; the trailing fragment is kept
-    // for the next chunk rather than parsed half-formed.
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      const line = part.split("\n").find((l) => l.startsWith("data:"));
-      if (!line) continue;
+    const { data, rest } = takeEvents(buffer);
+    buffer = rest;
+    for (const payload of data) {
       try {
-        const job = JSON.parse(line.slice(5).trim()) as Job;
+        const job = JSON.parse(payload) as Job;
         onUpdate(job);
         if (TERMINAL.has(job.state)) return;
       } catch {

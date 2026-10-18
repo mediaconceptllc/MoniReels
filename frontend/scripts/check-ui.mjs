@@ -25,6 +25,12 @@
  *      else and rendered their text flush against the border. A card either
  *      states its padding or states that it is deliberately edge-to-edge.
  *
+ *   4. CONTRAST. Every text colour token reads at 4.5:1 or better (WCAG AA)
+ *      on every surface token, in both themes. `--ink-3` was 4.2:1 on white
+ *      and 3.5:1 on the grey and tinted panels; axe flagged 16 of 18 screens.
+ *      The tokens are read from globals.css, so darkening one fails here
+ *      rather than in an accessibility report months later.
+ *
  * Run: npm run check-ui
  */
 
@@ -319,9 +325,69 @@ function checkSpinner(file, source) {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ * Rule 4 — contrast
+ * ------------------------------------------------------------------ */
+
+const AA = 4.5;
+const TEXT_TOKENS = ["ink", "ink-2", "ink-3", "accent", "fit", "warn", "tally"];
+const SURFACE_TOKENS = ["surface", "paper", "surface-2", "accent-soft", "fit-soft", "warn-soft", "tally-soft"];
+
+function luminance(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+function ratio(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The light palette is the first `:root {` block; the dark one is the
+ *  explicit `[data-theme="dark"]` block (the media-query copy must match it,
+ *  which is checked too). */
+function palette(css, opener) {
+  const start = css.indexOf(opener);
+  if (start < 0) return null;
+  const body = css.slice(start, css.indexOf("}", start));
+  return Object.fromEntries([...body.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-f]{6})/gi)].map((m) => [m[1], m[2]]));
+}
+
+function checkContrast() {
+  const file = join(SRC, "app", "globals.css");
+  const css = readFileSync(file, "utf8");
+  const themes = {
+    light: palette(css, ":root {"),
+    dark: palette(css, ':root[data-theme="dark"] {'),
+    "dark (system)": palette(css, ':root:not([data-theme="light"]) {'),
+  };
+  for (const [theme, tokens] of Object.entries(themes)) {
+    if (!tokens) {
+      problems.push(`src/app/globals.css  ${theme} palette not found.`);
+      continue;
+    }
+    for (const text of TEXT_TOKENS) {
+      for (const surface of SURFACE_TOKENS) {
+        if (!tokens[text] || !tokens[surface]) {
+          problems.push(`src/app/globals.css  ${theme}: --${!tokens[text] ? text : surface} is missing.`);
+          continue;
+        }
+        const r = ratio(tokens[text], tokens[surface]);
+        if (r < AA) {
+          problems.push(
+            `src/app/globals.css  ${theme}: --${text} on --${surface} is ${r.toFixed(2)}:1, below ${AA}:1.`,
+          );
+        }
+      }
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 
 const files = tsxFiles(SRC);
+checkContrast();
 checkPrimitives(readFileSync(UI, "utf8"));
 for (const file of files) {
   const source = withoutComments(readFileSync(file, "utf8"));
@@ -338,5 +404,5 @@ if (problems.length) {
 }
 console.log(
   `check-ui: ${files.length} files, every target at least ${FLOOR_PX}px, ` +
-    "no stray Spinner, every Card padded.",
+    `no stray Spinner, every Card padded, text tokens at ${AA}:1 or better.`,
 );

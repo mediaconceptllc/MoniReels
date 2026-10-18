@@ -69,7 +69,7 @@ def change_password(
 ) -> TokenOut:
     user = db.get(User, principal.id)
     if user is None or not verify_password(body.current_password, user.pw_salt, user.pw_hash):
-        raise _bad_credentials("Current password is incorrect")
+        raise _bad_credentials("Одоогийн нууц үг буруу байна.")
 
     salt, digest = hash_password(body.new_password)
     user.pw_salt, user.pw_hash = salt, digest
@@ -90,5 +90,5 @@ def change_password(
     )
 
 
-def _bad_credentials(detail: str = "Incorrect username or password") -> HTTPException:
+def _bad_credentials(detail: str = "Нэвтрэх нэр эсвэл нууц үг буруу байна.") -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
