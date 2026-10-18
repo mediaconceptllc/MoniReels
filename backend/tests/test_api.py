@@ -2266,3 +2266,41 @@ def test_the_speakers_voice_list_says_why_it_is_empty(client, db, monkeypatch):
 
 def test_the_speakers_voice_list_needs_a_login(client):
     assert client.get("/projects/tts/voices").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+
+def test_deleting_an_output_keeps_a_file_another_output_still_plays(client, db, monkeypatch):
+    """Exports rendered before keys carried the job id share keys: the second
+    export wrote over the first one's file, so the older row and the newer
+    row play the same object. Deleting the older row must not delete the
+    file the newer row is showing."""
+    from app import r2
+    from app.dbmodels import Output
+
+    deleted: list[str] = []
+    monkeypatch.setattr(r2, "delete", deleted.append)
+
+    owner = _user(db, "legacyoutputs")
+    row = _project_with_video(db, owner)
+    shared, alone = f"outputs/{row.id}/reel_1.mp4", f"outputs/{row.id}/reel_2.mp4"
+    older = Output(project_id=row.id, kind="reel", title="a", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    newer = Output(project_id=row.id, kind="reel", title="b", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    single = Output(project_id=row.id, kind="reel", title="c", r2_key=alone, srt_key=None, size_bytes=1)
+    db.add_all([older, newer, single])
+    db.commit()
+    auth = _auth(client, "legacyoutputs")
+
+    assert client.delete(f"/projects/{row.id}/outputs/{older.id}", headers=auth).status_code == 200
+    assert deleted == []  # the newer row still plays both objects
+
+    assert client.delete(f"/projects/{row.id}/outputs/{single.id}", headers=auth).status_code == 200
+    assert deleted == [alone]
+
+    assert client.delete(f"/projects/{row.id}/outputs/{newer.id}", headers=auth).status_code == 200
+    assert deleted == [alone, shared, f"outputs/{row.id}/reel_1.srt"]
