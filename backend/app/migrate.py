@@ -30,6 +30,9 @@ def _alembic_config() -> Config:
     root = Path(__file__).resolve().parents[1]
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "app" / "migrations"))
+    # This process already has its logging (setup_logging, uvicorn); env.py
+    # must not replace it with alembic.ini's. See app/migrations/env.py.
+    config.attributes["configure_logger"] = False
     return config
 
 

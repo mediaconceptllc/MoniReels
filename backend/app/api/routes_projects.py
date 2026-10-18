@@ -886,8 +886,16 @@ def delete_output(
     keys = [out.r2_key] + ([out.srt_key] if out.srt_key else [])
     db.delete(out)
     db.commit()
+    # Outputs rendered before keys carried the job id could share a key — a
+    # later export wrote over the earlier file. Such a key now holds the file
+    # of a row that is still listed; removing it would delete that video.
+    still_used = set(db.scalars(select(Output.r2_key).where(Output.r2_key.in_(keys)))) | set(
+        db.scalars(select(Output.srt_key).where(Output.srt_key.in_(keys)))
+    )
     if r2.enabled():
         for key in keys:
+            if key in still_used:
+                continue
             try:
                 r2.delete(key)
             except Exception:  # noqa: BLE001 - the row is gone; storage is best effort

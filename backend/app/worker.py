@@ -433,6 +433,8 @@ async def handle_export(handle: JobHandle) -> dict:
 
 
 async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
+    from sqlalchemy import select
+
     from app import brand, r2
     from app.dbmodels import Output
     from app.export.ideas import idea_ranges, pick_ideas
@@ -569,7 +571,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             continue
         kind = item["kind"]
         counts[kind] = counts.get(kind, 0) + 1
-        key = r2.output_key(project_id, kind, counts[kind], "mp4")
+        key = r2.output_key(project_id, handle.job_id, kind, counts[kind], "mp4")
         size = await asyncio.to_thread(r2.upload_file, path, key, "video/mp4")
 
         srt_local = path.with_suffix(".srt")
@@ -579,16 +581,27 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             await asyncio.to_thread(r2.upload_file, srt_local, srt_key, "text/plain; charset=utf-8")
 
         with session_scope() as db:
-            db.add(
-                Output(
-                    project_id=project_id,
-                    kind=kind,
-                    title=item.get("title", ""),
-                    r2_key=key,
-                    srt_key=srt_key,
-                    size_bytes=size,
-                )
+            # A retry of this job uploads to the same keys, and its earlier
+            # attempt may have recorded some of them before it failed: update
+            # that row rather than listing the same video twice.
+            row = db.scalar(
+                select(Output).where(Output.project_id == project_id, Output.r2_key == key)
             )
+            if row is None:
+                db.add(
+                    Output(
+                        project_id=project_id,
+                        kind=kind,
+                        title=item.get("title", ""),
+                        r2_key=key,
+                        srt_key=srt_key,
+                        size_bytes=size,
+                    )
+                )
+            else:
+                row.title = item.get("title", "")
+                row.srt_key = srt_key
+                row.size_bytes = size
         results.append({"kind": kind, "title": item.get("title", ""), "key": key, "srt_key": srt_key})
 
     out: dict = {"outputs": results}

@@ -330,6 +330,41 @@ def test_admin_routes_are_closed_to_editors(client, db):
     assert client.get("/admin/users", headers=_auth(client, "root")).status_code == 200
 
 
+def test_an_admin_reset_takes_the_new_password_in_the_body(client, db):
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+    old = _auth(client, "alice")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        json={"new_password": "resetbyadmin1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 200
+    assert client.get("/auth/me", headers=old).status_code == 401
+    _auth(client, "alice", "resetbyadmin1")
+
+
+def test_an_admin_reset_refuses_a_password_in_the_query_string(client, db):
+    """The request line is what access logs record. A reset that still
+    worked from `?new_password=` would put the password into every log
+    between the browser and the API the moment logging works again."""
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        params={"new_password": "leakedviaurl1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 422
+    assert "leakedviaurl1" not in reset.text
+    # Nothing changed: the old password still signs in.
+    _auth(client, "alice")
+
+
 def test_provider_status_reports_an_unconfigured_provider(client, db):
     _user(db, "root", role="admin")
     response = client.get("/admin/providers", headers=_auth(client, "root"))
@@ -2365,3 +2400,41 @@ def test_every_document_save_locks_the_row_it_read():
             if not locked:
                 offenders.append(f"{path}:{fn.name}")
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+
+def test_deleting_an_output_keeps_a_file_another_output_still_plays(client, db, monkeypatch):
+    """Exports rendered before keys carried the job id share keys: the second
+    export wrote over the first one's file, so the older row and the newer
+    row play the same object. Deleting the older row must not delete the
+    file the newer row is showing."""
+    from app import r2
+    from app.dbmodels import Output
+
+    deleted: list[str] = []
+    monkeypatch.setattr(r2, "delete", deleted.append)
+
+    owner = _user(db, "legacyoutputs")
+    row = _project_with_video(db, owner)
+    shared, alone = f"outputs/{row.id}/reel_1.mp4", f"outputs/{row.id}/reel_2.mp4"
+    older = Output(project_id=row.id, kind="reel", title="a", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    newer = Output(project_id=row.id, kind="reel", title="b", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    single = Output(project_id=row.id, kind="reel", title="c", r2_key=alone, srt_key=None, size_bytes=1)
+    db.add_all([older, newer, single])
+    db.commit()
+    auth = _auth(client, "legacyoutputs")
+
+    assert client.delete(f"/projects/{row.id}/outputs/{older.id}", headers=auth).status_code == 200
+    assert deleted == []  # the newer row still plays both objects
+
+    assert client.delete(f"/projects/{row.id}/outputs/{single.id}", headers=auth).status_code == 200
+    assert deleted == [alone]
+
+    assert client.delete(f"/projects/{row.id}/outputs/{newer.id}", headers=auth).status_code == 200
+    assert deleted == [alone, shared, f"outputs/{row.id}/reel_1.srt"]

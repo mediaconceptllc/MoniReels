@@ -72,6 +72,17 @@ class ChangePasswordIn(BaseModel):
     new_password: Password
 
 
+class ResetPasswordIn(BaseModel):
+    """An admin's reset carries the new password in the BODY.
+
+    It used to be a query parameter. A query string is part of the request
+    line, and the request line is what access logs — uvicorn's, the
+    platform's edge, any proxy in between — write down.
+    """
+
+    new_password: Password
+
+
 class CreateUserIn(BaseModel):
     username: Username
     password: Password
