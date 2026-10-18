@@ -20,7 +20,9 @@
   --surface-2: #eaebe8;
   --ink: #1b1d23;
   --ink-2: #4a4f58;
-  --ink-3: #767c86;
+  /* Every text token reads at 4.5:1 (WCAG AA) or better on every surface
+     token, in both themes — `npm run check-ui` measures it. */
+  --ink-3: #5f6570;
   --rule: #d9dbd6;
   --rule-soft: #e6e7e3;
 
@@ -28,7 +30,7 @@
   --accent-soft: #e2eef0;
   --fit: #1e6a5b;
   --fit-soft: #e1ede9;
-  --warn: #94651a;
+  --warn: #7d5410;
   --warn-soft: #f2ead9;
   --tally: #b93227;
   --tally-soft: #f6e3e1;
@@ -41,7 +43,7 @@
     --surface-2: #232730;
     --ink: #e9eae7;
     --ink-2: #b2b7bf;
-    --ink-3: #838a94;
+    --ink-3: #9aa1ab;
     --rule: #333842;
     --rule-soft: #262b33;
 
@@ -62,7 +64,7 @@
   --surface-2: #232730;
   --ink: #e9eae7;
   --ink-2: #b2b7bf;
-  --ink-3: #838a94;
+  --ink-3: #9aa1ab;
   --rule: #333842;
   --rule-soft: #262b33;
 

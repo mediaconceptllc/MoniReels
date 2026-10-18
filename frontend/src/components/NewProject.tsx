@@ -91,7 +91,7 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
             Видео сонгох
           </Button>
           {file ? (
-            <span className="text-sm text-ink-2">
+            <span className="min-w-0 text-sm text-ink-2 [overflow-wrap:anywhere]">
               {file.name} <span className="tabular text-ink-3">· {fileSize(file.size)}</span>
             </span>
           ) : (
