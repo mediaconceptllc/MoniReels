@@ -9,7 +9,7 @@
  * copy says so rather than presenting them as neutral numbers.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { LANGUAGE_LABELS } from "@/lib/format";
@@ -60,6 +60,7 @@ export function ExportSettingsPanel({
   speakers,
   hasTranscript,
   onSaved,
+  onDirtyChange,
 }: {
   projectId: string;
   settings: ExportSettings;
@@ -70,6 +71,9 @@ export function ExportSettingsPanel({
   speakers: SpeakerSummary[];
   hasTranscript: boolean;
   onSaved: () => void;
+  /** Unsaved changes hold every export shut: it would render with the
+   *  settings that were SAVED, not the ones on screen. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<ExportSettings>(settings);
   const [saving, setSaving] = useState(false);
@@ -77,6 +81,11 @@ export function ExportSettingsPanel({
   const [saved, setSaved] = useState(false);
 
   const dirty = JSON.stringify(canonical(draft)) !== JSON.stringify(canonical(settings));
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   function update<K extends keyof ExportSettings>(key: K, value: ExportSettings[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }));

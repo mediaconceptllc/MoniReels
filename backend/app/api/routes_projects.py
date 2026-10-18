@@ -45,6 +45,7 @@ from app.schemas import (
     SelectRangesIn,
     SubtitleTemplateIn,
     SuggestIn,
+    TranscribeIn,
     TranslateIn,
     UpdateProjectIn,
     UpdateTranscriptIn,
@@ -506,12 +507,22 @@ def _require_recogniser_for(db: Session, language: str) -> None:
 @router.post("/{project_id}/transcribe")
 def transcribe(
     project_id: str,
+    body: TranscribeIn | None = None,
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     project = _require_project(db, project_id, principal)
     if project.video is None:
         raise HTTPException(status_code=400, detail="Эхлээд видео оруулна уу.")
+    if project.transcript and project.transcript.segments and not (body and body.force):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Энэ төсөлд {len(project.transcript.segments)} мөр текст аль хэдийн бий. "
+                "Дахин таниулбал текст бүхэлдээ — гар засвар, орчуулгатай нь — солигдож, "
+                "дахин төлбөр гарна. Баталгаажуулж байж эхлүүлнэ."
+            ),
+        )
     _require_recogniser_for(db, project.language)
     return {
         "job_id": queue.enqueue(
@@ -577,6 +588,14 @@ def suggest(
     project = _require_project(db, project_id, principal)
     if project.transcript is None or not project.transcript.segments:
         raise HTTPException(status_code=400, detail="Эхлээд яриаг таниулна уу.")
+    if project.suggestions and project.suggestions.shorts and not (body and body.force):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Энэ төсөлд {len(project.suggestions.shorts)} санал аль хэдийн бий. "
+                "Дахин авбал одоогийнх солигдож, дахин төлбөр гарна. Баталгаажуулж байж эхлүүлнэ."
+            ),
+        )
     _require_provider(db, providers.LLM)
 
     duration = project.video.duration_sec if project.video else 0.0

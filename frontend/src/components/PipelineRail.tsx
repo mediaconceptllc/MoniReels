@@ -58,6 +58,12 @@ export interface RailAction {
   onRun: () => void;
   disabled?: boolean;
   loading?: boolean;
+  /** Starting a finished stage over. Beside the main button, never in its
+   *  place: when "Яриаг дахин таних" was the only button on a finished
+   *  stage — and the one pinned to a phone's thumb — one tap replaced every
+   *  corrected line and billed the recogniser again. It opens a counted
+   *  confirmation, and it is left out of the pinned copy on purpose. */
+  secondary?: { label: string; onRun: () => void; disabled?: boolean };
 }
 
 /** The estimate and the evidence for it, together.
@@ -123,6 +129,11 @@ function ActionBar({ action }: { action: RailAction }) {
         >
           {action.label}
         </Button>
+        {action.secondary && (
+          <Button disabled={action.secondary.disabled} onClick={action.secondary.onRun}>
+            {action.secondary.label}
+          </Button>
+        )}
         {action.cost && !action.disabled && <CostHint cost={action.cost} />}
         {action.note && (
           <p className="min-w-[220px] flex-1 text-[13px] text-ink-2">{action.note}</p>

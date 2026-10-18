@@ -17,10 +17,14 @@ export function SubtitleStylePanel({
   projectId,
   style,
   onSaved,
+  onDirtyChange,
 }: {
   projectId: string;
   style: SubtitleStyle;
   onSaved: () => void;
+  /** Unsaved changes hold every export shut: it would burn in the style
+   *  that was SAVED, not the one in the preview. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { user } = useAuth();
   const [draft, setDraft] = useState<SubtitleStyle>(style);
@@ -32,6 +36,11 @@ export function SubtitleStylePanel({
   const [error, setError] = useState<string | null>(null);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(style);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   useEffect(() => {
     // Asked of the RENDER image, never hard-coded: libass substitutes a

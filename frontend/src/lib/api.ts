@@ -198,8 +198,14 @@ export const api = {
     }),
 
   // -- pipeline -----------------------------------------------------------
-  transcribe: (id: string) =>
-    request<{ job_id: string }>(`/projects/${id}/transcribe`, { method: "POST" }),
+  /** Without `force` the server refuses (409) a project that already has a
+   *  transcript: recognising again replaces every line, hand correction and
+   *  translation, and is billed again — so the page asks first. */
+  transcribe: (id: string, { force = false }: { force?: boolean } = {}) =>
+    request<{ job_id: string }>(`/projects/${id}/transcribe`, {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
 
   /** Translate what was said into Mongolian subtitles. Without `force` only
    *  lines that have no translation are sent — which is also how a run that
@@ -217,11 +223,16 @@ export const api = {
 
   /** Asks for `counts` ideas; omit them and the server applies what the
    *  button always meant. A count the video cannot hold is refused with 422,
-   *  never quietly lowered. */
-  suggest: (id: string, counts?: { shorts: number; youtube: number }) =>
+   *  never quietly lowered. Replacing ideas that exist needs `force`, the
+   *  same refusal as `transcribe`. */
+  suggest: (
+    id: string,
+    counts?: { shorts: number; youtube: number },
+    { force = false }: { force?: boolean } = {},
+  ) =>
     request<{ job_id: string }>(`/projects/${id}/suggest`, {
       method: "POST",
-      ...(counts ? { body: JSON.stringify(counts) } : {}),
+      body: JSON.stringify({ ...counts, force }),
     }),
 
   /** Renders the model's ideas. `pick` names WHICH ones — omit it and every
