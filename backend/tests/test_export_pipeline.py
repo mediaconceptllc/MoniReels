@@ -289,3 +289,196 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
     assert content_cut[0] == "/src.mp4" and content_cut[1] is not None and content_cut[2] == 0.25
     # The content is laid over the bed for exactly its own range.
     assert content_cut[3] == Path("/beds/5.0-9.0.flac")
+
+
+# --------------------------------------------------------------------------
+# Memory: a long timeline is joined in batches, and every ffmpeg run carries
+# its thread counts. MEASURED at the audit: one xfade graph over 28 clips,
+# with ffmpeg's own thread defaults on a large host, peaked at 9.07 GB.
+# --------------------------------------------------------------------------
+
+
+def _durations(n: int) -> list[float]:
+    # Uneven on purpose: offsets that never land on a frame boundary.
+    return [round(3.0 + (i % 3) * 0.4 + (i % 5) * 0.137, 3) for i in range(n)]
+
+
+def test_a_short_timeline_is_still_one_pass():
+    from app.export.pipeline import XFADE_BATCH, plan_xfade_batches
+    from app.transition.filtergraph import plan_transition
+
+    durations = _durations(XFADE_BATCH)
+    (batch,) = plan_xfade_batches(durations, plan_transition(durations, 0.5), 30.0)
+    assert (batch.first, batch.last, batch.tail) == (0, XFADE_BATCH - 1, None)
+    assert batch.head == batch.start_frame == 0
+
+
+@pytest.mark.parametrize("fps", [30.0, 25.0, 29.97002997])
+def test_batches_meet_on_one_frame_and_cover_the_single_pass_exactly(fps):
+    """Each boundary is a frame INSIDE a clip, clear of both its transitions:
+    the batch before shows that clip up to the frame, the batch after from
+    it, so the copy-join has no transition to break and no frame to repeat
+    or drop. The batch after starts on exactly the output frame one pass
+    over everything would show there."""
+    from app.export.pipeline import XFADE_BATCH, _first_frame, plan_xfade_batches
+    from app.transition.filtergraph import plan_transition
+
+    durations = _durations(28)
+    plan = plan_transition(durations, 0.5)
+    batches = plan_xfade_batches(durations, plan, fps)
+
+    assert len(batches) > 1
+    assert batches[0].first == 0 and batches[-1].last == 27 and batches[-1].tail is None
+    for batch in batches:
+        assert batch.last - batch.first + 1 <= XFADE_BATCH
+    for before, after in zip(batches, batches[1:], strict=False):
+        clip = after.first
+        assert before.last == clip and before.tail == after.head
+        assert after.start_frame == _first_frame(plan.offsets[clip - 1], fps) + after.head
+        # Clear of the transition in, and of the one out.
+        assert plan.duration * fps < after.head < (durations[clip] - plan.duration) * fps
+
+
+def test_a_clip_too_short_to_split_is_passed_over():
+    from app.export.pipeline import XFADE_BATCH, plan_xfade_batches
+    from app.transition.filtergraph import plan_transition
+
+    durations = [3.0] * 12
+    durations[XFADE_BATCH - 1] = 1.1  # 0.1 s clear of two 0.5 s transitions
+    batches = plan_xfade_batches(durations, plan_transition(durations, 0.5), 30.0)
+    assert XFADE_BATCH - 1 not in [b.first for b in batches[1:]]
+    assert batches[0].last == XFADE_BATCH - 2
+
+
+def test_with_no_clip_long_enough_to_split_it_is_one_pass():
+    from app.export.pipeline import plan_xfade_batches
+    from app.transition.filtergraph import plan_transition
+
+    durations = [1.05] * 12
+    assert len(plan_xfade_batches(durations, plan_transition(durations, 0.5), 30.0)) == 1
+
+
+async def _record_render(monkeypatch, tmp_path, n_clips: int) -> list[list[str]]:
+    from app.export import pipeline
+    from app.timeline.models import Clip
+    from app.video.ffmpeg import FfmpegRun
+
+    runs: list[list[str]] = []
+
+    async def fake_probe(ffprobe, path):
+        return {"fps": 30.0, "has_audio": True, "duration": 60.0}
+
+    async def fake_run(self, ffmpeg, args, *, expected_duration_sec, cwd=None, on_progress=None):
+        runs.append(list(args))
+        Path(args[-1]).write_bytes(b"media")
+
+    monkeypatch.setattr(pipeline, "probe_video", fake_probe)
+    monkeypatch.setattr(FfmpegRun, "run", fake_run)
+    monkeypatch.setattr("app.export.presets.heavy_threads", lambda: 23)
+    clips = [Clip(id=f"c{i}", source_path="/src.mp4", start=d * i, end=d * i + d, order=i)
+             for i, d in enumerate(_durations(n_clips))]
+    await pipeline.render_timeline(
+        _handle(), type("Bin", (), {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})(), clips,
+        Transition(duration=0.5), crf=20, preset="medium", orientation="portrait",
+        portrait_fill="blur", supported_xfade=["fade"], workdir=tmp_path / "work",
+        output_path=tmp_path / "out.mp4",
+    )
+    return runs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n_clips", [3, 28])
+async def test_every_ffmpeg_run_of_an_export_carries_its_thread_counts(monkeypatch, tmp_path, n_clips):
+    """Read off the command lines themselves: a cap that does not reach the
+    argv of every run limits nothing. Every picture input gets a decoder cap
+    of its own (`-threads` is an input option), every encode gets x264's,
+    and no xfade pass holds more inputs than a batch."""
+    from app.export.pipeline import XFADE_BATCH
+
+    runs = await _record_render(monkeypatch, tmp_path, n_clips)
+    xfades = [a for a in runs if any("xfade=" in x for x in a)]
+    assert xfades
+    for args in runs:
+        if "concat" in args:
+            assert "-c" in args and args[args.index("-c") + 1] == "copy"
+            continue
+        inputs = [i for i, a in enumerate(args) if a == "-i"]
+        for i in inputs:
+            if args[i - 1] == "-vn":
+                continue  # the sound-only pass: no picture decoded at all
+            assert args[i - 2] == "-threads", args
+        if "libx264" in args:
+            encoder_threads = args[args.index("libx264"):]
+            assert encoder_threads[encoder_threads.index("-threads") + 1] == "8"
+    for args in xfades:
+        assert args.count("-i") <= XFADE_BATCH
+    assert (len(xfades) > 1) == (n_clips > XFADE_BATCH)
+
+
+FFMPEG = __import__("shutil").which("ffmpeg")
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="ffmpeg is not installed")
+@pytest.mark.asyncio
+async def test_a_batched_join_is_the_single_pass_frame_for_frame(monkeypatch, tmp_path):
+    """The real thing, both ways, on the same clips: the same frames in the
+    same places (each one matched against the single pass — a one-frame
+    slip measures ~25 dB on this picture), the same length, and the very
+    same sound, which is mixed in one pass either way."""
+    import json
+    import subprocess
+
+    from app.export import pipeline
+    from app.timeline.models import Clip
+    from app.video.ffmpeg import FfmpegBinaries
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=8",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=8", "-c:v", "libx264", "-preset", "ultrafast",
+         "-c:a", "aac", "-shortest", str(src)],
+        check=True,
+    )
+    clips = [Clip(id=f"c{i}", source_path=str(src), start=round(i * 1.13, 3),
+                  end=round(i * 1.13 + 1.2 + (i % 2) * 0.17, 3), order=i) for i in range(5)]
+    binaries = FfmpegBinaries(ffmpeg=Path(FFMPEG), ffprobe=Path(FFMPEG).with_name("ffprobe"))
+
+    async def render(name: str, batch: int) -> Path:
+        monkeypatch.setattr(pipeline, "XFADE_BATCH", batch)
+        out = tmp_path / f"{name}.mp4"
+        await pipeline.render_timeline(
+            _handle(), binaries, clips, Transition(duration=0.3), crf=23, preset="ultrafast",
+            orientation="landscape", portrait_fill="pad", supported_xfade=["fade"],
+            workdir=tmp_path / name, output_path=out,
+        )
+        return out
+
+    one, batched = await render("one", 99), await render("batched", 3)
+    durations = [c.end - c.start for c in clips]
+    plan = pipeline.plan_transition(durations, 0.3)
+    assert len(pipeline.plan_xfade_batches(durations, plan, 30.0, size=3)) == 2
+
+    def streams(path: Path) -> list[dict]:
+        out = subprocess.run(
+            [str(binaries.ffprobe), "-v", "error", "-count_frames", "-show_entries",
+             "stream=codec_type,nb_read_frames,duration", "-of", "json", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return json.loads(out)["streams"]
+
+    assert streams(one) == streams(batched)
+
+    def sound(path: Path) -> str:
+        return subprocess.run([FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a", "-f", "md5", "-"],
+                              capture_output=True, text=True, check=True).stdout
+
+    assert sound(one) == sound(batched)
+
+    log = tmp_path / "psnr.log"
+    subprocess.run([FFMPEG, "-v", "error", "-i", str(one), "-i", str(batched), "-lavfi",
+                    f"[0:v][1:v]psnr=stats_file={log.name}", "-f", "null", "-"], check=True, cwd=tmp_path)
+    worst = min(
+        float("inf") if (v := dict(kv.split(":") for kv in line.split())["psnr_avg"]) == "inf" else float(v)
+        for line in log.read_text().splitlines()
+    )
+    assert worst > 35, worst

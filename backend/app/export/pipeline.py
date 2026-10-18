@@ -1,6 +1,7 @@
 """Render pipeline: cut+normalize each clip (already applying final export
 encoder settings), then join via concat demuxer (transition duration 0) or an
-xfade/acrossfade filtergraph (transition duration > 0).
+xfade/acrossfade filtergraph (transition duration > 0) — in batches of
+XFADE_BATCH clips for a long timeline (see plan_xfade_batches).
 
 Hard rules honored here: every ffmpeg run reports progress + is cancelable,
 and the final output is only ever produced by renaming a `.part` file after
@@ -9,8 +10,10 @@ target path.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +29,8 @@ from app.export.presets import (
     AUDIO_SAMPLE_RATE,
     build_audio_encoder_args,
     build_video_encoder_args,
+    decoder_thread_args,
+    filter_thread_args,
     resolve_dimensions,
 )
 from app.jobs.queue import JobCancelled, JobHandle
@@ -34,7 +39,13 @@ from app.subtitle.ass import build_ass_document
 from app.subtitle.shift import retime_segments_for_output
 from app.subtitle.srt import segments_to_srt
 from app.timeline.models import Clip, Transition
-from app.transition.filtergraph import TransitionPlan, build_xfade_filtergraph, plan_transition
+from app.transition.filtergraph import (
+    TransitionPlan,
+    audio_crossfade_chain,
+    build_xfade_filtergraph,
+    plan_transition,
+    video_xfade_chain,
+)
 from app.transition.registry import resolve as resolve_transition
 from app.utils.logging import get_logger
 from app.utils.paths import ascii_safe_filename, atomic_write_text, job_workdir
@@ -78,7 +89,11 @@ async def _cut_and_normalize_clip(
     vf = build_video_filter(width, height, fps, orientation, portrait_fill)
     duration = clip.end - clip.start
 
-    args = ["-ss", f"{clip.start:.3f}", "-to", f"{clip.end:.3f}", "-i", clip.source_path]
+    args = [
+        *filter_thread_args(),
+        "-ss", f"{clip.start:.3f}", "-to", f"{clip.end:.3f}",
+        *decoder_thread_args(), "-i", clip.source_path,
+    ]
     if voice_path is not None or bed_path is not None:
         # The voice track and the bed are built on the clip's own timeline
         # (0 = clip.start), so they take no seek of their own. Video keeps its
@@ -150,33 +165,202 @@ async def _join_concat(
     )
 
 
+#: Clips one xfade pass may hold. Every input of a filtergraph is decoded at
+#: the same time, so one graph over a 28-range YouTube plan ran 28 decoders
+#: and every frame in flight between them. A longer timeline is joined in
+#: batches of this many and the batches are copied end to end.
+XFADE_BATCH = 6
+#: A batch boundary cuts THROUGH a clip, in the stretch no transition
+#: touches, so the cut is invisible. A clip with less untouched picture than
+#: this is never split.
+MIN_SPLIT_FRAMES = 4
+
+
+@dataclass
+class XfadeBatch:
+    """Clips `first`..`last` (inclusive) of a timeline, joined in one pass.
+
+    A boundary between two batches is a frame inside a clip: the batch before
+    shows that clip up to `tail`, the batch after from `head` on. Both are
+    the same frame, so nothing is shown twice or lost, and there is no
+    transition at the boundary for the copy-join to break.
+    """
+
+    first: int
+    last: int
+    head: int  # first frame of clip `first` this batch shows
+    tail: int | None  # frames of clip `last` this batch shows; None = all
+    start_frame: int  # where the batch begins in the joined output
+
+
+def _first_frame(offset: float, fps: float) -> int:
+    """The output frame a clip's first frame lands on in a single-pass join.
+
+    xfade starts the transition — and the next clip — at the first frame at
+    or after its offset, and the offset it is given is the one written into
+    the graph: rounded to the millisecond.
+    """
+    return math.ceil(round(offset, 3) * fps - 1e-6)
+
+
+def plan_xfade_batches(
+    clip_durations: list[float], plan: TransitionPlan, fps: float, size: int | None = None
+) -> list[XfadeBatch]:
+    """Splits a joined timeline into passes of at most `size` clips.
+
+    Each boundary falls in the middle of a clip, on a frame, where no
+    transition reaches; the batch after it starts on exactly the output frame
+    a single pass would show there. A clip too short to split is passed over
+    for its neighbour, so a batch can run long rather than cut a transition.
+    """
+    size = size or XFADE_BATCH
+    n = len(clip_durations)
+    clear = [(d - 2 * plan.duration) * fps >= MIN_SPLIT_FRAMES for d in clip_durations]
+    splits: list[int] = []
+    k = 0
+    while n - k > size:
+        inside = [c for c in range(k + 1, min(k + size, n - 1)) if clear[c]]
+        beyond = [c for c in range(k + size, n - 1) if clear[c]]
+        if not inside and not beyond:
+            break
+        k = inside[-1] if inside else beyond[0]
+        splits.append(k)
+
+    bounds = [0, *splits, n - 1]
+    batches: list[XfadeBatch] = []
+    for first, last in zip(bounds, bounds[1:], strict=False):
+        head = round(clip_durations[first] / 2 * fps) if batches else 0
+        start = (_first_frame(plan.offsets[first - 1], fps) if first else 0) + head
+        tail = round(clip_durations[last] / 2 * fps) if last != n - 1 else None
+        batches.append(XfadeBatch(first=first, last=last, head=head, tail=tail, start_frame=start))
+    return batches
+
+
 async def _join_xfade(
     binaries: FfmpegBinaries,
     handle: JobHandle,
     normalized_paths: list[Path],
+    clip_durations: list[float],
+    fps: float,
     xfade_name: str,
     plan: TransitionPlan,
     crf: int,
     preset: str,
+    workdir: Path,
     out_path: Path,
 ) -> None:
-    filter_complex, v_out, a_out = build_xfade_filtergraph(len(normalized_paths), xfade_name, plan)
+    batches = plan_xfade_batches(clip_durations, plan, fps)
+    if len(batches) == 1:
+        filter_complex, v_out, a_out = build_xfade_filtergraph(len(normalized_paths), xfade_name, plan)
+        args = filter_thread_args()
+        for p in normalized_paths:
+            args += [*decoder_thread_args(len(normalized_paths)), "-i", str(p)]
+        args += ["-filter_complex", filter_complex, "-map", f"[{v_out}]", "-map", f"[{a_out}]"]
+        args += build_video_encoder_args(crf, preset)
+        args += build_audio_encoder_args()
+        args += ["-movflags", "+faststart", str(out_path)]
+        await _run_join(binaries, handle, args, plan.final_duration, 0.6, 0.9)
+        return
 
-    args: list[str] = []
-    for p in normalized_paths:
-        args += ["-i", str(p)]
-    args += ["-filter_complex", filter_complex, "-map", f"[{v_out}]", "-map", f"[{a_out}]"]
+    # The sound is ONE pass over every clip: decoding audio holds no frames
+    # worth the name, and it is then the very track a single pass would mix —
+    # acrossfade has no notion of a batch for its timing to drift across.
+    audio_path = workdir / "joined_audio.m4a"
+    batch_paths = [workdir / f"batch_{j:03d}.mp4" for j in range(len(batches))]
+    try:
+        args = []
+        for p in normalized_paths:
+            # As an input option: the demuxer drops the picture before any
+            # decoder sees it.
+            args += ["-vn", "-i", str(p)]
+        audio = audio_crossfade_chain([f"{i}:a" for i in range(len(normalized_paths))], plan.duration)
+        args += ["-filter_complex", ";".join(audio), "-map", "[aout]"]
+        args += [*build_audio_encoder_args(), str(audio_path)]
+        await _run_join(binaries, handle, args, plan.final_duration, 0.6, 0.62)
+
+        step = 0.26 / len(batches)
+        for j, (batch, batch_path) in enumerate(zip(batches, batch_paths, strict=True)):
+            handle.raise_if_cancelled()
+            args, frames = _batch_args(batch, normalized_paths, plan, fps, xfade_name, crf, preset)
+            args.append(str(batch_path))
+            await _run_join(
+                binaries, handle, args, frames / fps, 0.62 + j * step, 0.62 + (j + 1) * step
+            )
+
+        list_path = workdir / "batch_list.txt"
+        list_path.write_text("\n".join(f"file '{p.name}'" for p in batch_paths), encoding="utf-8")
+        args = [
+            "-f", "concat", "-safe", "0", "-i", list_path.name, "-i", str(audio_path),
+            "-map", "0:v", "-map", "1:a", "-c", "copy", "-movflags", "+faststart", str(out_path),
+        ]
+        await _run_join(binaries, handle, args, plan.final_duration, 0.88, 0.9, cwd=workdir)
+    finally:
+        for p in [audio_path, *batch_paths, workdir / "batch_list.txt"]:
+            p.unlink(missing_ok=True)
+
+
+def _batch_args(
+    batch: XfadeBatch,
+    normalized_paths: list[Path],
+    plan: TransitionPlan,
+    fps: float,
+    xfade_name: str,
+    crf: int,
+    preset: str,
+) -> tuple[list[str], int]:
+    """One batch's video-only pass, and how many frames it ends up holding.
+
+    Its offsets are the single pass's own, less where the batch starts —
+    written to the microsecond, so every transition begins on the frame it
+    would have begun on in one pass over everything.
+    """
+    indices = list(range(batch.first, batch.last + 1))
+    start = batch.start_frame / fps
+    parts: list[str] = []
+    labels: list[str] = []
+    args = filter_thread_args()
+    for i, clip in enumerate(indices):
+        args += [*decoder_thread_args(len(indices)), "-i", str(normalized_paths[clip])]
+        trims = []
+        if clip == batch.first and batch.head:
+            trims.append(f"trim=start_frame={batch.head},setpts=PTS-STARTPTS")
+        if clip == batch.last and batch.tail is not None:
+            trims.append(f"trim=end_frame={batch.tail}")
+        if trims:
+            parts.append(f"[{i}:v]{','.join(trims)}[p{i}]")
+            labels.append(f"p{i}")
+        else:
+            labels.append(f"{i}:v")
+    offsets = [round(plan.offsets[g], 3) - start for g in range(batch.first, batch.last)]
+    parts += video_xfade_chain(labels, xfade_name, plan.duration, offsets, digits=6)
+    args += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-an"]
     args += build_video_encoder_args(crf, preset)
-    args += build_audio_encoder_args()
-    args += ["-movflags", "+faststart", str(out_path)]
+    args += ["-movflags", "+faststart"]
 
+    if batch.tail is not None:
+        frames = _first_frame(plan.offsets[batch.last - 1], fps) + batch.tail - batch.start_frame
+    else:
+        frames = math.ceil(plan.final_duration * fps) - batch.start_frame
+    return args, frames
+
+
+async def _run_join(
+    binaries: FfmpegBinaries,
+    handle: JobHandle,
+    args: list[str],
+    duration: float,
+    lo: float,
+    hi: float,
+    cwd: Path | None = None,
+) -> None:
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
     await run.run(
         binaries.ffmpeg,  # type: ignore[arg-type]
         args,
-        expected_duration_sec=plan.final_duration,
-        on_progress=_scaled_progress(handle, 0.6, 0.9, "join"),
+        expected_duration_sec=duration,
+        cwd=cwd,
+        on_progress=_scaled_progress(handle, lo, hi, "join"),
     )
 
 
@@ -211,7 +395,7 @@ async def _burn_overlays(
     graph = build_overlay_filter(
         logo, subtitles=subtitles, frame_width=frame_width, frame_height=frame_height
     )
-    args = build_burn_args(
+    args = [*filter_thread_args(), *decoder_thread_args()] + build_burn_args(
         str(input_path),
         str(logo_path) if logo_path is not None else None,
         graph,
@@ -406,7 +590,8 @@ async def render_timeline(
                     message=f"Transition duration reduced to {plan.duration:.2f}s to fit the shortest clip",
                 )
             await _join_xfade(
-                binaries, handle, normalized_paths, xfade_name, plan, crf, preset, join_target
+                binaries, handle, normalized_paths, clip_durations, target_fps, xfade_name, plan,
+                crf, preset, workdir, join_target,
             )
 
         handle.raise_if_cancelled()
