@@ -44,8 +44,24 @@ def _doc_of(project: Project) -> dict:
     return {k: v for k, v in project.model_dump(mode="json").items() if k not in _COLUMN_FIELDS}
 
 
-def get_row(db: Session, project_id: str, owner_id: str | None = None) -> ProjectRow:
-    row = db.get(ProjectRow, project_id)
+def get_row(
+    db: Session, project_id: str, owner_id: str | None = None, *, for_update: bool = False
+) -> ProjectRow:
+    """The row, if this owner may see it.
+
+    `for_update` locks it until the transaction ends. Every read-modify-write
+    of the document needs that: the document is saved WHOLE, so two writers
+    that both read before either saved — a PATCH and a transcript edit from
+    two tabs, or a worker writing its result while the producer saves — had
+    the later save silently undo the earlier one (measured: up to 7 of 20
+    concurrent transcript edits lost, and a job's paid suggestions dropped
+    while the job still read "done"). Locked, the second writer reads what
+    the first one wrote. Reads that only look stay unlocked.
+    """
+    if for_update:
+        row = db.get(ProjectRow, project_id, with_for_update=True, populate_existing=True)
+    else:
+        row = db.get(ProjectRow, project_id)
     if row is None:
         raise ProjectNotFound(project_id)
     # Ownership is enforced here rather than in each route, so a new route
@@ -55,8 +71,10 @@ def get_row(db: Session, project_id: str, owner_id: str | None = None) -> Projec
     return row
 
 
-def load(db: Session, project_id: str, owner_id: str | None = None) -> Project:
-    return to_domain(get_row(db, project_id, owner_id))
+def load(
+    db: Session, project_id: str, owner_id: str | None = None, *, for_update: bool = False
+) -> Project:
+    return to_domain(get_row(db, project_id, owner_id, for_update=for_update))
 
 
 def save(db: Session, project: Project, owner_id: str | None = None) -> ProjectRow:

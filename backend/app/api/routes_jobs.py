@@ -45,14 +45,18 @@ def _owned_job(db: Session, job_id: str, principal: Principal) -> Job:
 
 
 @router.get("/queue")
-def queue_status(principal: Principal = Depends(current_user)) -> dict:  # noqa: B008
+def queue_status(
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
     """Queue depth plus free scratch space.
 
     Both answer questions that otherwise need a look at the server logs:
     "why has my job not started" is usually another project's long render,
     and "why did the export fail" is often a full disk.
     """
-    overview = queue.queue_overview()
+    # The request's own session: `current_user` already holds its connection.
+    overview = queue.queue_overview(db=db)
     overview["disk"] = disk_report()
     return overview
 
@@ -73,7 +77,7 @@ def cancel_job(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     job = _owned_job(db, job_id, principal)
-    if not queue.request_cancel(job_id):
+    if not queue.request_cancel(job_id, db=db):
         return {"canceled": False, "reason": f"job already {job.state}"}
     # A running job is only *asked* to stop here — it notices at its next
     # heartbeat, which is also what kills the ffmpeg child process.

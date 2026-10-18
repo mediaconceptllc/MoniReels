@@ -17,11 +17,14 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.db import session_scope
 from app.dbmodels import Job
@@ -42,6 +45,32 @@ class JobCancelled(Exception):
     pass
 
 
+@contextmanager
+def _use(db: Session | None) -> Iterator[Session]:
+    """The caller's session when it has one, else a short one of our own.
+
+    An API request holds one pooled connection for its whole life (its
+    `get_db` session, opened by `current_user`). Every function here used to
+    open a SECOND one, so ten concurrent requests each held one connection
+    and waited for another: the pool (5 + 5) deadlocked for its 30 s timeout
+    and the API answered 500. Routes now pass their own session in.
+
+    With a caller's session, functions that write commit it themselves — a
+    job that was enqueued but never committed is worse than no job at all.
+    """
+    if db is not None:
+        yield db
+        return
+    with session_scope() as own:
+        yield own
+
+
+def _active_with_key(db: Session, dedupe_key: str) -> str | None:
+    return db.scalar(
+        select(Job.id).where(Job.dedupe_key == dedupe_key, Job.state.in_(ACTIVE_STATES))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Enqueue / read
 # ---------------------------------------------------------------------------
@@ -53,20 +82,21 @@ def enqueue(
     project_id: str | None = None,
     payload: dict | None = None,
     dedupe_key: str | None = None,
+    db: Session | None = None,
 ) -> str:
     """Queue one job and return its id.
 
     When `dedupe_key` matches a job that is still queued or running, that
     job's id is returned instead of a second row: two clicks on "Transcribe"
     must not run the same work twice against the same output keys.
+
+    `db` is the caller's session (see `_use`); it is committed here.
     """
-    with session_scope() as db:
+    with _use(db) as session:
         if dedupe_key:
-            existing = db.scalar(
-                select(Job).where(Job.dedupe_key == dedupe_key, Job.state.in_(ACTIVE_STATES))
-            )
+            existing = _active_with_key(session, dedupe_key)
             if existing is not None:
-                return existing.id
+                return existing
 
         job = Job(
             id=uuid.uuid4().hex,
@@ -84,7 +114,21 @@ def enqueue(
             message="",
         )
         job.result = {"payload": payload or {}}
-        db.add(job)
+        try:
+            # A savepoint, so losing the race below leaves the caller's
+            # transaction usable.
+            with session.begin_nested():
+                session.add(job)
+        except IntegrityError:
+            # Two clicks both passed the check above and the other INSERT won
+            # the UNIQUE dedupe key. That job is the answer — this used to
+            # surface as a 500 to whichever click lost.
+            existing = _active_with_key(session, dedupe_key) if dedupe_key else None
+            if existing is None:
+                raise
+            return existing
+        if db is not None:
+            db.commit()
     return job.id
 
 
@@ -119,9 +163,9 @@ def to_dict(job: Job) -> dict:
     }
 
 
-def list_for_project(project_id: str, limit: int = 50) -> list[dict]:
-    with session_scope() as db:
-        rows = db.scalars(
+def list_for_project(project_id: str, limit: int = 50, db: Session | None = None) -> list[dict]:
+    with _use(db) as session:
+        rows = session.scalars(
             select(Job)
             .where(Job.project_id == project_id)
             .order_by(Job.created_at.desc())
@@ -130,16 +174,16 @@ def list_for_project(project_id: str, limit: int = 50) -> list[dict]:
         return [to_dict(j) for j in rows]
 
 
-def queue_overview() -> dict:
+def queue_overview(db: Session | None = None) -> dict:
     """What the queue page shows. A queue with waiting work and no genuinely
     live worker means the worker service is down — the single most common
     cause of "my job never starts"."""
-    with session_scope() as db:
+    with _use(db) as session:
         counts = dict(
-            db.execute(select(Job.state, func.count()).group_by(Job.state)).all()  # type: ignore[arg-type]
+            session.execute(select(Job.state, func.count()).group_by(Job.state)).all()  # type: ignore[arg-type]
         )
         stale_cutoff = time.time() - _stale_sec()
-        live = db.scalar(
+        live = session.scalar(
             select(func.count())
             .select_from(Job)
             .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
@@ -202,10 +246,14 @@ def reap_stale() -> Reaped:
     cutoff = time.time() - _stale_sec()
     with session_scope() as db:
         stale = db.scalars(
-            select(Job).where(
+            select(Job)
+            .where(
                 Job.state == "running",
                 or_(Job.heartbeat_at.is_(None), Job.heartbeat_at < cutoff),
             )
+            # A row a heartbeat is writing right now is alive by definition;
+            # it is skipped this pass rather than requeued under its worker.
+            .with_for_update(skip_locked=True)
         ).all()
         requeued = failed = 0
         for job in stale:
@@ -274,12 +322,37 @@ def claim(worker_id: str) -> Job | None:
         return job
 
 
-def heartbeat(job_id: str, *, progress: float | None, stage: str | None, message: str | None) -> bool:
+def _ours(job: Job | None, attempt: int | None) -> bool:
+    """Whether a write from the attempt that claimed `job` may land.
+
+    `attempts` moves on every claim, so it is a fencing token: once the
+    reaper has handed a job back to the queue (its heartbeat stopped — one
+    database error used to end the heartbeat for good) and another worker has
+    claimed it, the first worker's heartbeats and its final verdict must not
+    overwrite the row the second one now owns. None = unfenced (a caller that
+    holds no claim, such as a test handle).
+    """
+    if job is None:
+        return False
+    if attempt is None:
+        return True
+    return job.state == "running" and job.attempts == attempt
+
+
+def heartbeat(
+    job_id: str,
+    *,
+    progress: float | None,
+    stage: str | None,
+    message: str | None,
+    attempt: int | None = None,
+) -> bool:
     """Refresh liveness and flush progress. Returns False when the job has
-    been asked to cancel, which the handle turns into a JobCancelled."""
+    been asked to cancel — or is no longer this attempt's — which the handle
+    turns into a JobCancelled."""
     with session_scope() as db:
         job = db.get(Job, job_id)
-        if job is None:
+        if not _ours(job, attempt):
             return False
         job.heartbeat_at = time.time()
         job.updated_at = job.heartbeat_at
@@ -292,25 +365,53 @@ def heartbeat(job_id: str, *, progress: float | None, stage: str | None, message
         return not job.cancel_requested
 
 
-def finish(job_id: str, *, state: str, output: Any = None, error: str | None = None) -> None:
+def finish(
+    job_id: str,
+    *,
+    state: str,
+    output: Any = None,
+    error: str | None = None,
+    attempt: int | None = None,
+) -> bool:
+    """Settle a job — or, with state "queued", hand it back for a retry.
+
+    Returns False when nothing was written because the row is no longer this
+    attempt's (see `_ours`): its verdict belongs to whoever holds it now.
+    """
     with session_scope() as db:
         job = db.get(Job, job_id)
-        if job is None:
-            return
+        if not _ours(job, attempt):
+            if job is not None:
+                logger.warning(
+                    "Job %s: attempt %s settled as %s after the job was taken over; not recorded",
+                    job_id, attempt, state,
+                )
+            return False
+        now = time.time()
         job.state = state
-        job.finished_at = time.time()
-        job.updated_at = job.finished_at
+        job.updated_at = now
         job.error = error
+        payload = payload_of(job)
+        job.result = {"payload": payload, "output": output}
+        if state == "queued":
+            # A retry is the same job, still active: it keeps its dedupe key
+            # (dropping it let a second click create a duplicate) and has not
+            # finished. Released, so any worker may claim it.
+            job.claimed_by = None
+            job.heartbeat_at = None
+            job.progress = 0.0
+            job.stage = ""
+            return True
+        job.finished_at = now
         if state == "done":
             job.progress = 1.0
             job.stage = "done"
-        payload = payload_of(job)
-        job.result = {"payload": payload, "output": output}
         # Freeing the dedupe key is what lets the same action run again.
         job.dedupe_key = None
+        return True
 
 
-def abandon(job_id: str, *, requeue: bool, reason: str) -> bool:
+def abandon(job_id: str, *, requeue: bool, reason: str, attempt: int | None = None) -> bool:
     """Settle a job the worker is walking away from, and say why.
 
     A worker stopped by a deploy used to leave its row `running` with a
@@ -324,10 +425,13 @@ def abandon(job_id: str, *, requeue: bool, reason: str) -> bool:
     """
     with session_scope() as db:
         job = db.get(Job, job_id)
-        if job is None or job.state not in ACTIVE_STATES:
+        if job is None or job.state not in ACTIVE_STATES or not _ours(job, attempt):
             return False
         job.state = "queued" if requeue else "failed"
         job.error = reason
+        if requeue:
+            job.claimed_by = None
+            job.heartbeat_at = None
         job.updated_at = time.time()
         if not requeue:
             job.finished_at = job.updated_at
@@ -337,9 +441,9 @@ def abandon(job_id: str, *, requeue: bool, reason: str) -> bool:
         return True
 
 
-def request_cancel(job_id: str) -> bool:
-    with session_scope() as db:
-        job = db.get(Job, job_id)
+def request_cancel(job_id: str, db: Session | None = None) -> bool:
+    with _use(db) as session:
+        job = session.get(Job, job_id)
         if job is None or job.state not in ACTIVE_STATES:
             return False
         job.cancel_requested = True
@@ -351,6 +455,8 @@ def request_cancel(job_id: str) -> bool:
             job.finished_at = time.time()
             job.message = "Canceled before it started"
             job.dedupe_key = None
+        if db is not None:
+            db.commit()
         return True
 
 
@@ -365,15 +471,17 @@ def purge_old(keep_days: int) -> int:
         return result.rowcount or 0
 
 
-def drop_project_jobs(project_id: str) -> int:
+def drop_project_jobs(project_id: str, db: Session | None = None) -> int:
     """Cancel a deleted project's queued work so a worker does not pick up a
     job whose project no longer exists."""
-    with session_scope() as db:
-        result = db.execute(
+    with _use(db) as session:
+        result = session.execute(
             update(Job)
             .where(Job.project_id == project_id, Job.state == "queued")
             .values(state="canceled", finished_at=time.time(), dedupe_key=None, message="Project deleted")
         )
+        if db is not None:
+            db.commit()
         return result.rowcount or 0
 
 
@@ -391,11 +499,20 @@ class JobHandle:
     write would be a round trip to Postgres.
     """
 
-    def __init__(self, job_id: str, kind: str, project_id: str | None, payload: dict) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        kind: str,
+        project_id: str | None,
+        payload: dict,
+        attempt: int | None = None,
+    ) -> None:
         self.job_id = job_id
         self.kind = kind
         self.project_id = project_id
         self.payload = payload
+        # The claim's fencing token (see `_ours`).
+        self.attempt = attempt
         self.cancel_requested = False
 
         self._pending: dict[str, Any] = {}
@@ -416,18 +533,30 @@ class JobHandle:
         if message is not None:
             self._pending["message"] = message
         if time.time() - self._last_flush >= PROGRESS_FLUSH_SEC:
-            await self.flush()
+            try:
+                await self.flush()
+            except Exception:  # noqa: BLE001 - see below
+                # Progress is a report, not the work. A database blip here
+                # used to fail the handler — and with it a paid run that was
+                # going fine. The heartbeat loop keeps retrying the write.
+                logger.warning("Job %s: progress not saved; will retry", self.job_id, exc_info=True)
 
     async def flush(self) -> None:
         pending, self._pending = self._pending, {}
         self._last_flush = time.time()
-        alive = await asyncio.to_thread(
-            heartbeat,
-            self.job_id,
-            progress=pending.get("progress"),
-            stage=pending.get("stage"),
-            message=pending.get("message"),
-        )
+        try:
+            alive = await asyncio.to_thread(
+                heartbeat,
+                self.job_id,
+                progress=pending.get("progress"),
+                stage=pending.get("stage"),
+                message=pending.get("message"),
+                attempt=self.attempt,
+            )
+        except Exception:
+            # Not lost: the next flush carries it, unless newer values came in.
+            self._pending = {**pending, **self._pending}
+            raise
         if not alive and not self.cancel_requested:
             self.cancel_requested = True
             if self._cancel_hook:
