@@ -884,16 +884,17 @@ def test_export_all_numbers_each_kind_separately_and_keeps_its_srt(world, projec
     _ready_to_render(db, project.id, clips=False, suggestions=_suggestions(youtube=True))
     world.r2.put(f"sources/{project.id}/source.mp4")
 
-    result = asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+    handle = _handle(db, project.id, "export_all")
+    result = asyncio.run(worker.handle_export_all(handle))
 
     keys = [item["key"] for item in result["outputs"]]
     assert keys == [
-        r2.output_key(project.id, "short", 1, "mp4"),
-        r2.output_key(project.id, "short", 2, "mp4"),
-        r2.output_key(project.id, "short", 3, "mp4"),
-        r2.output_key(project.id, "youtube", 1, "mp4"),
-        r2.output_key(project.id, "youtube", 2, "mp4"),
-        r2.output_key(project.id, "youtube", 3, "mp4"),
+        r2.output_key(project.id, handle.job_id, "short", 1, "mp4"),
+        r2.output_key(project.id, handle.job_id, "short", 2, "mp4"),
+        r2.output_key(project.id, handle.job_id, "short", 3, "mp4"),
+        r2.output_key(project.id, handle.job_id, "youtube", 1, "mp4"),
+        r2.output_key(project.id, handle.job_id, "youtube", 2, "mp4"),
+        r2.output_key(project.id, handle.job_id, "youtube", 3, "mp4"),
     ]
     for item in result["outputs"]:
         if item["srt_key"]:
@@ -904,6 +905,50 @@ def test_export_all_numbers_each_kind_separately_and_keeps_its_srt(world, projec
     rows = db.query(Output).filter(Output.project_id == project.id).all()
     assert {row.r2_key for row in rows} == set(keys)
     assert all(row.size_bytes > 0 for row in rows)
+
+
+def test_a_second_export_keeps_the_first_exports_files(world, project, db):
+    """Re-exporting after changing a setting is the documented flow. With
+    keys of project + kind + index, the second run wrote over the first run's
+    files, its rows went on playing the new video, and deleting an "old"
+    output deleted the new one."""
+    from app import worker
+    from app.dbmodels import Output
+
+    _ready_to_render(db, project.id, clips=False, suggestions=_suggestions(youtube=True))
+    world.r2.put(f"sources/{project.id}/source.mp4")
+
+    first = asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+    second = asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    first_keys = {item["key"] for item in first["outputs"]}
+    second_keys = {item["key"] for item in second["outputs"]}
+    assert first_keys.isdisjoint(second_keys)
+    assert first_keys <= set(world.r2.objects)
+
+    db.expire_all()
+    rows = db.query(Output).filter(Output.project_id == project.id).all()
+    assert len(rows) == 12
+    assert len({row.r2_key for row in rows}) == 12
+
+
+def test_a_retried_export_does_not_list_its_videos_twice(world, project, db):
+    """A retry of the same job lands on the same keys. If its first attempt
+    recorded some outputs before failing, the retry updates those rows."""
+    from app import worker
+    from app.dbmodels import Output
+
+    _ready_to_render(db, project.id, clips=False, suggestions=_suggestions(youtube=True))
+    world.r2.put(f"sources/{project.id}/source.mp4")
+    handle = _handle(db, project.id, "export_all")
+
+    asyncio.run(worker.handle_export_all(handle))
+    asyncio.run(worker.handle_export_all(handle))
+
+    db.expire_all()
+    rows = db.query(Output).filter(Output.project_id == project.id).all()
+    assert len(rows) == 6
+    assert len({row.r2_key for row in rows}) == 6
 
 
 def test_export_all_without_suggestions_is_refused(world, project, db):

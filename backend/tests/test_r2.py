@@ -32,7 +32,18 @@ def test_keys_are_rooted_at_the_project_id():
     renaming a project cannot orphan the objects it already owns."""
     assert r2.source_key("abc123", ".mp4") == "sources/abc123/source.mp4"
     assert r2.thumbnail_key("abc123") == "thumbnails/abc123/thumb.jpg"
-    assert r2.output_key("abc123", "reel", 2, "mp4") == "outputs/abc123/reel_2.mp4"
+    assert r2.output_key("abc123", "job9", "reel", 2, "mp4") == "outputs/abc123/job9/reel_2.mp4"
+
+
+def test_an_output_key_belongs_to_one_export():
+    """Two exports of one project must never share a key: the index restarts
+    in every job, and a shared key is a file the second export writes over."""
+    first = r2.output_key("abc123", "job1", "reel", 1, "mp4")
+    second = r2.output_key("abc123", "job2", "reel", 1, "mp4")
+    assert first != second
+    # A job id cannot step outside its own folder.
+    assert r2.output_key("abc123", "../x/../y", "reel", 1, "mp4").startswith("outputs/abc123/")
+    assert ".." not in r2.output_key("abc123", "../x/../y", "reel", 1, "mp4")
 
 
 @pytest.mark.parametrize(

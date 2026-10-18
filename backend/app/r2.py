@@ -44,6 +44,8 @@ MANAGED_PREFIXES = ("sources/", "outputs/", "audio/", "thumbnails/")
 MAX_MPU_PAGES = 100
 
 _ASCII_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+# One path segment of a key: no dots either, so it can never read as `..`.
+_SEGMENT_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 class R2Error(Exception):
@@ -112,8 +114,17 @@ def thumbnail_key(project_id: str) -> str:
     return f"thumbnails/{project_id}/thumb.jpg"
 
 
-def output_key(project_id: str, kind: str, index: int, ext: str) -> str:
-    return f"outputs/{project_id}/{kind}_{index}{_safe_suffix('.' + ext.lstrip('.'))}"
+def output_key(project_id: str, job_id: str, kind: str, index: int, ext: str) -> str:
+    """One rendered file. The JOB is part of the key.
+
+    The index restarts at 1 in every export, so project + kind + index alone
+    made a second export write over the first one's files: the older rows
+    went on to play the new video, and deleting an "old" output deleted the
+    new one. A retry of the same job lands on the same keys on purpose — the
+    worker updates the row it already wrote instead of adding another.
+    """
+    job = _SEGMENT_UNSAFE.sub("_", job_id).strip("_") or "job"
+    return f"outputs/{project_id}/{job}/{kind}_{index}{_safe_suffix('.' + ext.lstrip('.'))}"
 
 
 def _safe_suffix(suffix: str) -> str:
