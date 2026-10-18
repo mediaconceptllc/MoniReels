@@ -35,7 +35,7 @@ function secs(value: number | null): string {
 }
 
 function percent(value: number | null): string {
-  return value === null ? "—" : `${value.toLocaleString("mn-MN", { maximumFractionDigits: 1 })}%`;
+  return value === null ? "—" : `${value.toLocaleString("en-US", { maximumFractionDigits: 1 })}%`;
 }
 
 function Tile({ label, value, sub }: { label: string; value: string; sub?: string }) {

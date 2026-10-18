@@ -87,12 +87,23 @@ function sourceLabel(field: ProviderSettings[SecretName] | undefined): string {
   return field.source === "db" ? `Энэ хуудсаас · ${field.hint}` : `Орчны хувьсагчаас · ${field.hint}`;
 }
 
+/** 2026.10.18 09:30, written out: a Date formatted for "mn-MN" comes back
+ *  in whatever locale the browser falls back to, AM/PM and all. */
+function moment(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /** A balance value as the provider's own unit gives it. A `…_unix` field is
  *  a moment, and a ten-digit number is not how anyone reads a date. */
 function balanceValue(row: BalanceRow): string {
   if (typeof row.value === "number") {
-    if (row.name.endsWith("_unix")) return new Date(row.value * 1000).toLocaleString("mn-MN");
-    return row.value.toLocaleString("mn-MN");
+    if (row.name.endsWith("_unix")) return moment(row.value);
+    // "en-US", not "mn-MN": Chromium ships no Mongolian data, so "mn-MN"
+    // resolves to the browser's own locale — and CLDR's Mongolian digits are
+    // en-US's 1,234.5 anyway.
+    return row.value.toLocaleString("en-US");
   }
   if (typeof row.value === "boolean") return row.value ? "Тийм" : "Үгүй";
   return row.value;
