@@ -67,7 +67,7 @@ from app.utils.paths import (
 from app.video.audio import extract_audio_16k_mono_wav, extract_audio_native_wav
 from app.video.capabilities import build_capabilities
 from app.video.ffmpeg import discover_ffmpeg
-from app.video.probe import generate_thumbnail, probe_video
+from app.video.probe import ProbeError, generate_thumbnail, probe_video
 
 logger = get_logger(__name__)
 
@@ -572,6 +572,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
         kind = item["kind"]
         counts[kind] = counts.get(kind, 0) + 1
         key = r2.output_key(project_id, handle.job_id, kind, counts[kind], "mp4")
+        duration = await _rendered_duration(binaries, path)
         size = await asyncio.to_thread(r2.upload_file, path, key, "video/mp4")
 
         srt_local = path.with_suffix(".srt")
@@ -596,12 +597,14 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
                         r2_key=key,
                         srt_key=srt_key,
                         size_bytes=size,
+                        duration_sec=duration,
                     )
                 )
             else:
                 row.title = item.get("title", "")
                 row.srt_key = srt_key
                 row.size_bytes = size
+                row.duration_sec = duration
         results.append({"kind": kind, "title": item.get("title", ""), "key": key, "srt_key": srt_key})
 
     out: dict = {"outputs": results}
@@ -619,6 +622,25 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     if voice is not None:
         out["voice"] = voice.report.to_dict()
     return out
+
+
+async def _rendered_duration(binaries, path: Path) -> float:
+    """How long the file that was rendered actually plays.
+
+    Probed, not added up from the plan: a crossfade overlaps its two clips, an
+    intro and outro add their own length, and the encoder rounds to frames —
+    a total of the cut ranges is a different number from the video's.
+
+    0.0 — the column's own "not measured", as on every output recorded before
+    this was written — when ffprobe cannot read it. The file was rendered and
+    is about to be uploaded; refusing it over a missing number would throw
+    the render away.
+    """
+    try:
+        return round((await probe_video(binaries.ffprobe, path))["duration_sec"], 3)
+    except (ProbeError, OSError) as e:
+        logger.warning("Could not measure %s: %s", path.name, e)
+        return 0.0
 
 
 async def _prepare_voice(

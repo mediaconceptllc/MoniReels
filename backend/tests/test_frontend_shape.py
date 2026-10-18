@@ -478,6 +478,25 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     ])
     db.commit()
 
+    # A worker has reported its disk, so `worker_disk` is captured as the
+    # object it is rather than only as the null beside it.
+    from app import worker_report
+
+    worker_report.publish(db, worker_report.WorkerReport(
+        separation=False, model="htdemucs", at=time.time(),
+        disk={"free_bytes": 1, "total_bytes": 2, "min_free_bytes": 1},
+    ))
+    db.commit()
+
+    # The recogniser's balance, as duudlaga's /me answers it — key included,
+    # which is exactly what the summary must leave out.
+    import app.stt.duudlaga_client as duudlaga
+
+    async def _me(self):
+        return {"key": "dk_live_shape", "balance": 12.5, "limits": {"daily_spend": 5}}
+
+    monkeypatch.setattr(duudlaga.DuudlagaClient, "account_info", _me)
+
     shape: dict = {
         # auth
         "token": login.json(),
@@ -507,6 +526,13 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         "job_voiced": get("/jobs/shapejob3"),
         "queue": get("/jobs/queue"),
         "job_canceled": send("POST", "/jobs/shapejob2/cancel"),
+        # the admin's users and jobs screens
+        "admin_users": get("/admin/users"),
+        "admin_jobs": get("/admin/jobs?limit=50"),
+        "admin_job_stats": get("/admin/jobs/stats?days=7"),
+        # Before the pipeline routes below queue an export: a retry beside
+        # the same kind of live work on the project is refused.
+        "admin_job_retried": send("POST", "/admin/jobs/shapejob2/retry"),
         # admin + settings
         "provider_settings": get("/admin/settings"),
         # Synthetic keys, never used: the pipeline routes below only enqueue
@@ -583,6 +609,15 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     # translate and is refused with a 400, which would capture the error.
     send("PATCH", f"/projects/{row.id}", json={"language": "en"})
     shape["translate_started"] = send("POST", f"/projects/{row.id}/translate")
+
+    # Account administration, last among the admin calls because it closes
+    # an account (not the one signed in).
+    made = send("POST", "/admin/users", json={"username": "shapeeditor", "password": "firstpass1"})
+    shape["admin_user_created"] = made
+    shape["admin_password_reset"] = send(
+        "POST", f"/admin/users/{made['id']}/password", json={"new_password": "secondpass2"}
+    )
+    shape["admin_user_active"] = send("POST", f"/admin/users/{made['id']}/active?active=false")
 
     created = shape["create_project"]["project_id"]
     shape["upload_complete"] = send("POST", f"/projects/{created}/upload-complete")

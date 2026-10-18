@@ -11,6 +11,11 @@ One row in the `settings` table, written by the worker's housekeeping (so
 within a minute of every start, and refreshed after) — never by an HTTP
 request, and never among the fields an admin can edit
 (app.provider_settings.EDITABLE).
+
+The worker's free disk travels the same way, for the same reason. The queue
+page used to print the API's own disk under "why did the export fail", and
+the API renders nothing: the two services do not share a filesystem, so its
+number was always the wrong machine's.
 """
 from __future__ import annotations
 
@@ -33,6 +38,13 @@ class WorkerReport:
     model: str
     #: When the worker last said so.
     at: float
+    #: The worker's scratch disk, as app.utils.paths.disk_report measures it
+    #: there. Optional: a report written before this field existed is still a
+    #: valid answer about separation, and must not read as "unknown".
+    disk: dict[str, int] | None = None
+
+
+DISK_FIELDS = ("free_bytes", "total_bytes", "min_free_bytes")
 
 
 def current() -> WorkerReport:
@@ -43,7 +55,20 @@ def current() -> WorkerReport:
         separation=dub_bed.available(),
         model=get_settings().demucs_model,
         at=time.time(),
+        disk=_measure_disk(),
     )
+
+
+def _measure_disk() -> dict[str, int] | None:
+    from app.utils.paths import disk_report
+
+    try:
+        report = disk_report()
+    except OSError:
+        # A disk that cannot be measured is left unsaid rather than reported
+        # as empty: zero free bytes is a claim, and a loud one.
+        return None
+    return {name: int(report[name]) for name in DISK_FIELDS}
 
 
 def publish(db: Session, report: WorkerReport) -> None:
@@ -65,7 +90,25 @@ def read(db: Session) -> WorkerReport | None:
     try:
         data = json.loads(row.value)
         return WorkerReport(
-            separation=bool(data["separation"]), model=str(data["model"]), at=float(data["at"])
+            separation=bool(data["separation"]),
+            model=str(data["model"]),
+            at=float(data["at"]),
+            disk=_read_disk(data.get("disk")),
         )
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def _read_disk(value: object) -> dict[str, int] | None:
+    """Tolerant where the rest is strict: a malformed disk figure loses the
+    disk figure, not the separation answer the export guard depends on."""
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, int] = {}
+    for name in DISK_FIELDS:
+        number = value.get(name)
+        # bool is an int to Python; `true` free bytes is not a measurement.
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            return None
+        out[name] = number
+    return out

@@ -357,7 +357,28 @@ def test_queue_status_reports_disk(client, db):
     _user(db, "alice")
     response = client.get("/jobs/queue", headers=_auth(client, "alice"))
     assert response.status_code == 200
-    assert "free_bytes" in response.json()["disk"]
+    assert "free_bytes" in response.json()["api_disk"]
+
+
+def test_queue_status_names_whose_disk_it_measured(client, db):
+    """One `disk`, measured on the API, used to answer a question about the
+    worker — a different machine, with a different filesystem. The worker's
+    figure comes from the worker, with when it was taken, or not at all."""
+    from app import worker_report
+
+    _user(db, "alice")
+    headers = _auth(client, "alice")
+    # No worker has said anything: unknown, not the API's number relabelled.
+    assert client.get("/jobs/queue", headers=headers).json()["worker_disk"] is None
+
+    disk = {"free_bytes": 7_000_000_000, "total_bytes": 50_000_000_000, "min_free_bytes": 1024}
+    worker_report.publish(db, worker_report.WorkerReport(
+        separation=False, model="htdemucs", at=1_700_000_000.0, disk=disk,
+    ))
+    db.commit()
+    body = client.get("/jobs/queue", headers=headers).json()
+    assert body["worker_disk"] == {**disk, "measured_at": 1_700_000_000.0}
+    assert body["api_disk"]["free_bytes"] != disk["free_bytes"]
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +494,56 @@ def test_provider_status_never_echoes_a_key(client, db, monkeypatch):
     get_settings.cache_clear()
 
 
+def test_provider_balance_is_shown_and_the_key_beside_it_is_not(client, db, monkeypatch):
+    """duudlaga's /me answers with the key itself next to the balance. The
+    balance was fetched and thrown away; the raw answer, key included, went
+    to the browser."""
+    import app.stt.duudlaga_client as duudlaga
+    from app.config import get_settings
+
+    monkeypatch.setenv("DUUDLAGA_API_KEY", "dk_live_secret_value")
+    get_settings.cache_clear()
+
+    async def _me(self):
+        return {
+            "key": "dk_live_secret_value", "balance": 12.5, "email": "ops@example.com",
+            "limits": {"daily_spend": 5, "key_limit": "dk_live_secret_value"},
+            "plan": "pro", "user_id": "u_1", "paid": True,
+        }
+
+    monkeypatch.setattr(duudlaga.DuudlagaClient, "account_info", _me)
+    _user(db, "root", role="admin")
+    response = client.get("/admin/providers", headers=_auth(client, "root"))
+
+    stt = response.json()["stt"]
+    assert stt["ok"] is True and "account" not in stt
+    assert stt["balance"] == [
+        {"name": "balance", "value": 12.5},
+        {"name": "limits.daily_spend", "value": 5},
+        {"name": "plan", "value": "pro"},
+    ]
+    assert "dk_live_secret_value" not in response.text
+    assert "ops@example.com" not in response.text
+    get_settings.cache_clear()
+
+
+def test_a_balance_summary_takes_only_what_it_recognises():
+    from app.api.routes_admin import BALANCE_MAX_FIELDS, balance_summary
+
+    assert balance_summary(None) == [] and balance_summary(["balance"]) == []
+    # One level of nesting, scalars only, short text only.
+    assert balance_summary({
+        "subscription": {"character_count": 10, "character_limit": 100, "deep": {"limit": 1}},
+        "tier": "x" * 41, "next_character_count_reset_unix": 1_700_000_000,
+    }) == [
+        {"name": "subscription.character_count", "value": 10},
+        {"name": "subscription.character_limit", "value": 100},
+        {"name": "next_character_count_reset_unix", "value": 1_700_000_000},
+    ]
+    many = {f"limit_{i}": i for i in range(40)}
+    assert len(balance_summary(many)) == BALANCE_MAX_FIELDS
+
+
 def test_provider_status_is_admin_only(client, db):
     _user(db, "alice", role="editor")
     assert client.get("/admin/providers", headers=_auth(client, "alice")).status_code == 403
@@ -485,6 +556,243 @@ def test_an_admin_cannot_disable_their_own_account(client, db):
         f"/admin/users/{root.id}/active?active=false", headers=_auth(client, "root")
     )
     assert response.status_code == 400
+
+
+def test_the_last_active_admin_cannot_be_closed_by_any_path(db):
+    """Unreachable over HTTP today — the caller is an active admin and may not
+    close themselves — so it is called directly: the invariant must hold for
+    the next path that closes an account, not only for this one."""
+    from fastapi import HTTPException
+
+    from app.api.routes_admin import set_active
+    from app.security import Principal
+
+    root = _user(db, "root", role="admin")
+    nobody = Principal(id="not-a-user", username="ghost", role="admin")
+    with pytest.raises(HTTPException) as refused:
+        set_active(root.id, False, principal=nobody, db=db)
+    assert refused.value.status_code == 400
+    db.refresh(root)
+    assert root.active is True
+
+    # With a second active admin it is an ordinary deactivation.
+    _user(db, "root2", role="admin")
+    assert set_active(root.id, False, principal=nobody, db=db) == {"active": False}
+
+
+def test_an_admin_manages_accounts_without_swagger(client, db):
+    """Create, reset, close, reopen — the four things an operator does to an
+    account, each answered in the language of the page that asks."""
+    _user(db, "root", role="admin")
+    admin = _auth(client, "root")
+
+    created = client.post(
+        "/admin/users", json={"username": "newbie", "password": "firstpass1"}, headers=admin
+    )
+    assert created.status_code == 201
+    assert created.json()["role"] == "editor"
+    again = client.post(
+        "/admin/users", json={"username": "newbie", "password": "firstpass1"}, headers=admin
+    )
+    assert again.status_code == 409 and "аль хэдийн бий" in again.json()["detail"]
+
+    user_id = created.json()["id"]
+    session = _auth(client, "newbie", "firstpass1")
+    closed = client.post(f"/admin/users/{user_id}/active?active=false", headers=admin)
+    assert closed.json() == {"active": False}
+    # Closing ends the session now, not when the token expires.
+    assert client.get("/auth/me", headers=session).status_code == 401
+    assert next(u for u in client.get("/admin/users", headers=admin).json()
+                if u["id"] == user_id)["active"] is False
+
+    client.post(f"/admin/users/{user_id}/active?active=true", headers=admin)
+    assert client.get("/auth/me", headers=session).status_code == 200
+
+
+def test_the_job_screens_are_admin_only(client, db):
+    alice = _user(db, "alice", role="editor")
+    headers = _auth(client, "alice")
+    # Her own project's job: owning the work does not open the admin screen.
+    row = Project(owner_id=alice.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    job_id = queue.enqueue("export", project_id=row.id)
+
+    assert client.get("/admin/jobs", headers=headers).status_code == 403
+    assert client.get("/admin/jobs/stats", headers=headers).status_code == 403
+    assert client.post(f"/admin/jobs/{job_id}/retry", headers=headers).status_code == 403
+    assert client.post(
+        "/admin/users", json={"username": "x1", "password": "firstpass1"}, headers=headers
+    ).status_code == 403
+
+
+def _settled(db, project_id, kind, state, *, created, finished, elapsed=None, attempts=1,
+             payload=None):
+    """A job row with its times written by hand, as the worker would have."""
+    from app.dbmodels import Job
+
+    output = {"elapsed_sec": elapsed} if elapsed is not None else None
+    job = Job(
+        project_id=project_id, kind=kind, state=state, attempts=attempts,
+        created_at=created, updated_at=finished, finished_at=finished,
+        result={"payload": payload or {}, "output": output},
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def test_the_jobs_page_names_the_project_and_counts_what_it_does_not_show(client, db):
+    _user(db, "root", role="admin")
+    owner = _user(db, "alice")
+    row = Project(owner_id=owner.id, name="Ярилцлага", doc={})
+    db.add(row)
+    db.commit()
+    now = time.time()
+    for i in range(5):
+        _settled(db, row.id, "export", "failed", created=now - 100 + i, finished=now - 50 + i)
+    _settled(db, row.id, "transcribe", "done", created=now - 10, finished=now - 5, elapsed=3.0)
+    _settled(db, None, "export", "done", created=now - 9, finished=now - 4, elapsed=1.0)
+    headers = _auth(client, "root")
+
+    page = client.get("/admin/jobs?state=failed&limit=2&offset=1", headers=headers).json()
+    assert page["total"] == 5 and page["limit"] == 2 and page["offset"] == 1
+    assert len(page["jobs"]) == 2
+    first = page["jobs"][0]
+    assert first["project_name"] == "Ярилцлага" and first["owner"] == "alice"
+    assert first["retryable"] is True and first["state"] == "failed"
+
+    everything = client.get("/admin/jobs?limit=200", headers=headers).json()
+    assert everything["total"] == 7
+    # Every page of two together is the whole list, once each, in order.
+    paged = []
+    for offset in range(0, 7, 2):
+        paged += client.get(f"/admin/jobs?limit=2&offset={offset}", headers=headers).json()["jobs"]
+    assert [j["job_id"] for j in paged] == [j["job_id"] for j in everything["jobs"]]
+
+    done = client.get("/admin/jobs?kind=transcribe", headers=headers).json()
+    assert [j["state"] for j in done["jobs"]] == ["done"] and done["jobs"][0]["retryable"] is False
+    # A job without a project is listed, not dropped by the join.
+    assert any(j["project_name"] is None for j in everything["jobs"])
+
+    assert client.get("/admin/jobs?state=lost", headers=headers).status_code == 422
+    assert client.get("/admin/jobs?kind=render", headers=headers).status_code == 422
+    assert client.get("/admin/jobs?limit=0", headers=headers).status_code == 422
+    assert client.get("/admin/jobs?limit=201", headers=headers).status_code == 422
+
+
+def test_only_a_job_that_stopped_short_is_retried(client, db):
+    """A finished job re-run by hand is a second render, or for the metered
+    kinds a second bill for a result that already exists."""
+    from app.dbmodels import Job
+
+    _user(db, "root", role="admin")
+    owner = _user(db, "alice")
+    row = Project(owner_id=owner.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    headers = _auth(client, "root")
+    now = time.time()
+
+    done = _settled(db, row.id, "export", "done", created=now - 9, finished=now - 1, elapsed=2.0)
+    assert client.post(f"/admin/jobs/{done.id}/retry", headers=headers).status_code == 400
+    waiting = queue.enqueue("suggest", project_id=row.id)
+    assert client.post(f"/admin/jobs/{waiting}/retry", headers=headers).status_code == 400
+    assert client.post("/admin/jobs/nope/retry", headers=headers).status_code == 404
+
+    canceled = _settled(db, row.id, "export", "canceled", created=now - 9, finished=now - 1,
+                        elapsed=4.0, payload={"pick": {"shorts": ["s1"]}})
+    canceled.cancel_requested = True
+    db.commit()
+    assert client.post(f"/admin/jobs/{canceled.id}/retry", headers=headers).json() == {"requeued": True}
+
+    db.expire_all()
+    again = db.get(Job, canceled.id)
+    assert again.state == "queued" and again.attempts == 0 and again.finished_at is None
+    # Left set, the run this starts would read it and stop on its first tick.
+    assert again.cancel_requested is False
+    # The handler's input survives; the cancelled run's output does not.
+    assert again.result["payload"]["pick"] == {"shorts": ["s1"]}
+    assert again.result["payload"]["requeued_at"] >= now
+    assert "output" not in again.result
+
+
+def test_a_retry_never_runs_beside_the_same_work_started_since(client, db):
+    """A settled job gave up its dedupe key; the same action started again
+    since holds it now. Requeueing the old one would run both."""
+    _user(db, "root", role="admin")
+    owner = _user(db, "alice")
+    row = Project(owner_id=owner.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    now = time.time()
+    failed = _settled(db, row.id, "transcribe", "failed", created=now - 9, finished=now - 1)
+    queue.enqueue("transcribe", project_id=row.id, dedupe_key=f"transcribe:{row.id}")
+
+    response = client.post(f"/admin/jobs/{failed.id}/retry", headers=_auth(client, "root"))
+    assert response.status_code == 409
+    # Another kind on the same project is not a twin.
+    other = _settled(db, row.id, "export", "failed", created=now - 9, finished=now - 1)
+    assert client.post(f"/admin/jobs/{other.id}/retry", headers=_auth(client, "root")).status_code == 200
+
+
+def test_job_statistics_are_measured_not_guessed(client, db):
+    _user(db, "root", role="admin")
+    owner = _user(db, "alice")
+    row = Project(owner_id=owner.id, name="p", doc={})
+    db.add(row)
+    db.commit()
+    now = time.time()
+    hour = 3600.0
+    # Three exports that worked first time: ran 10/20/30s after waiting 5/15/25s.
+    for run, waited in ((10.0, 5.0), (20.0, 15.0), (30.0, 25.0)):
+        _settled(db, row.id, "export", "done", created=now - hour,
+                 finished=now - hour + waited + run, elapsed=run)
+    # Worked on its second attempt: its run counts, its "wait" (which holds
+    # the first, failed run) does not.
+    _settled(db, row.id, "export", "done", created=now - 2 * hour, finished=now - hour,
+             elapsed=40.0, attempts=2)
+    # Requeued by an admin a day after it was asked for: waited 2s since.
+    _settled(db, row.id, "suggest", "done", created=now - 26 * hour, finished=now - 2 * hour + 7,
+             elapsed=5.0, payload={"requeued_at": now - 2 * hour})
+    _settled(db, row.id, "export", "failed", created=now - hour, finished=now - hour + 3, elapsed=3.0)
+    _settled(db, row.id, "export", "canceled", created=now - hour, finished=now - hour + 1)
+    # Outside the window: settled eight days ago.
+    _settled(db, row.id, "export", "failed", created=now - 9 * 24 * hour, finished=now - 8 * 24 * hour)
+    queue.enqueue("export", project_id=row.id)
+
+    stats = client.get("/admin/jobs/stats?days=7", headers=_auth(client, "root")).json()
+    assert stats["days"] == 7
+    overall = stats["overall"]
+    assert (overall["done"], overall["failed"], overall["canceled"]) == (5, 1, 1)
+    # A cancel is a decision, not a failure: 5 of 6, not 5 of 7.
+    assert overall["success_pct"] == pytest.approx(83.3)
+    assert overall["wait_samples"] == 4
+
+    export = next(k for k in stats["kinds"] if k["kind"] == "export")
+    assert export["run_p50_sec"] == 25.0  # 10, 20, 30 and the second-attempt 40
+    assert export["wait_p50_sec"] == 15.0
+    assert export["wait_p95_sec"] == pytest.approx(24.0)
+    suggest = next(k for k in stats["kinds"] if k["kind"] == "suggest")
+    assert suggest["wait_p50_sec"] == pytest.approx(2.0)
+    assert [k["kind"] for k in stats["kinds"]] == ["suggest", "export"]
+
+    assert stats["queue"]["waiting"] == 1
+    assert stats["queue"]["oldest_waiting_sec"] is not None
+
+
+def test_job_statistics_say_when_there_is_nothing_to_measure(client, db):
+    """A rate from no samples is not a rate, and a window longer than the
+    rows are kept would quietly report a shorter one."""
+    from app.config import get_settings
+
+    _user(db, "root", role="admin")
+    stats = client.get("/admin/jobs/stats?days=365", headers=_auth(client, "root")).json()
+    assert stats["days"] == get_settings().job_keep_days
+    assert stats["overall"]["success_pct"] is None
+    assert stats["overall"]["run_p50_sec"] is None
+    assert stats["kinds"] == []
+    assert stats["queue"]["oldest_waiting_sec"] is None
 
 
 # ---------------------------------------------------------------------------
