@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app import r2
 from app.db import get_db
 from app.dbmodels import Job, Project, User
-from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, Password, ProviderSettingsIn
+from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, ProviderSettingsIn, ResetPasswordIn
 from app.security import Principal, hash_password, require_admin, stamp_password_change
 from app.utils.logging import get_logger
 
@@ -50,13 +50,13 @@ def create_user(body: CreateUserIn, db: Session = Depends(get_db)) -> dict:  # n
 @router.post("/users/{user_id}/password")
 def reset_password(
     user_id: str,
-    new_password: Password,
+    body: ResetPasswordIn,
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
-    salt, digest = hash_password(new_password)
+    salt, digest = hash_password(body.new_password)
     user.pw_salt, user.pw_hash = salt, digest
     # Same rule as a self-service change: an admin reset must end the
     # sessions it was performed to end.
