@@ -447,12 +447,107 @@ export interface QueueStatus {
   /** Work is waiting and nothing alive is doing it — the worker service is
    *  down. The single most common cause of "my job never starts". */
   stalled: boolean;
-  disk: {
+  /** The API container's own disk. It renders nothing, so this is NOT the
+   *  disk an export fills — it used to be shown as if it were. */
+  api_disk: {
     free_bytes: number;
     total_bytes: number;
     used_bytes: number;
     min_free_bytes: number;
   };
+  /** The disk the renders are written to, as the worker last reported it.
+   *  Null until a worker running this code has said so. */
+  worker_disk: {
+    free_bytes: number;
+    total_bytes: number;
+    min_free_bytes: number;
+    measured_at: number;
+  } | null;
+}
+
+/** One account as the admin's users screen lists it. */
+export interface AdminUser {
+  id: string;
+  username: string;
+  role: Role;
+  active: boolean;
+  created_at: number;
+  projects: number;
+}
+
+/** A job on the admin's jobs screen: the job, plus who it belongs to and
+ *  whether the server would take it back. */
+export interface AdminJob extends Job {
+  project_name: string | null;
+  owner: string | null;
+  lane: string;
+  /** Billed per attempt: a retry is a second charge. */
+  no_retry: boolean;
+  claimed_by: string | null;
+  /** When an admin last put it back in the queue. */
+  requeued_at: number | null;
+  /** Failed or canceled — the only states the server re-runs. */
+  retryable: boolean;
+}
+
+export interface AdminJobsPage {
+  jobs: AdminJob[];
+  /** Under the same filters, so a page can say how many it is not showing. */
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Null wherever there was nothing to measure — never a 0 standing in. */
+export interface JobStatsRow {
+  done: number;
+  failed: number;
+  canceled: number;
+  /** done / (done + failed); a cancel is a decision, not a failure. */
+  success_pct: number | null;
+  run_p50_sec: number | null;
+  run_p95_sec: number | null;
+  /** Measured only on jobs that worked first time — see wait_samples. */
+  wait_p50_sec: number | null;
+  wait_p95_sec: number | null;
+  wait_samples: number;
+}
+
+export interface JobStats {
+  /** The window actually used: never longer than jobs are kept. */
+  days: number;
+  keep_days: number;
+  overall: JobStatsRow;
+  kinds: (JobStatsRow & { kind: string })[];
+  queue: {
+    waiting: number;
+    running: number;
+    live_workers: number;
+    stalled: boolean;
+    oldest_waiting_sec: number | null;
+  };
+}
+
+/** One line of a provider's balance, by the provider's own name for it. */
+export interface BalanceRow {
+  name: string;
+  value: number | string | boolean;
+}
+
+/** The selected recogniser, asked live. `balance` is present only when it
+ *  answered; `error` only when it did not. */
+export interface SttStatus {
+  provider: string;
+  configured: boolean;
+  ok?: boolean;
+  error?: string;
+  balance?: BalanceRow[];
+}
+
+export interface ProviderStatus {
+  capabilities: Capability[];
+  stt_providers: string[];
+  stt: SttStatus;
 }
 
 /** One provider value as the server is willing to describe it. The value

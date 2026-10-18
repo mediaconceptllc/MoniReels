@@ -12,11 +12,13 @@
  */
 
 import type {
+  AdminJobsPage,
+  AdminUser,
   BrandAsset,
   BrandSettings,
-  Capability,
   CreateProjectResponse,
   Job,
+  JobStats,
   Me,
   Output,
   Project,
@@ -26,7 +28,9 @@ import type {
   ProviderReadiness,
   ProviderSettings,
   ProviderSettingsPatch,
+  ProviderStatus,
   QueueStatus,
+  Role,
   SourceLanguage,
   SubtitleFonts,
   SubtitleStyle,
@@ -291,10 +295,40 @@ export const api = {
     }),
 
   /** The admin view: what each key powers, plus reachability and balance. */
-  providers: () =>
-    request<{ capabilities: Capability[]; stt_providers: string[]; stt: { provider: string } }>(
-      "/admin/providers",
-    ),
+  providers: () => request<ProviderStatus>("/admin/providers"),
+
+  adminUsers: () => request<AdminUser[]>("/admin/users"),
+
+  createUser: (body: { username: string; password: string; role: Role }) =>
+    request<{ id: string; username: string; role: Role }>("/admin/users", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** In the body, never the query string: the request line is what access
+   *  logs record. */
+  resetPassword: (userId: string, newPassword: string) =>
+    request<{ updated: boolean }>(`/admin/users/${userId}/password`, {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
+
+  setUserActive: (userId: string, active: boolean) =>
+    request<{ active: boolean }>(`/admin/users/${userId}/active?active=${active}`, {
+      method: "POST",
+    }),
+
+  adminJobs: (filters: { state?: string; kind?: string; limit: number; offset: number }) => {
+    const query = new URLSearchParams({ limit: String(filters.limit), offset: String(filters.offset) });
+    if (filters.state) query.set("state", filters.state);
+    if (filters.kind) query.set("kind", filters.kind);
+    return request<AdminJobsPage>(`/admin/jobs?${query}`);
+  },
+
+  jobStats: (days: number) => request<JobStats>(`/admin/jobs/stats?days=${days}`),
+
+  retryJob: (jobId: string) =>
+    request<{ requeued: boolean }>(`/admin/jobs/${jobId}/retry`, { method: "POST" }),
 
   brand: () => request<BrandSettings>("/admin/brand"),
 

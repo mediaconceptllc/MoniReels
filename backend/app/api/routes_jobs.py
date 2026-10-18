@@ -54,10 +54,23 @@ def queue_status(
     Both answer questions that otherwise need a look at the server logs:
     "why has my job not started" is usually another project's long render,
     and "why did the export fail" is often a full disk.
+
+    The disk is named by MACHINE. This used to be one `disk`, measured here —
+    on the API, which renders nothing and shares no filesystem with the
+    worker that does. The worker's own figure arrives through its report
+    (app.worker_report) with the time it was measured, and is null until a
+    worker running this code has said it; the API's stays, under its own
+    name, because a full API disk is a real failure too.
     """
+    from app import worker_report
+
     # The request's own session: `current_user` already holds its connection.
     overview = queue.queue_overview(db=db)
-    overview["disk"] = disk_report()
+    overview["api_disk"] = disk_report()
+    report = worker_report.read(db)
+    overview["worker_disk"] = (
+        {**report.disk, "measured_at": report.at} if report and report.disk else None
+    )
     return overview
 
 

@@ -1,8 +1,11 @@
 """User administration. Admin only."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+import re
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import Float, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from app import r2
@@ -39,7 +42,8 @@ def list_users(db: Session = Depends(get_db)) -> list[dict]:  # noqa: B008
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 def create_user(body: CreateUserIn, db: Session = Depends(get_db)) -> dict:  # noqa: B008
     if db.scalar(select(User).where(User.username == body.username)):
-        raise HTTPException(status_code=409, detail=f"User {body.username!r} already exists")
+        # Said on the form it was typed into, so in the language of the form.
+        raise HTTPException(status_code=409, detail=f"«{body.username}» нэртэй хэрэглэгч аль хэдийн бий.")
     salt, digest = hash_password(body.password)
     user = User(username=body.username, pw_salt=salt, pw_hash=digest, role=body.role)
     db.add(user)
@@ -78,9 +82,23 @@ def set_active(
     # Locking yourself out leaves nobody able to unlock anyone.
     if user.id == principal.id and not active:
         raise HTTPException(status_code=400, detail="Өөрийн бүртгэлээ хаах боломжгүй.")
+    # The rule the line above serves, stated on its own. Today it cannot fire
+    # over HTTP — the caller is an active admin and may not close their own
+    # account — but it is the invariant, and it must survive the day a second
+    # path changes a role or an account is closed some other way.
+    if not active and user.role == "admin" and user.active and not _other_active_admins(db, user.id):
+        raise HTTPException(status_code=400, detail="Сүүлчийн идэвхтэй админыг хаах боломжгүй.")
     user.active = active
     db.commit()
     return {"active": user.active}
+
+
+def _other_active_admins(db: Session, user_id: str) -> int:
+    return db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.role == "admin", User.active.is_(True), User.id != user_id)
+    ) or 0
 
 
 @router.get("/providers")
@@ -118,7 +136,9 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
             client = None
         if client is not None:
             try:
-                stt["account"] = await client.account_info()
+                # Summarised, never echoed: duudlaga's /me answers with the
+                # key itself beside the balance ({"key": "dk_live_…"}).
+                stt["balance"] = balance_summary(await client.account_info())
                 stt["ok"] = True
             except Exception as e:  # noqa: BLE001 - reachability is part of the answer
                 stt["ok"] = False
@@ -153,6 +173,52 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
             "error": settings.r2_config_error,
         },
     }
+
+
+# What a balance is called. An ALLOW-list, not a deny-list: neither provider
+# documents the whole answer, and a field nobody wrote down — an email, a key
+# prefix, a second key — must stay off the page by default rather than leak
+# until someone notices it.
+_BALANCE_NAME = re.compile(
+    r"balance|credit|remain|limit|used|usage|count|spend|quota|tier|plan|reset|currency", re.I
+)
+_PRIVATE_NAME = re.compile(r"key|token|secret|password|email|name|(^|_)id$", re.I)
+BALANCE_MAX_FIELDS = 12
+BALANCE_MAX_TEXT = 40
+
+
+def balance_summary(account: object) -> list[dict]:
+    """The provider's balance and limits as `{name, value}` rows.
+
+    Fetched on every visit to the settings page and then thrown away — the
+    one number that answers "will the next transcription run" never reached
+    the screen. Scalars only, one level of nesting (`limits.daily`), capped,
+    and only under a name that says it is an amount.
+    """
+    if not isinstance(account, dict):
+        return []
+    rows: list[dict] = []
+
+    def visit(prefix: str, value: object, depth: int) -> None:
+        if len(rows) >= BALANCE_MAX_FIELDS:
+            return
+        if isinstance(value, dict):
+            if depth == 0:
+                for name, inner in value.items():
+                    visit(f"{prefix}.{name}", inner, depth + 1)
+            return
+        # The name is checked whole, so a private word anywhere in the path
+        # (`key.limit`) keeps the row off the page.
+        if not _BALANCE_NAME.search(prefix) or any(_PRIVATE_NAME.search(p) for p in prefix.split(".")):
+            return
+        if isinstance(value, bool) or isinstance(value, int | float):
+            rows.append({"name": prefix, "value": value})
+        elif isinstance(value, str) and value and len(value) <= BALANCE_MAX_TEXT:
+            rows.append({"name": prefix, "value": value})
+
+    for name, value in account.items():
+        visit(str(name), value, 0)
+    return rows
 
 
 @router.get("/tts/voices")
@@ -358,35 +424,224 @@ def brand_save(asset: str, body: BrandSaveIn, db: Session = Depends(get_db)) -> 
     return brand_read(db)
 
 
-@router.get("/jobs")
-def recent_jobs(limit: int = 100, db: Session = Depends(get_db)) -> list[dict]:  # noqa: B008
-    from app.jobs import queue
+JOB_STATES = ("queued", "running", "done", "failed", "canceled")
+# Only work that stopped short. A finished job re-run by hand is a second
+# render or, for the metered kinds, a second bill for a result that exists.
+RETRYABLE = ("failed", "canceled")
+JOBS_PAGE_MAX = 200
 
-    rows = db.scalars(select(Job).order_by(Job.created_at.desc()).limit(min(limit, 500))).all()
-    return [queue.to_dict(j) for j in rows]
+
+@router.get("/jobs")
+def list_jobs(
+    state: str | None = None,
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=JOBS_PAGE_MAX),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Every account's jobs, newest first, a page at a time.
+
+    `total` is the count under the same filters, so the page can say how many
+    there are rather than implying that one page is all of them. The project
+    and its owner are named: a job id tells an operator nothing.
+    """
+    from app.jobs import queue
+    from app.jobs.kinds import KINDS
+
+    if state is not None and state not in JOB_STATES:
+        raise HTTPException(status_code=422, detail=f"Тодорхойгүй төлөв: {state}")
+    if kind is not None and kind not in KINDS:
+        raise HTTPException(status_code=422, detail=f"Тодорхойгүй ажлын төрөл: {kind}")
+    filters = []
+    if state is not None:
+        filters.append(Job.state == state)
+    if kind is not None:
+        filters.append(Job.kind == kind)
+
+    total = db.scalar(select(func.count()).select_from(Job).where(*filters)) or 0
+    rows = db.execute(
+        select(Job, Project.name, User.username)
+        .outerjoin(Project, Project.id == Job.project_id)
+        .outerjoin(User, User.id == Project.owner_id)
+        .where(*filters)
+        # The id breaks ties so that paging cannot show a row twice or skip
+        # one when two jobs were queued in the same instant.
+        .order_by(Job.created_at.desc(), Job.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    jobs = []
+    for job, project_name, owner in rows:
+        payload = queue.payload_of(job)
+        jobs.append({
+            **queue.to_dict(job),
+            "project_name": project_name,
+            "owner": owner,
+            "lane": job.lane,
+            "no_retry": job.no_retry,
+            "claimed_by": job.claimed_by,
+            "requeued_at": _number(payload.get("requeued_at")),
+            "retryable": job.state in RETRYABLE,
+        })
+    return {"jobs": jobs, "total": total, "limit": limit, "offset": offset}
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _json_number(element):
+    """A JSONB number as a float, or NULL for anything else — a stray string
+    must cost one sample, not 500 the whole page on a failed cast."""
+    return case((func.jsonb_typeof(element) == "number", cast(element.astext, Float)))
+
+
+@router.get("/jobs/stats")
+def job_stats(
+    days: int = Query(7, ge=1, le=365),
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """How the queue has been doing: success rate, run time, time waiting.
+
+    Measured from the rows themselves, so the window cannot be longer than
+    the rows are kept (`job_keep_days`); the answer says which window it
+    actually used.
+
+    - Success is done / (done + failed). A cancel is a person's decision,
+      not a failure, so it is counted beside the rate and never inside it.
+    - Run time is the successful attempt's own `elapsed_sec`, as the worker
+      measured it around the handler.
+    - Waiting is from the request — or an admin's requeue — to the start of
+      the run that finished it. Only jobs that succeeded on their FIRST
+      attempt count: for the rest, the gap also holds an earlier failed run
+      and the stale-heartbeat timeout, which is not time spent in a queue.
+    """
+    from app.config import get_settings
+    from app.jobs import queue
+    from app.jobs.kinds import KINDS
+
+    keep_days = get_settings().job_keep_days
+    window = min(days, keep_days)
+    now = time.time()
+    since = now - window * 86400
+
+    elapsed = _json_number(Job.result["output"]["elapsed_sec"])
+    queued_at = func.greatest(Job.created_at, _json_number(Job.result["payload"]["requeued_at"]))
+    wait = func.greatest(Job.finished_at - queued_at - elapsed, 0.0)
+    is_done = Job.state == "done"
+    first_try = is_done & (Job.attempts == 1) & elapsed.is_not(None)
+
+    def p(fraction: float, when, value):
+        # percentile_cont ignores NULLs, so a CASE without ELSE is a filter.
+        return func.percentile_cont(fraction).within_group(case((when, value)))
+
+    columns = [
+        func.count().filter(is_done).label("done"),
+        func.count().filter(Job.state == "failed").label("failed"),
+        func.count().filter(Job.state == "canceled").label("canceled"),
+        p(0.5, is_done, elapsed).label("run_p50"),
+        p(0.95, is_done, elapsed).label("run_p95"),
+        p(0.5, first_try, wait).label("wait_p50"),
+        p(0.95, first_try, wait).label("wait_p95"),
+        func.count().filter(first_try).label("wait_samples"),
+    ]
+    settled = (Job.state.in_(("done", "failed", "canceled")), Job.finished_at >= since)
+
+    overall = db.execute(select(*columns).where(*settled)).one()
+    per_kind = db.execute(select(Job.kind, *columns).where(*settled).group_by(Job.kind)).all()
+    order = {k: i for i, k in enumerate(KINDS)}
+    per_kind = sorted(per_kind, key=lambda row: (order.get(row.kind, len(order)), row.kind))
+
+    overview = queue.queue_overview(db=db)
+    oldest = db.scalar(select(func.min(queued_at)).where(Job.state == "queued"))
+    return {
+        "days": window,
+        "keep_days": keep_days,
+        "overall": _stats_row(overall),
+        "kinds": [{"kind": row.kind, **_stats_row(row)} for row in per_kind],
+        "queue": {
+            "waiting": overview["waiting"],
+            "running": overview["counts"].get("running", 0),
+            "live_workers": overview["live_workers"],
+            "stalled": overview["stalled"],
+            "oldest_waiting_sec": round(max(0.0, now - oldest), 1) if oldest is not None else None,
+        },
+    }
+
+
+def _stats_row(row) -> dict:
+    def sec(value: float | None) -> float | None:
+        return round(float(value), 1) if value is not None else None
+
+    decided = row.done + row.failed
+    return {
+        "done": row.done,
+        "failed": row.failed,
+        "canceled": row.canceled,
+        # Null, not 0 or 100, when nothing finished: a rate from no samples
+        # is not a rate.
+        "success_pct": round(100.0 * row.done / decided, 1) if decided else None,
+        "run_p50_sec": sec(row.run_p50),
+        "run_p95_sec": sec(row.run_p95),
+        "wait_p50_sec": sec(row.wait_p50),
+        "wait_p95_sec": sec(row.wait_p95),
+        "wait_samples": row.wait_samples,
+    }
 
 
 @router.post("/jobs/{job_id}/retry")
 def retry_job(job_id: str, db: Session = Depends(get_db)) -> dict:  # noqa: B008
-    """Return a failed job to the queue by hand.
+    """Return a failed or canceled job to the queue by hand.
 
     Automatic recovery runs inside the worker's own loop, so when a worker
     dies the recovery dies with it. This is the escape hatch that does not
-    depend on the thing that broke.
+    depend on the thing that broke — and the human decision the metered
+    kinds (`no_retry`) were failed to wait for.
     """
+    from app.jobs import queue
+
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
-    if job.state in ("queued", "running"):
-        raise HTTPException(status_code=400, detail=f"Job is already {job.state}")
+    if job.state not in RETRYABLE:
+        raise HTTPException(
+            status_code=400,
+            detail="Зөвхөн амжилтгүй болсон эсвэл цуцлагдсан ажлыг дахин эхлүүлнэ.",
+        )
+    # A settled job gave up its dedupe key, so nothing else stops this from
+    # running beside the same work started again since — two transcriptions
+    # of one project, writing the same transcript. The live one wins.
+    if job.project_id is not None:
+        twin = db.scalar(
+            select(Job.id).where(
+                Job.project_id == job.project_id,
+                Job.kind == job.kind,
+                Job.state.in_(queue.ACTIVE_STATES),
+            )
+        )
+        if twin is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Энэ төслийн ижил ажил аль хэдийн дараалалд эсвэл явж байна.",
+            )
+    now = time.time()
     job.state = "queued"
     job.attempts = 0
     job.error = None
     job.progress = 0.0
     job.stage = ""
-    job.message = "Requeued by an administrator"
+    job.message = "Админ дахин эхлүүлсэн"
     job.claimed_by = None
     job.heartbeat_at = None
     job.finished_at = None
+    # A canceled job keeps its flag otherwise, and the handle of the very run
+    # this starts reads it and stops on the first progress tick.
+    job.cancel_requested = False
+    job.updated_at = now
+    # In the payload because that is the part `finish` keeps (handlers read
+    # only the keys they know): the statistics measure this run's wait from
+    # here, not from a request days old. The failed run's output goes — it
+    # would read as this run's while the job waits.
+    job.result = {"payload": {**queue.payload_of(job), "requeued_at": now}}
     db.commit()
     return {"requeued": True}

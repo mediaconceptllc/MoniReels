@@ -38,10 +38,12 @@ import contracts from "../.shape/contracts.json";
 import registry from "../.shape/registry.json";
 import { JOB_LABELS, STAGE_LABELS } from "../src/lib/jobs";
 import type {
+  AdminJobsPage,
+  AdminUser,
   BrandSettings,
-  Capability,
   CreateProjectResponse,
   Job,
+  JobStats,
   Me,
   Output,
   Project,
@@ -50,6 +52,7 @@ import type {
   ProjectVoices,
   ProviderReadiness,
   ProviderSettings,
+  ProviderStatus,
   QueueStatus,
   SubtitleFonts,
   SubtitleTemplate,
@@ -80,16 +83,12 @@ const brandEmpty = contracts.brand_empty as BrandSettings;
 const fonts = contracts.fonts as SubtitleFonts;
 const templateSaved = contracts.template_saved as SubtitleTemplate;
 
-/**
- * The admin providers view, declared inline in api.ts rather than in types.ts
- * — which is exactly why it needs pinning here: an inline type has no other
- * reader to notice it drifting.
- */
-const providers = contracts.providers as {
-  capabilities: Capability[];
-  stt_providers: string[];
-  stt: { provider: string };
-};
+const providers = contracts.providers as ProviderStatus;
+
+// The admin's own screens: accounts, the queue's jobs and how it has done.
+const adminUsers = contracts.admin_users as AdminUser[];
+const adminJobs = contracts.admin_jobs as AdminJobsPage;
+const jobStats = contracts.admin_job_stats as JobStats;
 
 /** The small write-path answers. Each one is a single field, and a single
  *  field is what a rename removes entirely. */
@@ -118,6 +117,10 @@ const writes = {
   templates: contracts.templates as { templates: SubtitleTemplate[] },
   brand_saved: contracts.brand_saved as BrandSettings,
   project_patched: contracts.project_patched as ProjectDocument,
+  admin_user_created: contracts.admin_user_created as { id: string; username: string; role: string },
+  admin_password_reset: contracts.admin_password_reset as { updated: boolean },
+  admin_user_active: contracts.admin_user_active as { active: boolean },
+  admin_job_retried: contracts.admin_job_retried as { requeued: boolean },
 };
 
 /* ------------------------------------------------------------------ *
@@ -257,9 +260,12 @@ const present: unknown[] = [
   raw.job_voiced.result.voice.beds_cached,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
   // The disk block answers "will the next export fit" — the question that
-  // used to require reading the worker's logs.
-  raw.queue.disk.free_bytes, raw.queue.disk.total_bytes,
-  raw.queue.disk.used_bytes, raw.queue.disk.min_free_bytes,
+  // used to require reading the worker's logs. Two machines, named: the
+  // worker's disk is the one a render fills.
+  raw.queue.api_disk.free_bytes, raw.queue.api_disk.total_bytes,
+  raw.queue.api_disk.used_bytes, raw.queue.api_disk.min_free_bytes,
+  raw.queue.worker_disk.free_bytes, raw.queue.worker_disk.total_bytes,
+  raw.queue.worker_disk.min_free_bytes, raw.queue.worker_disk.measured_at,
 
   // provider settings: the VALUE never crosses this boundary, only where it
   // came from and enough of a tail to tell two keys apart.
@@ -289,7 +295,31 @@ const present: unknown[] = [
     c.name, c.label, c.ready, c.blocked, c.provider, c.powers, c.configured,
     c.implemented,
   ]),
-  raw.providers.stt_providers, raw.providers.stt.provider,
+  raw.providers.stt_providers, raw.providers.stt.provider, raw.providers.stt.ok,
+  // The recogniser's balance — fetched on every visit and, until it was
+  // read here, thrown away.
+  raw.providers.stt.balance.map((b) => [b.name, b.value]),
+
+  // the admin's users screen
+  raw.admin_users.map((u) => [u.id, u.username, u.role, u.active, u.created_at, u.projects]),
+  raw.admin_user_created.id, raw.admin_password_reset.updated,
+  raw.admin_user_active.active,
+  // the admin's jobs screen
+  raw.admin_jobs.total, raw.admin_jobs.limit, raw.admin_jobs.offset,
+  raw.admin_jobs.jobs.map((j) => [
+    j.job_id, j.kind, j.state, j.error, j.attempts, j.created_at, j.finished_at,
+    j.project_name, j.owner, j.no_retry, j.requeued_at, j.retryable, j.result,
+  ]),
+  raw.admin_job_retried.requeued,
+  raw.admin_job_stats.days, raw.admin_job_stats.keep_days,
+  [raw.admin_job_stats.overall, ...raw.admin_job_stats.kinds].map((r) => [
+    r.done, r.failed, r.canceled, r.success_pct, r.run_p50_sec, r.run_p95_sec,
+    r.wait_p50_sec, r.wait_p95_sec, r.wait_samples,
+  ]),
+  raw.admin_job_stats.kinds.map((k) => k.kind),
+  raw.admin_job_stats.queue.waiting, raw.admin_job_stats.queue.running,
+  raw.admin_job_stats.queue.live_workers, raw.admin_job_stats.queue.stalled,
+  raw.admin_job_stats.queue.oldest_waiting_sec,
 
   // brand assets, empty and filled
   raw.brand.storage, raw.brand.logo.key, raw.brand.logo.url,
@@ -367,5 +397,5 @@ void [
   token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices,
   projectVoices, queue,
   providerSettings, readiness, brand, brandEmpty, fonts, templateSaved,
-  providers, writes, present,
+  providers, adminUsers, adminJobs, jobStats, writes, present,
 ];

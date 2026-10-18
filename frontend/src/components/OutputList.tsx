@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
-import { OUTPUT_KIND_LABELS, fileSize } from "@/lib/format";
+import { OUTPUT_KIND_LABELS, duration, fileSize } from "@/lib/format";
 import type { Output } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, TAP } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -71,6 +71,12 @@ export function OutputList({
               </p>
               <div className="flex items-center gap-2">
                 <Badge tone="accent">{OUTPUT_KIND_LABELS[output.kind] ?? output.kind}</Badge>
+                {/* 0 is "not measured" — every output rendered before the
+                    worker probed its files — so it is left out, not shown
+                    as a length. */}
+                {output.duration_sec > 0 && (
+                  <span className="tabular text-xs text-ink-3">{duration(output.duration_sec)}</span>
+                )}
                 <span className="tabular text-xs text-ink-3">{fileSize(output.size_bytes)}</span>
               </div>
             </div>

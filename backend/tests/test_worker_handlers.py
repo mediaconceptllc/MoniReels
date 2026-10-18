@@ -951,6 +951,35 @@ def test_a_retried_export_does_not_list_its_videos_twice(world, project, db):
     assert len({row.r2_key for row in rows}) == 6
 
 
+def test_each_output_records_how_long_its_own_file_plays(world, project, db, monkeypatch):
+    """`duration_sec` sat at 0.0 on every output. It is probed on the file
+    that was rendered — a crossfade, an intro and the encoder all move it
+    away from the sum of the cut ranges — and 0.0 stays the column's "not
+    measured" when ffprobe cannot read the file, which still ships."""
+    from app import worker
+    from app.dbmodels import Output
+    from app.video.probe import ProbeError
+
+    measured = {"short_1.mp4": 31.25, "short_2.mp4": 47.5}
+
+    async def probe(ffprobe, path):
+        if Path(path).name not in measured:
+            raise ProbeError("unreadable")
+        return {**PROBE, "duration_sec": measured[Path(path).name]}
+
+    monkeypatch.setattr(worker, "probe_video", probe)
+    _ready_to_render(db, project.id, clips=False, suggestions=_suggestions())
+    world.r2.put(f"sources/{project.id}/source.mp4")
+
+    asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    db.expire_all()
+    rows = db.query(Output).filter(Output.project_id == project.id).order_by(Output.r2_key).all()
+    assert [row.duration_sec for row in rows] == [31.25, 47.5, 0.0]
+    # Not the source's length (120s), which is what a careless fill would use.
+    assert PROBE["duration_sec"] not in [row.duration_sec for row in rows]
+
+
 def test_export_all_without_suggestions_is_refused(world, project, db):
     from app import worker
 
@@ -1890,6 +1919,30 @@ def test_the_worker_says_what_it_can_do(db, monkeypatch):
     assert report is not None and report.separation is True
     assert report.model == worker.get_settings().demucs_model
     assert db.query(worker_report.Setting).filter_by(key=worker_report.KEY).count() == 1
+    # Its own disk, measured where the renders are written — the API's is a
+    # different machine's.
+    assert set(report.disk) == set(worker_report.DISK_FIELDS)
+    assert report.disk["total_bytes"] >= report.disk["free_bytes"] > 0
+
+
+@pytest.mark.parametrize("disk", [
+    None, "full", {"free_bytes": 10}, {"free_bytes": -1, "total_bytes": 9, "min_free_bytes": 0},
+    {"free_bytes": True, "total_bytes": 9, "min_free_bytes": 0},
+])
+def test_a_bad_disk_figure_costs_only_the_disk_figure(db, disk):
+    """The separation answer gates an export; a disk number written by an
+    older or broken worker must not turn it into "unknown"."""
+    import json
+
+    from app import worker_report
+
+    value = {"separation": True, "model": "htdemucs", "at": 1.0}
+    if disk is not None:
+        value["disk"] = disk
+    db.add(worker_report.Setting(key=worker_report.KEY, value=json.dumps(value), updated_at=0.0))
+    db.commit()
+    report = worker_report.read(db)
+    assert report is not None and report.separation is True and report.disk is None
 
 
 @pytest.mark.parametrize("value", [

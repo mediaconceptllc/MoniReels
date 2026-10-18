@@ -27,6 +27,7 @@ export function ConfirmDialog({
   busy = false,
   onConfirm,
   onCancel,
+  undo,
   children,
 }: {
   title: string;
@@ -36,6 +37,10 @@ export function ConfirmDialog({
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /** What undoes this, for the few confirmed actions something does undo.
+   *  Said in place of "cannot be undone", which would be false there — and a
+   *  warning that is sometimes false teaches people to skip all of them. */
+  undo?: string;
   /** What the run will ask for and charge, set in the same place it is
    *  confirmed — a new set of ideas is chosen here, not before. */
   children?: ReactNode;
@@ -85,7 +90,7 @@ export function ConfirmDialog({
           </div>
         )}
 
-        <p className="text-sm text-ink-3">Энэ үйлдлийг буцаах боломжгүй.</p>
+        <p className="text-sm text-ink-3">{undo ?? "Энэ үйлдлийг буцаах боломжгүй."}</p>
 
         <div className="flex flex-wrap justify-end gap-2">
           <Button ref={cancelRef} onClick={onCancel}>

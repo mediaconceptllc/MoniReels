@@ -1,4 +1,176 @@
 {
+  "admin_job_retried": {
+    "requeued": false
+  },
+  "admin_job_stats": {
+    "days": 0,
+    "keep_days": 0,
+    "kinds": [
+      {
+        "canceled": 0,
+        "done": 0,
+        "failed": 0,
+        "kind": "export_all",
+        "run_p50_sec": 0.0,
+        "run_p95_sec": 0.0,
+        "success_pct": 0.0,
+        "wait_p50_sec": 0.0,
+        "wait_p95_sec": 0.0,
+        "wait_samples": 0
+      },
+      {
+        "canceled": 0,
+        "done": 0,
+        "failed": 0,
+        "kind": "suggest",
+        "run_p50_sec": 0.0,
+        "run_p95_sec": 0.0,
+        "success_pct": 0.0,
+        "wait_p50_sec": 0.0,
+        "wait_p95_sec": 0.0,
+        "wait_samples": 0
+      }
+    ],
+    "overall": {
+      "canceled": 0,
+      "done": 0,
+      "failed": 0,
+      "run_p50_sec": 0.0,
+      "run_p95_sec": 0.0,
+      "success_pct": 0.0,
+      "wait_p50_sec": 0.0,
+      "wait_p95_sec": 0.0,
+      "wait_samples": 0
+    },
+    "queue": {
+      "live_workers": 0,
+      "oldest_waiting_sec": null,
+      "running": 0,
+      "stalled": false,
+      "waiting": 0
+    }
+  },
+  "admin_jobs": {
+    "jobs": [
+      {
+        "attempts": 0,
+        "claimed_by": null,
+        "created_at": 0.0,
+        "error": "",
+        "finished_at": null,
+        "job_id": "",
+        "kind": "export",
+        "lane": "",
+        "message": "",
+        "no_retry": false,
+        "owner": "",
+        "progress": 0.0,
+        "project_id": "",
+        "project_name": "",
+        "requeued_at": null,
+        "result": {
+          "elapsed_sec": 0.0
+        },
+        "retryable": false,
+        "stage": "",
+        "state": "failed",
+        "updated_at": 0.0
+      },
+      {
+        "attempts": 0,
+        "claimed_by": null,
+        "created_at": 0.0,
+        "error": null,
+        "finished_at": 0.0,
+        "job_id": "",
+        "kind": "export_all",
+        "lane": "",
+        "message": "",
+        "no_retry": false,
+        "owner": "",
+        "progress": 0.0,
+        "project_id": "",
+        "project_name": "",
+        "requeued_at": null,
+        "result": {
+          "elapsed_sec": 0.0,
+          "voice": {
+            "bed_seconds": 0.0,
+            "beds_cached": 0,
+            "beds_separated": 0,
+            "cached": 0,
+            "characters": 0,
+            "cut": 0,
+            "lines": 0,
+            "missing": 0,
+            "sped_up": 0,
+            "synthesized": 0
+          }
+        },
+        "retryable": false,
+        "stage": "",
+        "state": "done",
+        "updated_at": 0.0
+      },
+      {
+        "attempts": 0,
+        "claimed_by": null,
+        "created_at": 0.0,
+        "error": null,
+        "finished_at": 0.0,
+        "job_id": "",
+        "kind": "suggest",
+        "lane": "",
+        "message": "",
+        "no_retry": false,
+        "owner": "",
+        "progress": 0.0,
+        "project_id": "",
+        "project_name": "",
+        "requeued_at": null,
+        "result": {
+          "elapsed_sec": 0.0,
+          "llm": {
+            "calls": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "models": [
+              ""
+            ],
+            "prompt_tokens": 0
+          }
+        },
+        "retryable": false,
+        "stage": "",
+        "state": "done",
+        "updated_at": 0.0
+      }
+    ],
+    "limit": 0,
+    "offset": 0,
+    "total": 0
+  },
+  "admin_password_reset": {
+    "updated": false
+  },
+  "admin_user_active": {
+    "active": false
+  },
+  "admin_user_created": {
+    "id": "",
+    "role": "editor",
+    "username": ""
+  },
+  "admin_users": [
+    {
+      "active": false,
+      "created_at": 0.0,
+      "id": "",
+      "projects": 0,
+      "role": "admin",
+      "username": ""
+    }
+  ],
   "brand": {
     "intro": null,
     "logo": {
@@ -761,8 +933,13 @@
       "error": null
     },
     "stt": {
+      "balance": [
+        {
+          "name": "",
+          "value": 0.0
+        }
+      ],
       "configured": false,
-      "error": "",
       "ok": false,
       "provider": ""
     },
@@ -771,18 +948,24 @@
     ]
   },
   "queue": {
-    "counts": {
-      "*": 0
-    },
-    "disk": {
+    "api_disk": {
       "free_bytes": 0,
       "min_free_bytes": 0,
       "total_bytes": 0,
       "used_bytes": 0
     },
+    "counts": {
+      "*": 0
+    },
     "live_workers": 0,
     "stalled": false,
-    "waiting": 0
+    "waiting": 0,
+    "worker_disk": {
+      "free_bytes": 0,
+      "measured_at": 0.0,
+      "min_free_bytes": 0,
+      "total_bytes": 0
+    }
   },
   "ranges_selected": {
     "clips": 0

@@ -19,7 +19,7 @@ import { JOB_LABELS } from "@/lib/jobs";
 import type { Job, JobState, ProjectSpend } from "@/lib/types";
 import { Badge, TAP } from "@/components/ui";
 
-const STATE_LABEL: Record<JobState, string> = {
+export const STATE_LABEL: Record<JobState, string> = {
   queued: "Дараалалд",
   running: "Явж байна",
   done: "Дууссан",
@@ -27,7 +27,7 @@ const STATE_LABEL: Record<JobState, string> = {
   canceled: "Цуцлагдсан",
 };
 
-function stateTone(state: JobState): "fit" | "warn" | "danger" | "accent" | "default" {
+export function stateTone(state: JobState): "fit" | "warn" | "danger" | "accent" | "default" {
   if (state === "done") return "fit";
   if (state === "failed") return "danger";
   if (state === "running") return "accent";
