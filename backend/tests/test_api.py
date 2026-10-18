@@ -2269,6 +2269,140 @@ def test_the_speakers_voice_list_needs_a_login(client):
 
 
 # ---------------------------------------------------------------------------
+# Concurrency: one connection per request, and no lost updates
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def connections():
+    """The most connections any single request held at once."""
+    from sqlalchemy import event
+
+    from app.db import get_engine
+
+    pool = get_engine().pool
+    state = {"now": 0, "peak": 0}
+
+    def out(*_):
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+
+    def back(*_):
+        state["now"] -= 1
+
+    event.listen(pool, "checkout", out)
+    event.listen(pool, "checkin", back)
+    yield state
+    event.remove(pool, "checkout", out)
+    event.remove(pool, "checkin", back)
+
+
+def test_a_request_holds_one_database_connection_at_a_time(client, db, connections, monkeypatch):
+    """A request's session holds its connection from `current_user` on. The
+    queue helpers used to open a SECOND one, so ten concurrent requests each
+    held one and waited for another: the pool (5 + 5) deadlocked for 30 s
+    and every one of them answered 500."""
+    from app import r2
+
+    monkeypatch.setattr(r2, "exists", lambda key: True)
+    owner = _user(db, "onepool")
+    auth = _auth(client, "onepool")
+    row = _project_with_video(db, owner)
+    row.video_key = "sources/x/source.mp4"
+    db.commit()
+    db.close()
+
+    calls = [
+        ("GET", f"/projects/{row.id}"),
+        ("GET", "/jobs/queue"),
+        ("POST", f"/projects/{row.id}/upload-complete"),
+    ]
+    for method, path in calls:
+        connections["peak"] = connections["now"] = 0
+        response = client.request(method, path, headers=auth)
+        assert response.status_code < 300, (path, response.text)
+        assert connections["peak"] == 1, f"{method} {path} held {connections['peak']} connections"
+
+    job_id = client.get(f"/projects/{row.id}", headers=auth).json()["jobs"][0]["job_id"]
+    connections["peak"] = connections["now"] = 0
+    assert client.post(f"/jobs/{job_id}/cancel", headers=auth).json()["canceled"] is True
+    assert connections["peak"] == 1
+
+
+def test_a_document_edit_waits_for_a_write_in_progress_instead_of_undoing_it(client, db):
+    """The document is saved whole. A PATCH that read it while a worker was
+    writing its result used to save the old copy back over that result — the
+    job read "done", and its suggestions were gone. Every read-modify-write
+    now locks the row, so the PATCH waits and then edits what is there."""
+    import threading
+
+    from app.db import get_session_factory
+    from app.models import Suggestions
+    from app.store import get_row, load, save, to_domain
+
+    owner = _user(db, "lockowner")
+    row = _project_with_video(db, owner)
+    project = to_domain(row)
+    project.transcript = Transcript(
+        language="mn", segments=[Segment(id="s1", start=0, end=1, text="сайн")], full_text="сайн"
+    )
+    save(db, project)
+    db.commit()
+    auth = _auth(client, "lockowner")
+
+    worker = get_session_factory()()  # a worker's write-back, mid-transaction
+    written = load(worker, row.id, for_update=True)
+    written.suggestions = Suggestions(shorts=[], requested_shorts=7)  # the worker's result
+    save(worker, written)
+
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(
+        response=client.patch(f"/projects/{row.id}", json={"export": {"crf": 30}}, headers=auth)
+    ))
+    thread.start()
+    thread.join(timeout=0.5)
+    assert thread.is_alive(), "the PATCH should be waiting for the row lock"
+
+    worker.commit()
+    worker.close()
+    thread.join(timeout=10)
+    assert result["response"].status_code == 200
+
+    db.expire_all()
+    final = to_domain(get_row(db, row.id))
+    assert final.export.crf == 30
+    assert final.suggestions is not None and final.suggestions.requested_shorts == 7
+
+
+def test_every_document_save_locks_the_row_it_read():
+    """A rule, not a list: any function in app/ that saves a project document
+    must have read it with `for_update=True` (creating a new project is the
+    one exception — there is nothing to race with)."""
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("app").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+            saves = [c for c in calls if c.func.id == "save"
+                     and not any(k.arg == "owner_id" for k in c.keywords)]
+            if not saves or path.name == "store.py":
+                continue
+            locked = any(
+                c.func.id in ("load", "get_row")
+                and any(k.arg == "for_update" and getattr(k.value, "value", None) is True for k in c.keywords)
+                for c in calls
+            )
+            if not locked:
+                offenders.append(f"{path}:{fn.name}")
+    assert offenders == []
+
+
+# ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
 

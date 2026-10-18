@@ -145,7 +145,7 @@ def upload_complete(
         )
 
     job_id = queue.enqueue(
-        "import_video", project_id=project_id, dedupe_key=f"import:{project_id}"
+        "import_video", project_id=project_id, dedupe_key=f"import:{project_id}", db=db
     )
     return UploadCompleteOut(project_id=project_id, job_id=job_id)
 
@@ -206,7 +206,7 @@ def get_project(
     # Deep enough to BE a history: ten rows is three exports and a retry, and
     # the question this answers — "what ran yesterday, how long did it take,
     # what did it cost" — needs more than the last afternoon.
-    data["jobs"] = queue.list_for_project(project_id, limit=JOB_HISTORY_LIMIT)
+    data["jobs"] = queue.list_for_project(project_id, limit=JOB_HISTORY_LIMIT, db=db)
     data["job_history_limit"] = JOB_HISTORY_LIMIT
     # The range the picker offers, from the same rule the route enforces. A
     # client that worked it out for itself would be a second copy of the rule,
@@ -253,7 +253,7 @@ def update_project(
     loaded. Only fields actually present in the request are applied.
     """
     try:
-        project = load(db, project_id, principal.id)
+        project = load(db, project_id, principal.id, for_update=True)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
@@ -297,7 +297,7 @@ def update_transcript(
     shifted boundary would silently move every cut.
     """
     try:
-        project = load(db, project_id, principal.id)
+        project = load(db, project_id, principal.id, for_update=True)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     if project.transcript is None:
@@ -347,7 +347,7 @@ def select_ranges(
     """Build the timeline from explicit ranges — the "cut it myself" path
     alongside exporting the AI's suggestions."""
     try:
-        project = load(db, project_id, principal.id)
+        project = load(db, project_id, principal.id, for_update=True)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     if project.video is None:
@@ -383,7 +383,7 @@ def delete_project(
 
     # Queued work is cancelled FIRST: a worker that claimed a job for a
     # project that no longer exists just fails noisily for no reason.
-    queue.drop_project_jobs(project_id)
+    queue.drop_project_jobs(project_id, db=db)
     db.delete(row)
     db.commit()
 
@@ -515,7 +515,7 @@ def transcribe(
     _require_recogniser_for(db, project.language)
     return {
         "job_id": queue.enqueue(
-            "transcribe", project_id=project_id, dedupe_key=f"transcribe:{project_id}"
+            "transcribe", project_id=project_id, dedupe_key=f"transcribe:{project_id}", db=db
         )
     }
 
@@ -552,6 +552,7 @@ def translate(
             project_id=project_id,
             payload={"force": bool(body and body.force), "scope": scope},
             dedupe_key=f"translate:{project_id}",
+            db=db,
         )
     }
 
@@ -603,6 +604,7 @@ def suggest(
             project_id=project_id,
             payload={"shorts": shorts, "youtube": youtube},
             dedupe_key=f"suggest:{project_id}",
+            db=db,
         )
     }
 
@@ -806,6 +808,7 @@ def export_all(
             project_id=project_id,
             payload={"pick": pick} if pick else None,
             dedupe_key=f"export_all:{project_id}:{digest}",
+            db=db,
         )
     }
 
@@ -823,7 +826,7 @@ def export_timeline(
     _require_voice_ready(db, project)
     # No dedupe key: re-exporting the same timeline after changing render
     # settings is a normal thing to want, unlike re-running a paid stage.
-    return {"job_id": queue.enqueue("export", project_id=project_id)}
+    return {"job_id": queue.enqueue("export", project_id=project_id, db=db)}
 
 
 # ---------------------------------------------------------------------------

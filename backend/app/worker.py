@@ -143,7 +143,7 @@ async def handle_import_video(handle: JobHandle) -> dict:
     await asyncio.to_thread(r2.upload_file, thumb, thumb_key, "image/jpeg")
 
     with session_scope() as db:
-        project = load(db, _project_id(handle))
+        project = load(db, _project_id(handle), for_update=True)
         project.video = VideoMeta(
             source_key=source_key,
             duration_sec=raw["duration_sec"],
@@ -224,7 +224,7 @@ async def handle_transcribe(handle: JobHandle) -> dict:
         await asyncio.to_thread(r2.upload_file, srt_path, srt_key, "text/plain; charset=utf-8")
 
     with session_scope() as db:
-        project = load(db, _project_id(handle))
+        project = load(db, _project_id(handle), for_update=True)
         project.transcript = transcript
         save(db, project)
 
@@ -289,7 +289,7 @@ async def handle_suggest(handle: JobHandle) -> dict:
     handle.raise_if_cancelled()
 
     with session_scope() as db:
-        project = load(db, _project_id(handle))
+        project = load(db, _project_id(handle), for_update=True)
         project.suggestions = suggestions
         save(db, project)
 
@@ -407,7 +407,7 @@ async def handle_translate(handle: JobHandle) -> dict:
     fresh = {s.id: s for s in translated.segments}
     applied = kept = 0
     with session_scope() as db:
-        project = load(db, _project_id(handle))
+        project = load(db, _project_id(handle), for_update=True)
         if project.transcript is None:
             raise RuntimeError("The transcript was removed while it was being translated")
         for seg in project.transcript.segments:
@@ -750,7 +750,17 @@ async def _heartbeat_loop(handle: JobHandle) -> None:
     try:
         while True:
             await asyncio.sleep(HEARTBEAT_SEC)
-            await handle.flush()
+            try:
+                await handle.flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - see below
+                # One failed write must not end liveness for good. It used
+                # to: the loop died on the first database error, the row went
+                # stale, and the reaper handed a job that was still running
+                # to another worker — two renders in one folder, or a paid
+                # run failed and bought again.
+                logger.warning("Heartbeat for job %s failed; retrying", handle.job_id, exc_info=True)
     except asyncio.CancelledError:
         pass
 
@@ -760,7 +770,8 @@ def _elapsed(started: float) -> float:
 
 
 async def _run_job(job) -> None:
-    handle = JobHandle(job.id, job.kind, job.project_id, queue.payload_of(job))
+    handle = JobHandle(job.id, job.kind, job.project_id, queue.payload_of(job), attempt=job.attempts)
+    settle = functools.partial(queue.finish, job.id, attempt=job.attempts)
     usage = llm_usage.start()
     beat = asyncio.create_task(_heartbeat_loop(handle))
     started = time.time()
@@ -772,7 +783,7 @@ async def _run_job(job) -> None:
         result = await HANDLERS[job.kind](handle)
 
         if handle.cancel_requested:
-            await asyncio.to_thread(queue.finish, job.id, state="canceled")
+            await asyncio.to_thread(settle, state="canceled")
             return
 
         output = dict(result or {})
@@ -781,25 +792,21 @@ async def _run_job(job) -> None:
         # says "no paid call", which a zero would not.
         if usage.calls:
             output["llm"] = usage.to_dict()
-        await asyncio.to_thread(queue.finish, job.id, state="done", output=output)
+        await asyncio.to_thread(settle, state="done", output=output)
 
     except JobCancelled:
-        await asyncio.to_thread(
-            queue.finish, job.id, state="canceled", output={"elapsed_sec": _elapsed(started)}
-        )
+        await asyncio.to_thread(settle, state="canceled", output={"elapsed_sec": _elapsed(started)})
     except OutOfSpace as e:
         logger.warning("Job %s (%s) deferred: %s", job.id, job.kind, e)
         await asyncio.to_thread(
-            queue.finish,
-            job.id,
+            settle,
             state="failed",
             error=str(e),
             output={"elapsed_sec": _elapsed(started)},
         )
     except ProjectNotFound:
         await asyncio.to_thread(
-            queue.finish,
-            job.id,
+            settle,
             state="failed",
             error="The project was deleted",
             output={"elapsed_sec": _elapsed(started)},
@@ -808,8 +815,7 @@ async def _run_job(job) -> None:
         logger.exception("Job %s (%s) failed", job.id, job.kind)
         last_attempt = job.no_retry or job.attempts >= MAX_ATTEMPTS or _retry_cannot_help(e)
         await asyncio.to_thread(
-            queue.finish,
-            job.id,
+            settle,
             state="failed" if last_attempt else "queued",
             error=f"{type(e).__name__}: {e}",
             # How long it ran before it broke. Recorded for every settlement,
@@ -920,6 +926,7 @@ async def _drain(running: dict[asyncio.Task, Any], grace_s: int) -> None:
             job.id,
             requeue=requeue,
             reason="The worker was stopped by a deploy before this job finished.",
+            attempt=job.attempts,
         )
         if not settled:
             # It finished in the moment between the timeout and this call.
