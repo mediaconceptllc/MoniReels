@@ -176,3 +176,30 @@ async def test_a_pass_with_nothing_to_reap_says_nothing(monkeypatch, caplog):
         await worker._housekeeping(settings)
 
     assert not [r for r in caplog.records if "stopped responding" in r.getMessage()]
+
+
+def test_the_heartbeat_survives_a_database_error(monkeypatch):
+    """One failed write used to end the heartbeat for good: the row went
+    stale and the reaper handed a job that was still running to another
+    worker. The loop now logs and keeps beating."""
+    from app import worker
+
+    monkeypatch.setattr(worker, "HEARTBEAT_SEC", 0.01)
+    beats = {"n": 0}
+
+    class Handle:
+        job_id = "j1"
+
+        async def flush(self):
+            beats["n"] += 1
+            if beats["n"] == 1:
+                raise RuntimeError("server closed the connection unexpectedly")
+
+    async def run():
+        task = asyncio.create_task(worker._heartbeat_loop(Handle()))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        await task
+
+    asyncio.run(run())
+    assert beats["n"] >= 3

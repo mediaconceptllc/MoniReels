@@ -196,11 +196,23 @@ async def capabilities(request: Request) -> dict:
 
 def main() -> None:
     settings = get_settings()
+    # Before uvicorn starts, so its own lines ("Started server process",
+    # "Exception in ASGI application" tracebacks) go through the same stdout
+    # handler as the app's. With uvicorn's default config they went to
+    # stderr, which the platform files as severity "error" — every startup
+    # read as a failure.
+    setup_logging()
     uvicorn.run(
         app,
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level.lower(),
+        log_config=None,
+        # The `audit` middleware already writes one line per request, with
+        # the client address read the safe way (security.client_ip). uvicorn's
+        # access line would be a second one that includes the query string
+        # and the first, client-chosen X-Forwarded-For hop.
+        access_log=False,
         # Railway terminates TLS and forwards X-Forwarded-*; without this
         # uvicorn reports every client as the proxy's own address.
         proxy_headers=True,

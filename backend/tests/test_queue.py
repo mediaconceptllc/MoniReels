@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.dbmodels import Job, Project, User
 from app.jobs import queue
@@ -247,3 +247,97 @@ def test_a_reaping_pass_reports_requeued_and_failed_apart(db, project):
 def test_a_pass_that_found_nothing_is_falsy(db, project):
     """The worker logs only when there is something to say."""
     assert bool(queue.reap_stale()) is False
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: racing clicks, retries, and a job taken over by another worker
+# ---------------------------------------------------------------------------
+
+
+def test_two_clicks_racing_past_the_dedupe_check_get_one_job(db, project, monkeypatch):
+    """Both requests can read "no live job with this key" before either has
+    inserted one. The loser's INSERT then hits the UNIQUE key — which used to
+    surface as a 500 (29 of 30 double-submits in a burst)."""
+    first = queue.enqueue("suggest", project_id=project.id, dedupe_key=f"suggest:{project.id}")
+
+    real = queue._active_with_key
+    calls = {"n": 0}
+
+    def stale_check(session, key):
+        calls["n"] += 1
+        # The second request's pre-check ran before the first one committed.
+        return None if calls["n"] == 1 else real(session, key)
+
+    monkeypatch.setattr(queue, "_active_with_key", stale_check)
+    second = queue.enqueue("suggest", project_id=project.id, dedupe_key=f"suggest:{project.id}")
+
+    assert second == first
+    assert db.scalar(select(func.count()).select_from(Job).where(Job.project_id == project.id)) == 1
+
+
+def test_a_retry_keeps_its_dedupe_key_and_is_not_finished(db, project):
+    """A job handed back for another attempt is still the live job. Dropping
+    its key let a second click queue a duplicate next to it."""
+    key = f"export_all:{project.id}:all"
+    job_id = queue.enqueue("export_all", project_id=project.id, dedupe_key=key)
+    claimed = queue.claim("worker-1")
+
+    assert queue.finish(job_id, state="queued", error="boom", attempt=claimed.attempts) is True
+
+    db.expire_all()
+    job = db.get(Job, job_id)
+    assert (job.state, job.dedupe_key, job.finished_at, job.claimed_by) == ("queued", key, None, None)
+    assert queue.enqueue("export_all", project_id=project.id, dedupe_key=key) == job_id
+
+
+def _taken_over(db, project) -> tuple[str, int, int]:
+    """A job whose first worker stopped heartbeating, was reaped, and has been
+    claimed by a second worker. Returns (id, first attempt, second attempt)."""
+    job_id = queue.enqueue("export", project_id=project.id)
+    first = queue.claim("worker-1").attempts
+    db.expire_all()
+    job = db.get(Job, job_id)
+    job.heartbeat_at = time.time() - 10_000
+    db.commit()
+    assert queue.reap_stale().requeued == 1
+    second = queue.claim("worker-2").attempts
+    assert second != first
+    return job_id, first, second
+
+
+def test_a_taken_over_jobs_first_worker_cannot_write_to_it(db, project):
+    """After the reaper has given the job to another worker, the first one's
+    heartbeat says "stop", and its verdict lands nowhere — it used to
+    overwrite the row the second worker owned."""
+    job_id, first, second = _taken_over(db, project)
+
+    assert queue.heartbeat(job_id, progress=0.9, stage="old", message=None, attempt=first) is False
+    assert queue.finish(job_id, state="done", output={"from": "worker-1"}, attempt=first) is False
+    assert queue.abandon(job_id, requeue=True, reason="deploy", attempt=first) is False
+
+    db.expire_all()
+    job = db.get(Job, job_id)
+    assert job.state == "running" and job.claimed_by == "worker-2"
+
+    assert queue.heartbeat(job_id, progress=0.5, stage="render", message=None, attempt=second) is True
+    assert queue.finish(job_id, state="done", output={"from": "worker-2"}, attempt=second) is True
+    db.expire_all()
+    assert db.get(Job, job_id).state == "done"
+
+
+def test_a_database_error_in_progress_does_not_fail_the_job(db, project, monkeypatch):
+    """Progress is a report. A flush that fails inside set_progress used to
+    raise into the handler and fail a paid run that was going fine; the value
+    is kept for the next flush instead."""
+    import asyncio
+
+    job_id = queue.enqueue("transcribe", project_id=project.id)
+    handle = queue.JobHandle(job_id, "transcribe", project.id, {})
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(queue, "heartbeat", broken)
+    asyncio.run(handle.set_progress(0.4, stage="chunks"))
+
+    assert handle._pending == {"progress": 0.4, "stage": "chunks"}

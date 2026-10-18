@@ -330,6 +330,41 @@ def test_admin_routes_are_closed_to_editors(client, db):
     assert client.get("/admin/users", headers=_auth(client, "root")).status_code == 200
 
 
+def test_an_admin_reset_takes_the_new_password_in_the_body(client, db):
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+    old = _auth(client, "alice")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        json={"new_password": "resetbyadmin1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 200
+    assert client.get("/auth/me", headers=old).status_code == 401
+    _auth(client, "alice", "resetbyadmin1")
+
+
+def test_an_admin_reset_refuses_a_password_in_the_query_string(client, db):
+    """The request line is what access logs record. A reset that still
+    worked from `?new_password=` would put the password into every log
+    between the browser and the API the moment logging works again."""
+    alice = _user(db, "alice")
+    _user(db, "root", role="admin")
+
+    reset = client.post(
+        f"/admin/users/{alice.id}/password",
+        params={"new_password": "leakedviaurl1"},
+        headers=_auth(client, "root"),
+    )
+
+    assert reset.status_code == 422
+    assert "leakedviaurl1" not in reset.text
+    # Nothing changed: the old password still signs in.
+    _auth(client, "alice")
+
+
 def test_provider_status_reports_an_unconfigured_provider(client, db):
     _user(db, "root", role="admin")
     response = client.get("/admin/providers", headers=_auth(client, "root"))
@@ -2237,7 +2272,6 @@ def test_the_speakers_voice_list_needs_a_login(client):
     assert client.get("/projects/tts/voices").status_code == 401
 
 
-
 # ---------------------------------------------------------------------------
 # Replacing finished work is confirmed
 # ---------------------------------------------------------------------------
@@ -2291,3 +2325,175 @@ def test_new_suggestions_must_be_confirmed_when_there_are_some(client, db, monke
     assert "санал аль хэдийн бий" in refused.json()["detail"]
 
     assert client.post(f"/projects/{row.id}/suggest", json={"force": True}, headers=auth).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: one connection per request, and no lost updates
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def connections():
+    """The most connections any single request held at once."""
+    from sqlalchemy import event
+
+    from app.db import get_engine
+
+    pool = get_engine().pool
+    state = {"now": 0, "peak": 0}
+
+    def out(*_):
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+
+    def back(*_):
+        state["now"] -= 1
+
+    event.listen(pool, "checkout", out)
+    event.listen(pool, "checkin", back)
+    yield state
+    event.remove(pool, "checkout", out)
+    event.remove(pool, "checkin", back)
+
+
+def test_a_request_holds_one_database_connection_at_a_time(client, db, connections, monkeypatch):
+    """A request's session holds its connection from `current_user` on. The
+    queue helpers used to open a SECOND one, so ten concurrent requests each
+    held one and waited for another: the pool (5 + 5) deadlocked for 30 s
+    and every one of them answered 500."""
+    from app import r2
+
+    monkeypatch.setattr(r2, "exists", lambda key: True)
+    owner = _user(db, "onepool")
+    auth = _auth(client, "onepool")
+    row = _project_with_video(db, owner)
+    row.video_key = "sources/x/source.mp4"
+    db.commit()
+    db.close()
+
+    calls = [
+        ("GET", f"/projects/{row.id}"),
+        ("GET", "/jobs/queue"),
+        ("POST", f"/projects/{row.id}/upload-complete"),
+    ]
+    for method, path in calls:
+        connections["peak"] = connections["now"] = 0
+        response = client.request(method, path, headers=auth)
+        assert response.status_code < 300, (path, response.text)
+        assert connections["peak"] == 1, f"{method} {path} held {connections['peak']} connections"
+
+    job_id = client.get(f"/projects/{row.id}", headers=auth).json()["jobs"][0]["job_id"]
+    connections["peak"] = connections["now"] = 0
+    assert client.post(f"/jobs/{job_id}/cancel", headers=auth).json()["canceled"] is True
+    assert connections["peak"] == 1
+
+
+def test_a_document_edit_waits_for_a_write_in_progress_instead_of_undoing_it(client, db):
+    """The document is saved whole. A PATCH that read it while a worker was
+    writing its result used to save the old copy back over that result — the
+    job read "done", and its suggestions were gone. Every read-modify-write
+    now locks the row, so the PATCH waits and then edits what is there."""
+    import threading
+
+    from app.db import get_session_factory
+    from app.models import Suggestions
+    from app.store import get_row, load, save, to_domain
+
+    owner = _user(db, "lockowner")
+    row = _project_with_video(db, owner)
+    project = to_domain(row)
+    project.transcript = Transcript(
+        language="mn", segments=[Segment(id="s1", start=0, end=1, text="сайн")], full_text="сайн"
+    )
+    save(db, project)
+    db.commit()
+    auth = _auth(client, "lockowner")
+
+    worker = get_session_factory()()  # a worker's write-back, mid-transaction
+    written = load(worker, row.id, for_update=True)
+    written.suggestions = Suggestions(shorts=[], requested_shorts=7)  # the worker's result
+    save(worker, written)
+
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(
+        response=client.patch(f"/projects/{row.id}", json={"export": {"crf": 30}}, headers=auth)
+    ))
+    thread.start()
+    thread.join(timeout=0.5)
+    assert thread.is_alive(), "the PATCH should be waiting for the row lock"
+
+    worker.commit()
+    worker.close()
+    thread.join(timeout=10)
+    assert result["response"].status_code == 200
+
+    db.expire_all()
+    final = to_domain(get_row(db, row.id))
+    assert final.export.crf == 30
+    assert final.suggestions is not None and final.suggestions.requested_shorts == 7
+
+
+def test_every_document_save_locks_the_row_it_read():
+    """A rule, not a list: any function in app/ that saves a project document
+    must have read it with `for_update=True` (creating a new project is the
+    one exception — there is nothing to race with)."""
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in Path("app").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+            saves = [c for c in calls if c.func.id == "save"
+                     and not any(k.arg == "owner_id" for k in c.keywords)]
+            if not saves or path.name == "store.py":
+                continue
+            locked = any(
+                c.func.id in ("load", "get_row")
+                and any(k.arg == "for_update" and getattr(k.value, "value", None) is True for k in c.keywords)
+                for c in calls
+            )
+            if not locked:
+                offenders.append(f"{path}:{fn.name}")
+    assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+
+def test_deleting_an_output_keeps_a_file_another_output_still_plays(client, db, monkeypatch):
+    """Exports rendered before keys carried the job id share keys: the second
+    export wrote over the first one's file, so the older row and the newer
+    row play the same object. Deleting the older row must not delete the
+    file the newer row is showing."""
+    from app import r2
+    from app.dbmodels import Output
+
+    deleted: list[str] = []
+    monkeypatch.setattr(r2, "delete", deleted.append)
+
+    owner = _user(db, "legacyoutputs")
+    row = _project_with_video(db, owner)
+    shared, alone = f"outputs/{row.id}/reel_1.mp4", f"outputs/{row.id}/reel_2.mp4"
+    older = Output(project_id=row.id, kind="reel", title="a", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    newer = Output(project_id=row.id, kind="reel", title="b", r2_key=shared,
+                   srt_key=f"outputs/{row.id}/reel_1.srt", size_bytes=1)
+    single = Output(project_id=row.id, kind="reel", title="c", r2_key=alone, srt_key=None, size_bytes=1)
+    db.add_all([older, newer, single])
+    db.commit()
+    auth = _auth(client, "legacyoutputs")
+
+    assert client.delete(f"/projects/{row.id}/outputs/{older.id}", headers=auth).status_code == 200
+    assert deleted == []  # the newer row still plays both objects
+
+    assert client.delete(f"/projects/{row.id}/outputs/{single.id}", headers=auth).status_code == 200
+    assert deleted == [alone]
+
+    assert client.delete(f"/projects/{row.id}/outputs/{newer.id}", headers=auth).status_code == 200
+    assert deleted == [alone, shared, f"outputs/{row.id}/reel_1.srt"]
