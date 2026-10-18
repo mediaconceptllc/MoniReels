@@ -54,8 +54,8 @@ export default function ProjectsPage() {
             forever with no explanation anywhere in the interface. */}
         {queue?.stalled && (
           <Alert tone="warn">
-            Ажлын дараалалд {queue.waiting} ажил хүлээж байгаа ч ажиллаж буй worker алга.
-            Worker сервисээ шалгана уу.
+            Ажлын дараалалд {queue.waiting} ажил хүлээж байгаа ч ажил гүйцэтгэх сервис
+            ажиллахгүй байна. Админ Railway дээрх «worker» сервисийг шалгана уу.
           </Alert>
         )}
 

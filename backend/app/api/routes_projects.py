@@ -68,7 +68,7 @@ JOB_HISTORY_LIMIT = 30
 
 
 def _not_found(project_id: str) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project {project_id} not found")
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Төсөл олдсонгүй.")
 
 
 def _require_r2() -> None:
@@ -81,7 +81,7 @@ def _require_r2() -> None:
     if problem:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Object storage is not configured on this server: {problem}",
+            detail=f"Файлын сан (R2) энэ сервер дээр тохируулагдаагүй байна: {problem}",
         )
 
 
@@ -357,10 +357,14 @@ def select_ranges(
     duration = project.video.duration_sec
     for start, end in body.ranges:
         if end <= start:
-            raise HTTPException(status_code=422, detail=f"Range [{start}, {end}] is empty or reversed")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Хэсэг [{start}, {end}] хоосон эсвэл эхлэл нь төгсгөлөөсөө хойш байна.",
+            )
         if start < 0 or end > duration + 0.5:
             raise HTTPException(
-                status_code=422, detail=f"Range [{start}, {end}] falls outside the {duration:.1f}s video"
+                status_code=422,
+                detail=f"Хэсэг [{start}, {end}] нь {duration:.1f} секундын видеоноос гадуур байна.",
             )
 
     # source_path is filled in by the worker with the copy it downloads —

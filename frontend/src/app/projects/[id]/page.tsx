@@ -17,7 +17,7 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, LANGUAGE_LABELS, usd } from "@/lib/format";
 import { useLeaveGuard } from "@/lib/unsaved";
-import type { Output, Project } from "@/lib/types";
+import type { Job, Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
 import {
   PipelineRail,
@@ -31,6 +31,7 @@ import { ExportSettingsPanel } from "@/components/ExportSettingsPanel";
 import { SubtitleStylePanel } from "@/components/SubtitleStylePanel";
 import { JobHistory } from "@/components/JobHistory";
 import { SuggestCounts, type Counts } from "@/components/SuggestCounts";
+import { JobOutcome } from "@/components/JobOutcome";
 import { JobProgress } from "@/components/JobProgress";
 import { LanguagePanel } from "@/components/LanguagePanel";
 import { OutputList } from "@/components/OutputList";
@@ -60,6 +61,8 @@ export default function ProjectPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // How the last job ended, until dismissed or the next one starts.
+  const [outcome, setOutcome] = useState<Job | null>(null);
   const [tab, setTab] = useState<Stage>("source");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRedo, setConfirmRedo] = useState(false);
@@ -168,6 +171,7 @@ export default function ProjectPage() {
   async function run(action: () => Promise<{ job_id: string }>) {
     setBusy(true);
     setError(null);
+    setOutcome(null);
     try {
       const { job_id } = await action();
       setActiveJob(job_id);
@@ -559,6 +563,56 @@ export default function ProjectPage() {
 
   const action = actionFor(view);
 
+  /** Running a failed step again, the way it was started — through the same
+   *  confirmation where it replaces work. The job's own parameters are not
+   *  sent to the client, so the run is rebuilt from what the page shows now
+   *  (the counts chosen, the lines still missing). An export is the one step
+   *  that cannot be rebuilt: which ideas it rendered is not known here, and
+   *  re-rendering all of them could bill voice the producer never asked for,
+   *  so it goes back to the ideas instead. */
+  function retryFor(job: Job): { label: string; onRun: () => void; disabled?: boolean } | undefined {
+    switch (job.kind) {
+      case "transcribe":
+        return {
+          label: "Дахин оролдох",
+          onRun: hasTranscript
+            ? () => setConfirmTranscribe(true)
+            : () => void run(() => api.transcribe(projectId)),
+          disabled: running,
+        };
+      case "suggest":
+        return {
+          label: "Дахин оролдох",
+          onRun: hasSuggestions
+            ? () => setConfirmSuggest(true)
+            : () => void run(() => api.suggest(projectId, counts)),
+          disabled: running || !!textUnsaved,
+        };
+      case "translate":
+        return {
+          label: "Дахин оролдох",
+          onRun: () =>
+            void run(() =>
+              api.translate(projectId, {
+                scope: hasSuggestions && translation.suggested_missing > 0 ? "suggested" : "all",
+              }),
+            ),
+          disabled: running || !!textUnsaved || !hasTranscript,
+        };
+      case "export_all":
+      case "export":
+        return {
+          label: "Санал руу очиж дахин экспортлох",
+          onRun: () => {
+            setOutcome(null);
+            setTab("suggestions");
+          },
+        };
+      default:
+        return undefined;
+    }
+  }
+
   // Mounted from the first visit on and hidden, never unmounted, so nothing
   // typed into one is lost by looking at another (see `opened`). Fixed slots
   // in a fixed order: React keeps a panel's state only while it stays put.
@@ -604,13 +658,22 @@ export default function ProjectPage() {
           {activeJob ? (
             <JobProgress
               jobId={activeJob}
-              onSettled={() => {
+              onSettled={(job) => {
+                setOutcome(job);
                 setActiveJob(null);
                 void refresh();
               }}
             />
           ) : undefined}
         </PipelineRail>
+
+        {outcome && !activeJob && (
+          <JobOutcome
+            job={outcome}
+            retry={outcome.state === "failed" ? retryFor(outcome) : undefined}
+            onDismiss={() => setOutcome(null)}
+          />
+        )}
 
         {panel(
           "source",

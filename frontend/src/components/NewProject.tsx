@@ -20,6 +20,23 @@ import { uploadToStorage } from "@/lib/upload";
 import { Alert, Button, Card, Field, ProgressBar, Select, TextInput } from "@/components/ui";
 
 const ACCEPT = ".mp4,.mov,.mkv,.webm,.m4v,.avi";
+// The server's own limit (schemas.UPLOAD_MAX_BYTES) — it checks again; this
+// only saves a 20 GB upload from being refused at the end.
+const MAX_BYTES = 20 * 1024 ** 3;
+
+/** Why this file will be refused, or null. `accept` narrows the picker but
+ *  not "All files" or a drag-and-drop, and the refusal used to arrive from
+ *  the server in English ("Value error, Unsupported video format '.txt'…"). */
+function refusal(file: File): string | null {
+  const ext = file.name.includes(".") ? `.${file.name.split(".").pop()!.toLowerCase()}` : "";
+  if (!ACCEPT.split(",").includes(ext)) {
+    return `Энэ файлын төрөл дэмжигдэхгүй${ext ? ` (${ext})` : ""}. Зөвшөөрөгдөх: ${ACCEPT.split(",").join(", ")}.`;
+  }
+  if (file.size > MAX_BYTES) {
+    return `Файл хэт том байна (${fileSize(file.size)}). Дээд хэмжээ ${fileSize(MAX_BYTES)}.`;
+  }
+  return null;
+}
 
 export function NewProject({ onCreated }: { onCreated: () => void }) {
   const router = useRouter();
@@ -34,6 +51,12 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
   const abortRef = useRef<(() => void) | null>(null);
 
   function pick(selected: File | null) {
+    const problem = selected ? refusal(selected) : null;
+    if (problem) {
+      setFile(null);
+      setError(problem);
+      return;
+    }
     setFile(selected);
     setError(null);
     // Default the project name to the filename without its extension — very

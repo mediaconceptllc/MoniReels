@@ -114,7 +114,8 @@ class CreateProjectIn(BaseModel):
         suffix = ("." + v.rsplit(".", 1)[-1]).lower() if "." in v else ""
         if suffix not in UPLOAD_EXTENSIONS:
             allowed = ", ".join(sorted(UPLOAD_EXTENSIONS))
-            raise ValueError(f"Unsupported video format {suffix!r}. Use one of: {allowed}")
+            shown = f" ({suffix})" if suffix else ""
+            raise ValueError(f"Энэ файлын төрөл дэмжигдэхгүй{shown}. Зөвшөөрөгдөх: {allowed}.")
         return v
 
 
