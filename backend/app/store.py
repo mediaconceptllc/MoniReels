@@ -131,8 +131,9 @@ def load_settings(db: Session, project_id: str, owner_id: str | None = None) -> 
     reach Python; `save_settings` writes back only what a settings change can
     alter, so they cannot be lost either.
     """
-    light = ProjectRow.doc
-    for field in _HEAVY_FIELDS:
+    first, *rest = _HEAVY_FIELDS
+    light = ProjectRow.doc.op("-", return_type=JSONB)(first)
+    for field in rest:
         light = light.op("-", return_type=JSONB)(field)
     row = db.execute(
         select(
