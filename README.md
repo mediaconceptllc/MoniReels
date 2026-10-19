@@ -16,7 +16,8 @@
                     └──────────► Postgres (ажлын дараалал) ────┘
 ```
 
-- **`backend/`** — FastAPI API + worker (нэг Docker image, хоёр entrypoint) → Railway
+- **`backend/`** — FastAPI API + worker (нэг Dockerfile, хоёр entrypoint; worker нь
+  `INSTALL_DUB=1`-ээр Demucs-тай томорсон image) → Railway
 - **`frontend/`** — Next.js App Router → Vercel
 - **`docs/`** — DEPLOY.md · ARCHITECTURE.md
 
@@ -121,7 +122,10 @@ npm run typecheck && npm run lint && npm run build
    heartbeat нотолно — үхсэн worker-ийн цогцос эс бөгөөс эгнээгээ мөнхөд
    хаана.
 5. **Эрхийн шалгалт ЗӨВХӨН backend дээр.** Frontend зөвхөн UI нуудаг.
-6. **Секрет кодод ч, ДБ-д ч бичихгүй** — зөвхөн орчны хувьсагч. Тэднийг
-   бичдэг HTTP зам БАЙХГҮЙ (ширээний хувилбарт байсан, тэр нь нээлттэй
+6. **Секрет кодод хэзээ ч бичихгүй.** Үйлчилгээний түлхүүрийг орчны
+   хувьсагчаар эсвэл админы Тохиргоо хуудсаар өгнө; хуудсаар өгсөн нь
+   `settings` хүснэгтэд `SETTINGS_ENCRYPTION_KEY`-ээр битүүмжлэгдэж
+   хадгалагдана (`app/secretbox.py`) ба буцаж хэзээ ч уншигдахгүй. `.env`
+   руу бичдэг HTTP зам БАЙХГҮЙ (ширээний хувилбарт байсан, тэр нь нээлттэй
    сервер дээр бүрэн эрх алдагдал).
 7. **Багтац, хугацааг клиент дээр тооцохгүй.** Сервер НЭГ газраас өгнө.

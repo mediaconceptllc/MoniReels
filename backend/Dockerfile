@@ -1,6 +1,7 @@
-# One image, two entrypoints: the API (default) and the worker
-# (`python -m app.worker`). Deploying the same image twice on Railway keeps
-# the two services on identical code without a second build.
+# One Dockerfile, two entrypoints: the API (default) and the worker
+# (`python -m app.worker`). Both services build it from the same commit, so
+# they run identical code; the worker's image differs only when it sets
+# INSTALL_DUB=1 (below), which adds the clean-dub stack and nothing else.
 #
 # By tag, not by digest: this environment cannot reach Docker Hub to resolve
 # one, and a digest pinned by hand without the tooling to move it is a base

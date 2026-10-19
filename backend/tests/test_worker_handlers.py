@@ -1306,6 +1306,8 @@ def test_room_that_never_comes_ends_the_job_after_its_attempts(world, project, d
     row = db.get(Job, job.id)
     assert row.state == "failed"
     assert "зай" in row.error and str(MAX_ATTEMPTS) in row.error
+    # Room may still come back: the page may offer a retry.
+    assert worker.queue.to_dict(row)["result"]["error_code"] == "disk_full"
 
 
 def test_a_job_bigger_than_the_whole_disk_fails_at_once_and_says_why(world, project, db, monkeypatch):
@@ -1326,6 +1328,9 @@ def test_a_job_bigger_than_the_whole_disk_fails_at_once_and_says_why(world, proj
     row = db.get(Job, job.id)
     assert row.state == "failed"
     assert "20.0 GB" in row.error  # the disk's size, so the fix is plain
+    # Named by a stable code, not by its Mongolian words: the page reads this
+    # and offers no «Дахин оролдох» — the same disk fails the same way.
+    assert worker.queue.to_dict(row)["result"]["error_code"] == "disk_never_fits"
 
 
 def test_the_disk_a_job_needs_follows_the_size_of_its_source(world, project, db):
@@ -2044,10 +2049,11 @@ def test_the_worker_says_what_it_can_do(db, monkeypatch):
     from app import worker, worker_report
     from app.audio import dub_bed
 
+    me = worker_report.Identity.of("render-1", {"heavy": 1, "stt": 0, "llm": 0})
     monkeypatch.setattr(dub_bed, "available", lambda: False)
-    worker._publish_report()
+    worker._publish_report(me)
     monkeypatch.setattr(dub_bed, "available", lambda: True)
-    worker._publish_report()
+    worker._publish_report(me)
 
     db.expire_all()
     report = worker_report.read(db)

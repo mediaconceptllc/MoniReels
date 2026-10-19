@@ -130,15 +130,23 @@ def separation(report: WorkerReport | None) -> Capability:
     """Whether an export can remove the source speech under the Mongolian
     voice (export.source_speech "remove").
 
-    Answered from what the WORKER said about itself (app.worker_report): the
-    API image never has Demucs, so looking for it here would always say no.
-    No report yet — no worker running this code has started — is unknown,
-    and unknown does not start a job that cannot finish.
+    Answered from what the WORKERS that render said about themselves
+    (app.worker_report): the API image never has Demucs, so looking for it
+    here would always say no. No report yet — no worker running this code
+    has started — is unknown, and unknown does not start a job that cannot
+    finish.
     """
     if report is None:
         blocked = (
             "Worker энэ боломжийн талаар хараахан мэдээлээгүй байна — ажиллаж байгаа эсэхийг "
             "шалгана уу."
+        )
+    elif report.partial:
+        # Two render workers, one with Demucs: an export goes to whichever
+        # claims it, so "sometimes" is "cannot" until both can.
+        blocked = (
+            "Экспорт хийдэг worker-уудын зарим нь Demucs-гүй — экспорт аль нь дээр очих нь "
+            "тодорхойгүй тул бүгдийг INSTALL_DUB=1-ээр build хийнэ."
         )
     elif not report.separation:
         blocked = "Worker-т Demucs суугаагүй байна — worker сервисийг INSTALL_DUB=1-ээр дахин build хийнэ."

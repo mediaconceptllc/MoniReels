@@ -50,7 +50,9 @@ function QueueNote() {
     };
   }, []);
   if (!queue) return null;
-  if (queue.stalled) {
+  // An import is a render (the heavy lane): with the render pool down and the
+  // I/O pool alive, `stalled` is false and the video still waits for nobody.
+  if (queue.stalled || queue.unserved_lanes.includes("heavy")) {
     return (
       <Alert tone="warn">
         Видео боловсруулах сервис одоогоор ажиллахгүй байна. Таны видео дараалалд хадгалагдсан —

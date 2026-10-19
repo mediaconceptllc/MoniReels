@@ -56,7 +56,8 @@ YOUTUBE_TARGET_DURATION_SEC = 600.0  # 10 minutes, per idea
 YOUTUBE_TARGET_TOLERANCE = 0.10
 MERGE_GAP_SEC = 0.5
 
-# The STT provider returns no word-level timestamps, so a segment's start/end is
+# duudlaga.dev returns no word-level timestamps (Scribe does, see
+# app.stt.elevenlabs_client), so a duudlaga segment's start/end is
 # frequently an estimate (proportional-by-character/word split of a larger
 # chunk, not a real detected boundary - see app.audio.vad_chunking). A cut
 # resolved exactly on that estimate has a real chance of starting a beat

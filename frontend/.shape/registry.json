@@ -13,6 +13,11 @@
     "transcribe": 0,
     "translate": 0
   },
+  "lanes": {
+    "heavy": 0,
+    "llm": 0,
+    "stt": 0
+  },
   "output_kinds": {
     "reel": 0,
     "youtube": 0

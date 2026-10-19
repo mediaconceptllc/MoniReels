@@ -5,6 +5,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, relativeTime } from "@/lib/format";
+import { laneNames } from "@/lib/jobs";
 import type { ProjectSummary, QueueStatus } from "@/lib/types";
 import { Alert, Badge, Card, Empty, Loading, Skeleton, TAP } from "@/components/ui";
 import { NewProject } from "@/components/NewProject";
@@ -56,6 +57,14 @@ export default function ProjectsPage() {
           <Alert tone="warn">
             Ажлын дараалалд {queue.waiting} ажил хүлээж байгаа ч ажил гүйцэтгэх сервис
             ажиллахгүй байна. Админ Railway дээрх «worker» сервисийг шалгана уу.
+          </Alert>
+        )}
+        {/* One pool down beside a healthy one: not "stalled", and those jobs
+            still wait for nobody. */}
+        {queue && !queue.stalled && queue.unserved_lanes.length > 0 && (
+          <Alert tone="warn">
+            {laneNames(queue.unserved_lanes)} ажил хүлээж байгаа ч түүнийг гүйцэтгэх сервис
+            ажиллахгүй байна. Админ Railway дээрх worker сервисүүдийг шалгана уу.
           </Alert>
         )}
 

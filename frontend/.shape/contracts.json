@@ -43,11 +43,70 @@
       "wait_samples": 0
     },
     "queue": {
+      "lanes": [
+        {
+          "lane": "heavy",
+          "runnable": 0,
+          "served": false,
+          "workers": 0
+        },
+        {
+          "lane": "llm",
+          "runnable": 0,
+          "served": false,
+          "workers": 0
+        },
+        {
+          "lane": "stt",
+          "runnable": 0,
+          "served": false,
+          "workers": 0
+        }
+      ],
       "live_workers": 0,
-      "oldest_waiting_sec": null,
+      "oldest_waiting_sec": 0.0,
       "running": 0,
       "stalled": false,
-      "waiting": 0
+      "unserved_lanes": [
+        "heavy"
+      ],
+      "waiting": 0,
+      "workers": [
+        {
+          "commit": "",
+          "disk": {
+            "free_bytes": 0,
+            "min_free_bytes": 0,
+            "total_bytes": 0
+          },
+          "id": "",
+          "lanes": {
+            "heavy": 0,
+            "llm": 0,
+            "stt": 0
+          },
+          "live": false,
+          "model": "",
+          "seen_at": 0.0,
+          "separation": false,
+          "started_at": 0.0
+        },
+        {
+          "commit": null,
+          "disk": null,
+          "id": "",
+          "lanes": {
+            "heavy": 0,
+            "llm": 0,
+            "stt": 0
+          },
+          "live": false,
+          "model": "",
+          "seen_at": 0.0,
+          "separation": false,
+          "started_at": 0.0
+        }
+      ]
     }
   },
   "admin_jobs": {
@@ -71,7 +130,8 @@
         "project_name": "",
         "requeued_at": null,
         "result": {
-          "elapsed_sec": 0.0
+          "elapsed_sec": 0.0,
+          "error_code": "disk_never_fits"
         },
         "retryable": false,
         "stage": "",
@@ -152,6 +212,31 @@
         "stage": "",
         "started_at": null,
         "state": "done",
+        "updated_at": 0.0
+      },
+      {
+        "attempts": 0,
+        "available_at": null,
+        "claimed_by": null,
+        "created_at": 0.0,
+        "error": null,
+        "finished_at": null,
+        "history": [],
+        "job_id": "",
+        "kind": "import_video",
+        "lane": "",
+        "message": "",
+        "no_retry": false,
+        "owner": null,
+        "progress": 0.0,
+        "project_id": null,
+        "project_name": null,
+        "requeued_at": null,
+        "result": null,
+        "retryable": false,
+        "stage": "",
+        "started_at": null,
+        "state": "queued",
         "updated_at": 0.0
       }
     ],
@@ -267,7 +352,8 @@
     "progress": 0.0,
     "project_id": "",
     "result": {
-      "elapsed_sec": 0.0
+      "elapsed_sec": 0.0,
+      "error_code": "disk_never_fits"
     },
     "stage": "",
     "state": "failed",
@@ -415,7 +501,8 @@
         "progress": 0.0,
         "project_id": "",
         "result": {
-          "elapsed_sec": 0.0
+          "elapsed_sec": 0.0,
+          "error_code": "disk_never_fits"
         },
         "stage": "",
         "state": "failed",
@@ -896,8 +983,31 @@
     "counts": {
       "*": 0
     },
+    "lanes": [
+      {
+        "lane": "heavy",
+        "runnable": 0,
+        "served": false,
+        "workers": 0
+      },
+      {
+        "lane": "llm",
+        "runnable": 0,
+        "served": false,
+        "workers": 0
+      },
+      {
+        "lane": "stt",
+        "runnable": 0,
+        "served": false,
+        "workers": 0
+      }
+    ],
     "live_workers": 0,
     "stalled": false,
+    "unserved_lanes": [
+      "heavy"
+    ],
     "waiting": 0,
     "worker_disk": {
       "free_bytes": 0,

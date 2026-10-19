@@ -195,16 +195,19 @@ Index("ix_jobs_project", Job.project_id, Job.created_at.desc())
 
 
 class Setting(Base):
-    """Operator-editable settings that are NOT secrets.
+    """Operator-editable settings, provider keys among them.
 
-    Credentials stay in the environment. The desktop build let an HTTP
-    handler rewrite its own `.env`; on a public URL that is a credential
-    takeover, so the write path for secrets simply does not exist here.
+    An admin may store a provider key here from the admin screen
+    (app.provider_settings.EDITABLE). A stored key is never returned — the
+    API answers with a hint — and is sealed at rest with
+    SETTINGS_ENCRYPTION_KEY when that variable is set (app.secretbox). What
+    does not exist is the desktop build's old path, an HTTP handler
+    rewriting its own `.env`: the environment stays the operator's.
 
-    One row is not an operator's: `worker_report`, what the worker says it
-    can do (app.worker_report). Written by the worker only, and outside
-    app.provider_settings.EDITABLE, so no request reads it as a setting or
-    writes it.
+    One row is not an operator's: `worker_report`, what the render worker
+    says it can do (app.worker_report). Written by the worker only, and
+    outside EDITABLE, so no request reads it as a setting or writes it. It
+    is the single-report form kept for code that predates WorkerHeartbeat.
     """
 
     __tablename__ = "settings"
@@ -212,6 +215,37 @@ class Setting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
+
+
+class WorkerHeartbeat(Base):
+    """One row per running worker: what it serves and what it can do
+    (app.worker_report).
+
+    The single `worker_report` setting was last-writer-wins: with a render
+    pool and an I/O pool, the API's answer to "can an export remove the
+    speech?" flipped with whichever worker spoke last, and nothing could say
+    which lanes had anybody serving them at all. Written by the worker every
+    housekeeping round, deleted on a clean shutdown, aged out when the
+    worker stops without one.
+    """
+
+    __tablename__ = "worker_heartbeats"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # lane -> how many jobs of it this worker runs at once; 0 is "not here".
+    lanes: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    started_at: Mapped[float] = mapped_column(Float, nullable=False)
+    seen_at: Mapped[float] = mapped_column(Float, nullable=False)
+    # Demucs and torch importable: an export here can remove the speech.
+    separation: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    # The deployed commit (RAILWAY_GIT_COMMIT_SHA) when the platform says it.
+    commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Its scratch disk, as app.utils.paths.disk_report measures it there.
+    disk: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+Index("ix_worker_heartbeats_seen", WorkerHeartbeat.seen_at)
 
 
 class SubtitleTemplate(Base):

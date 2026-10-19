@@ -11,7 +11,7 @@
  */
 
 import { JOB_LABELS } from "@/lib/jobs";
-import { explainJobError } from "@/lib/job-errors";
+import { explainJob } from "@/lib/job-errors";
 import type { Job } from "@/lib/types";
 import { Button, TAP } from "@/components/ui";
 
@@ -26,7 +26,9 @@ export function JobOutcome({
   onDismiss: () => void;
 }) {
   const label = JOB_LABELS[job.kind] ?? job.kind;
-  const explained = job.state === "failed" ? explainJobError(job.error) : null;
+  // The code first, the words second: a disk too small for this video is
+  // permanent however its Mongolian message is worded (lib/job-errors).
+  const explained = job.state === "failed" ? explainJob(job) : null;
   const tone =
     job.state === "done"
       ? "border-fit/40 bg-fit-soft text-fit"

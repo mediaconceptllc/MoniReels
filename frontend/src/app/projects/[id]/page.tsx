@@ -16,7 +16,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, LANGUAGE_LABELS, usd } from "@/lib/format";
-import { explainJobError } from "@/lib/job-errors";
+import { explainJob } from "@/lib/job-errors";
 import { useLeaveGuard } from "@/lib/unsaved";
 import type { Job, Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
@@ -714,7 +714,7 @@ export default function ProjectPage() {
               <SourceStatus
                 projectId={projectId}
                 state={source}
-                reason={source === "failed" ? explainJobError(importJob?.error).message : null}
+                reason={source === "failed" && importJob ? explainJob(importJob).message : null}
                 onUploaded={() => void refresh()}
               />
             )}
