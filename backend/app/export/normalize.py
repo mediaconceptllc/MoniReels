@@ -15,7 +15,11 @@ def build_video_filter(width: int, height: int, fps: float, orientation: str, po
     Portrait "blur" fills the canvas with a blurred, cropped copy of the frame
     as background, with the original frame letterboxed on top.
     """
-    tail = f"setsar=1,fps={fps},format=yuv420p"
+    # start_time=0 lays the frame grid from the cut point. Without it the
+    # grid starts at the first decoded frame — up to a frame after the cut —
+    # and the encoder filled the empty first slot with a copy: one extra
+    # frame at the head of most clips, the picture a frame behind its sound.
+    tail = f"setsar=1,fps={fps}:start_time=0,format=yuv420p"
 
     if orientation == "portrait" and portrait_fill == "crop":
         return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},{tail}"

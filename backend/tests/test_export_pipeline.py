@@ -247,7 +247,7 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
         return {"fps": 30.0, "has_audio": True, "duration": 3.0}
 
     async def fake_cut(binaries, handle, clip, has_audio, *args, voice_path=None, original_volume=1.0,
-                       bed_path=None):
+                       bed_path=None, frames=None):
         cuts.append((clip.source_path, voice_path, original_volume, bed_path))
 
     async def fake_concat(binaries, handle, paths, total, workdir, out_path):
@@ -482,3 +482,129 @@ async def test_a_batched_join_is_the_single_pass_frame_for_frame(monkeypatch, tm
         for line in log.read_text().splitlines()
     )
     assert worst > 35, worst
+
+
+# Sync over a long timeline. Every clip used to come out a little longer
+# than planned — a frame of picture about half the time, 21-32 ms of sound
+# always — and the join has nothing to hold a clip to its plan, so each
+# surplus pushed every clip after it. MEASURED on 24 clips (this test, on
+# the old code): the last clip's sound 0.78 s behind its picture with 0.3 s
+# crossfades, 0.39 s ahead of it without. Now: under a millisecond.
+
+
+def _marks(path: Path) -> tuple[list[float], list[float]]:
+    """When the picture flashes and when the sound beeps, in output seconds."""
+    import array
+    import subprocess
+
+    out = subprocess.run(
+        [FFMPEG, "-v", "error", "-i", str(path), "-vf",
+         "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    flashes: list[float] = []
+    last = -1.0
+    t = 0.0
+    for line in out.splitlines():
+        if line.startswith("frame:"):
+            t = float(line.split("pts_time:")[1])
+        elif "YAVG" in line and float(line.split("=")[1]) > 128:
+            if t - last > 0.5:
+                flashes.append(t)
+            last = t
+
+    raw = subprocess.run(
+        [FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a", "-ac", "1", "-ar", "48000",
+         "-f", "s16le", "-"],
+        capture_output=True, check=True,
+    ).stdout
+    samples = array.array("h")
+    samples.frombytes(raw)
+    beeps: list[float] = []
+    last = -1.0
+    for i in range(0, len(samples), 48):  # 1 ms at a time
+        block = samples[i:i + 48]
+        if max(block) > 3000 or -min(block) > 3000:
+            if i / 48000 - last > 0.5:
+                beeps.append(i / 48000)
+            last = i / 48000
+    return flashes, beeps
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="ffmpeg is not installed")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate", ["25", "30000/1001"])
+@pytest.mark.parametrize("transition", [0.0, 0.3])
+async def test_the_sound_is_on_the_picture_to_the_last_of_many_clips(
+    monkeypatch, tmp_path, rate, transition
+):
+    """24 clips, each holding one flash and one beep on the same frame of the
+    source, clear of every transition. In the output every beep must sit
+    where its flash says — to the millisecond, the last clip as the first —
+    and the file must be exactly as long as the plan it was cut to.
+
+    Where it should sit is not "on the flash": the cut lays its frame grid
+    from the cut point, so a flash 12.3 frames in is shown on frame 12 and
+    the beep stays 0.3 of a frame after it (12.7: frame 13, 0.3 before). Each clip's own offset is
+    worked out and held to 4 ms — less than the 21 ms of AAC priming, which
+    is the smallest slip this suite has seen."""
+    import json
+    import subprocess
+
+    from app.export import pipeline
+    from app.timeline.models import Clip
+    from app.video.ffmpeg import FfmpegBinaries
+
+    num, _, den = rate.partition("/")
+    fps = float(num) / float(den or 1)
+    every = round(fps)  # a mark about once a second, on a frame
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+         f"color=c=black:s=160x90:r={rate}:d=50,"
+         f"drawbox=enable='eq(mod(n\\,{every})\\,0)':color=white:t=fill",
+         "-f", "lavfi", "-i",
+         f"aevalsrc='if(lt(mod(t*{rate}\\,{every})\\,1)\\,sin(2*PI*1000*t)\\,0)':s=48000:d=50",
+         "-c:v", "libx264", "-preset", "ultrafast", "-g", "12", "-c:a", "aac", "-shortest", str(src)],
+        check=True,
+    )
+    # One mark every other second. Each clip starts off the frame grid,
+    # nowhere near a rounding tie, and runs a length that is not whole
+    # frames: 12.3 frames before its mark puts the first source frame 0.3
+    # of a frame after the cut, 12.7 puts it 0.7 after — past the middle,
+    # where a grid laid from the first frame instead of the cut starts a
+    # slot late and the encoder fills the empty slot with a copy.
+    marks = [every * (2 * i + 1) / fps for i in range(24)]
+    lead = [(12.3 if i % 2 else 12.7) / fps for i in range(24)]
+    clips = [Clip(id=f"c{i}", source_path=str(src), start=round(m - lead[i], 3),
+                  end=round(m - lead[i] + 1.0 + 0.11 * (i % 3), 3), order=i)
+             for i, m in enumerate(marks)]
+    monkeypatch.setattr(pipeline, "resolve_dimensions", lambda orientation: (160, 90))
+    binaries = FfmpegBinaries(ffmpeg=Path(FFMPEG), ffprobe=Path(FFMPEG).with_name("ffprobe"))
+    out = tmp_path / "out.mp4"
+    await pipeline.render_timeline(
+        _handle(), binaries, clips, Transition(duration=transition), crf=35, preset="ultrafast",
+        orientation="landscape", portrait_fill="pad", supported_xfade=["fade"],
+        workdir=tmp_path / "work", output_path=out,
+    )
+
+    flashes, beeps = _marks(out)
+    assert len(flashes) == len(beeps) == len(clips)
+    expected = [(m - c.start) - round((m - c.start) * fps) / fps for m, c in zip(marks, clips, strict=True)]
+    drift = [round((b - f) - e, 4) for f, b, e in zip(flashes, beeps, expected, strict=True)]
+    assert max(abs(d) for d in drift) < 0.004, drift
+
+    probe = json.loads(subprocess.run(
+        [str(binaries.ffprobe), "-v", "error", "-count_frames", "-show_entries",
+         "stream=codec_type,nb_read_frames,duration", "-of", "json", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout)["streams"]
+    video = next(s for s in probe if s["codec_type"] == "video")
+    audio = next(s for s in probe if s["codec_type"] == "audio")
+    lengths = [pipeline.clip_frames(c.end - c.start, fps) / fps for c in clips]
+    planned = (
+        sum(lengths) if transition == 0
+        else pipeline.plan_transition(lengths, transition, fps=fps).final_duration
+    )
+    assert abs(int(video["nb_read_frames"]) / fps - planned) < 0.5 / fps
+    assert abs(float(audio["duration"]) - planned) < 0.002
