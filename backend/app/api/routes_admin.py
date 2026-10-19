@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import Float, case, cast, func, select
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,13 @@ from app import r2
 from app.db import get_db
 from app.dbmodels import Job, Project, User
 from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, ProviderSettingsIn, ResetPasswordIn
-from app.security import Principal, hash_password, require_admin, stamp_password_change
+from app.security import (
+    Principal,
+    client_ip,
+    hash_password,
+    require_admin,
+    stamp_password_change,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -113,12 +119,18 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     Never raises. A provider being unreachable is itself the answer, and a
     diagnostics page that 500s tells the operator nothing.
     """
-    from app import provider_settings, providers, worker_report
+    from app import provider_settings, providers, secretbox, worker_report
+    from app.config import get_settings
     from app.stt import factory
 
     # Stored overrides included: a page that reports the environment while
-    # the jobs use something else answers the wrong question.
-    settings = provider_settings.effective(db)
+    # the jobs use something else answers the wrong question. A stored key
+    # that cannot be opened is reported below (`secret_storage`) rather than
+    # failing the page the operator fixes it from.
+    try:
+        settings = provider_settings.effective(db)
+    except secretbox.SecretKeyError:
+        settings = get_settings()
 
     # The SELECTED recogniser, not duudlaga by name: probing the one that is
     # not running answers a question nobody asked and leaves the one that is
@@ -172,6 +184,9 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
             "bucket": settings.r2_bucket,
             "error": settings.r2_config_error,
         },
+        # Whether the keys stored from this page are encrypted at rest, and
+        # which variable would make them so. Names only.
+        "secret_storage": provider_settings.storage_status(db),
     }
 
 
@@ -280,7 +295,9 @@ def provider_settings_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
 @router.put("/settings")
 async def provider_settings_write(
     body: ProviderSettingsIn,
+    request: Request,
     db: Session = Depends(get_db),  # noqa: B008
+    principal: Principal = Depends(require_admin),  # noqa: B008
 ) -> dict:
     """Store the fields that were sent. Takes effect on the next job.
 
@@ -299,7 +316,9 @@ async def provider_settings_write(
     model_check = await _check_new_model(db, fields)
 
     try:
-        changed = provider_settings.apply(db, fields)
+        changed = provider_settings.apply(
+            db, fields, actor=principal.username, ip=client_ip(request)
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     # Names only. The audit middleware records the request without its body,

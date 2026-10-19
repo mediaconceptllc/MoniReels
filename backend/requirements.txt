@@ -22,6 +22,8 @@ httpx==0.28.1
 
 # auth
 pyjwt==2.10.1
+# Seals the provider keys stored in the database (app.secretbox).
+cryptography==46.0.6
 
 # database
 SQLAlchemy==2.0.36
@@ -31,6 +33,9 @@ psycopg2-binary==2.9.10
 
 # object storage (Cloudflare R2 speaks S3)
 boto3==1.35.92
+
+# error reports — imported only when SENTRY_DSN is set (app.observability)
+sentry-sdk==2.19.2
 
 # loudness normalization — wraps ffmpeg's own two-pass EBU R128 loudnorm,
 # not a separate audio engine.

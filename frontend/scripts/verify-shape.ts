@@ -261,6 +261,7 @@ const present: unknown[] = [
   raw.job_voiced.result.voice.beds_separated, raw.job_voiced.result.voice.bed_seconds,
   raw.job_voiced.result.voice.beds_cached,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
+  raw.queue.worker_seen_at,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs. Two machines, named: the
   // worker's disk is the one a render fills.
@@ -301,6 +302,10 @@ const present: unknown[] = [
   // The recogniser's balance — fetched on every visit and, until it was
   // read here, thrown away.
   raw.providers.stt.balance.map((b) => [b.name, b.value]),
+  // how the stored keys are kept: the admin page's warning reads all five
+  raw.providers.secret_storage.encrypted, raw.providers.secret_storage.variable,
+  raw.providers.secret_storage.plaintext, raw.providers.secret_storage.unreadable,
+  raw.providers.secret_storage.error,
 
   // the admin's users screen
   raw.admin_users.map((u) => [u.id, u.username, u.role, u.active, u.created_at, u.projects]),

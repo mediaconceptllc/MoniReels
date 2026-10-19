@@ -444,6 +444,9 @@ export interface QueueStatus {
   counts: Record<string, number>;
   waiting: number;
   live_workers: number;
+  /** When a worker last reported itself alive, busy or not; null before any
+   *  worker running this code has. */
+  worker_seen_at: number | null;
   /** Work is waiting and nothing alive is doing it — the worker service is
    *  down. The single most common cause of "my job never starts". */
   stalled: boolean;
@@ -548,6 +551,19 @@ export interface ProviderStatus {
   capabilities: Capability[];
   stt_providers: string[];
   stt: SttStatus;
+  secret_storage: SecretStorage;
+}
+
+/** How the keys entered on the admin page are kept in the database. Field
+ *  names only — never a value. `plaintext` are stored unencrypted;
+ *  `unreadable` are sealed with a key this server does not have; `error`
+ *  says the variable itself is malformed. */
+export interface SecretStorage {
+  encrypted: boolean;
+  variable: string;
+  plaintext: string[];
+  unreadable: string[];
+  error: string | null;
 }
 
 /** One provider value as the server is willing to describe it. The value

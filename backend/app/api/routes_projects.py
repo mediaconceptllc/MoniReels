@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import providers, r2, security, spend, worker_report
+from app import providers, quotas, r2, security, spend, worker_report
 from app.ai.schema import count_limits, default_counts
 from app.config import get_settings
 from app.db import get_db
@@ -38,6 +38,7 @@ from app.languages import (
 )
 from app.models import Project
 from app.schemas import (
+    UPLOAD_MAX_BYTES,
     CreateProjectIn,
     CreateProjectOut,
     ExportSelectionIn,
@@ -104,8 +105,14 @@ def create_project(
     """
     _require_r2()
     settings = get_settings()
+    quotas.admit_project(db, principal)
 
-    project = Project(id=uuid.uuid4().hex, name=body.name, language=body.language)
+    project = Project(
+        id=uuid.uuid4().hex,
+        name=body.name,
+        language=body.language,
+        upload_size_bytes=body.size_bytes,
+    )
     row = save(db, project, owner_id=principal.id)
 
     # Derived from the project id, which never changes — a rename must not
@@ -133,22 +140,56 @@ def upload_complete(
     The object is verified to exist before queueing rather than trusted: a
     PUT that failed client-side would otherwise produce a job that downloads
     nothing and fails with a confusing storage error.
+
+    Its SIZE is verified too. The presigned PUT binds no length, so the
+    `size_bytes` checked at creation was only ever a claim: a client could
+    declare 1 KB and store 50 GB, which the import would then download and
+    the bucket bill for. An object that is not what was declared, or is over
+    the limit, is deleted and refused here.
     """
     _require_r2()
     try:
         row = get_row(db, project_id, principal.id)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
-    if not row.video_key or not r2.exists(row.video_key):
+    size = r2.object_size(row.video_key) if row.video_key else None
+    if size is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Хуулсан файл хадгалах санд хараахан ирээгүй байна.",
         )
+    refused = _upload_refusal(size, (row.doc or {}).get("upload_size_bytes"))
+    if refused:
+        try:
+            r2.delete(row.video_key)
+        except Exception:  # noqa: BLE001 - the refusal stands either way
+            logger.exception("Could not delete refused upload %s", row.video_key)
+        raise HTTPException(status_code=refused[0], detail=refused[1])
 
     job_id = queue.enqueue(
         "import_video", project_id=project_id, dedupe_key=f"import:{project_id}", db=db
     )
     return UploadCompleteOut(project_id=project_id, job_id=job_id)
+
+
+def _size(n: int) -> str:
+    return f"{n / 1024**3:.1f} GB" if n >= 1024**3 else f"{n / 1024**2:.1f} MB"
+
+
+def _upload_refusal(size: int, declared: object) -> tuple[int, str] | None:
+    """(status, reason) when the stored object must not be imported."""
+    if size > UPLOAD_MAX_BYTES:
+        return 413, (
+            f"Хуулсан файл ({_size(size)}) дээд хэмжээнээс ({_size(UPLOAD_MAX_BYTES)}) том байна. "
+            "Файл устгагдлаа."
+        )
+    # bool is an int to Python; a declared `true` is not a size.
+    if isinstance(declared, int) and not isinstance(declared, bool) and size != declared:
+        return 400, (
+            f"Хуулсан файлын хэмжээ ({size} байт) зарласнаас ({declared} байт) өөр байна — "
+            "хуулалт дутуу эсвэл өөр файл. Файл устгагдлаа; шинэ төсөл үүсгэж дахин хуулна уу."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -528,11 +569,9 @@ def transcribe(
             ),
         )
     _require_recogniser_for(db, project.language)
-    return {
-        "job_id": queue.enqueue(
-            "transcribe", project_id=project_id, dedupe_key=f"transcribe:{project_id}", db=db
-        )
-    }
+    key = f"transcribe:{project_id}"
+    quotas.admit_job(db, principal, "transcribe", dedupe_key=key)
+    return {"job_id": queue.enqueue("transcribe", project_id=project_id, dedupe_key=key, db=db)}
 
 
 @router.post("/{project_id}/translate")
@@ -561,6 +600,7 @@ def translate(
     if scope == "suggested" and not suggested_ranges(project):
         raise HTTPException(status_code=400, detail="Санал алга — эхлээд санал боловсруулна уу.")
     _require_provider(db, providers.LLM)
+    quotas.admit_job(db, principal, "translate", dedupe_key=f"translate:{project_id}")
     return {
         "job_id": queue.enqueue(
             "translate",
@@ -621,6 +661,7 @@ def suggest(
                 else f"Дээд тал нь {youtube_max} YouTube хураангуй гаргах боломжтой."
             ),
         )
+    quotas.admit_job(db, principal, "suggest", dedupe_key=f"suggest:{project_id}")
     return {
         "job_id": queue.enqueue(
             "suggest",
@@ -825,12 +866,15 @@ def export_all(
     digest = hashlib.sha256(
         json.dumps(pick, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:12] if pick else "all"
+    key = f"export_all:{project_id}:{digest}"
+    # A voice-over buys speech; without one an export bills nothing outside.
+    quotas.admit_job(db, principal, "export_all", paid=voice_over_on(project), dedupe_key=key)
     return {
         "job_id": queue.enqueue(
             "export_all",
             project_id=project_id,
             payload={"pick": pick} if pick else None,
-            dedupe_key=f"export_all:{project_id}:{digest}",
+            dedupe_key=key,
             db=db,
         )
     }
@@ -847,9 +891,21 @@ def export_timeline(
         raise HTTPException(status_code=400, detail="Timeline дээр клип алга.")
     _require_translation_ready(project, [(c.start, c.end) for c in project.clips])
     _require_voice_ready(db, project)
-    # No dedupe key: re-exporting the same timeline after changing render
-    # settings is a normal thing to want, unlike re-running a paid stage.
-    return {"job_id": queue.enqueue("export", project_id=project_id, db=db)}
+    # Keyed by what the render reads, not by the project alone: re-exporting
+    # after changing the clips, the settings or the text is a normal thing to
+    # want and gets its own job, while a second click on the SAME render gets
+    # the first one back. There was no key at all, and 25 identical exports
+    # queued behind one another (SEC-4).
+    render = project.model_dump(
+        mode="json",
+        include={"language", "clips", "transition", "subtitle_style", "export", "transcript"},
+    )
+    digest = hashlib.sha256(
+        json.dumps(render, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()[:16]
+    key = f"export:{project_id}:{digest}"
+    quotas.admit_job(db, principal, "export", paid=voice_over_on(project), dedupe_key=key)
+    return {"job_id": queue.enqueue("export", project_id=project_id, dedupe_key=key, db=db)}
 
 
 # ---------------------------------------------------------------------------

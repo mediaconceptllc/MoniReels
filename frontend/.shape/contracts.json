@@ -584,6 +584,7 @@
       "used_for": []
     },
     "updated_at": 0.0,
+    "upload_size_bytes": null,
     "video": {
       "audio_key": "",
       "codec": "",
@@ -750,6 +751,7 @@
       "type": ""
     },
     "updated_at": 0.0,
+    "upload_size_bytes": null,
     "video": {
       "audio_key": "",
       "codec": "",
@@ -927,6 +929,15 @@
       "configured": false,
       "model": ""
     },
+    "secret_storage": {
+      "encrypted": false,
+      "error": null,
+      "plaintext": [
+        ""
+      ],
+      "unreadable": [],
+      "variable": ""
+    },
     "storage": {
       "bucket": "",
       "configured": false,
@@ -965,7 +976,8 @@
       "measured_at": 0.0,
       "min_free_bytes": 0,
       "total_bytes": 0
-    }
+    },
+    "worker_seen_at": 0.0
   },
   "ranges_selected": {
     "clips": 0
