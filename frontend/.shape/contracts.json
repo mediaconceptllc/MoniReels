@@ -584,6 +584,7 @@
       "used_for": []
     },
     "updated_at": 0.0,
+    "upload_size_bytes": null,
     "video": {
       "audio_key": "",
       "codec": "",
@@ -750,6 +751,7 @@
       "type": ""
     },
     "updated_at": 0.0,
+    "upload_size_bytes": null,
     "video": {
       "audio_key": "",
       "codec": "",

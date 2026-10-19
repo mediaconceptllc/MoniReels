@@ -2714,7 +2714,7 @@ def test_a_request_holds_one_database_connection_at_a_time(client, db, connectio
     and every one of them answered 500."""
     from app import r2
 
-    monkeypatch.setattr(r2, "exists", lambda key: True)
+    monkeypatch.setattr(r2, "object_size", lambda key: 1024)
     owner = _user(db, "onepool")
     auth = _auth(client, "onepool")
     row = _project_with_video(db, owner)
