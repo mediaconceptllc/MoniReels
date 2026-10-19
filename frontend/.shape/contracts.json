@@ -929,6 +929,15 @@
       "configured": false,
       "model": ""
     },
+    "secret_storage": {
+      "encrypted": false,
+      "error": null,
+      "plaintext": [
+        ""
+      ],
+      "unreadable": [],
+      "variable": ""
+    },
     "storage": {
       "bucket": "",
       "configured": false,
