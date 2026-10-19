@@ -269,10 +269,10 @@ async def prepare(
     for n, (start, end) in enumerate(wanted, 1):
         if check:
             check()
-        key = bed_key(project_id, model_name, start, end)
-        local = cache_dir / key.rsplit("/", 1)[-1]
-        if await asyncio.to_thread(r2.exists, key):
-            await asyncio.to_thread(r2.download_file, key, local)
+        stored = bed_key(project_id, model_name, start, end)
+        local = cache_dir / stored.rsplit("/", 1)[-1]
+        if await asyncio.to_thread(r2.exists, stored):
+            await asyncio.to_thread(r2.download_file, stored, local)
             report.cached += 1
         else:
             w = window(start, end)
@@ -281,7 +281,7 @@ async def prepare(
             separated = await asyncio.to_thread(separate, pcm)
             logger.info("Separated %.1fs of sound in %.1fs", end - start, time.monotonic() - started)
             await encode_flac(ffmpeg, trim(separated, w), local)
-            await asyncio.to_thread(r2.upload_file, local, key, "audio/flac")
+            await asyncio.to_thread(r2.upload_file, local, stored, "audio/flac")
             report.separated += 1
             report.seconds += end - start
         beds[(start, end)] = local

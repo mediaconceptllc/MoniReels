@@ -386,7 +386,7 @@ class DuudlagaClient(SttProvider):
 
     async def _transcribe_span(
         self,
-        ffmpeg: str,
+        ffmpeg: Path,
         wav_path: Path,
         workdir: Path,
         start: float,

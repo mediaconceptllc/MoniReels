@@ -1473,6 +1473,39 @@ def test_a_near_miss_is_answered_with_what_it_probably_meant(client, db):
     assert "deepseek/deepseek-v4-flash" in response.json()["detail"]
 
 
+def test_the_refusals_a_person_reads_are_in_mongolian(client, db):
+    """Every one of these was English in a Mongolian interface (audit
+    ARCH-8): the page shows a refusal's `detail` as it comes."""
+    import re
+
+    import pytest as _pytest
+
+    from app import brand, provider_settings
+
+    cyrillic = re.compile("[\u0400-\u04FF]")
+    _user(db, "plain")
+    _user(db, "root", role="admin")
+
+    forbidden = client.get("/admin/users", headers=_auth(client, "plain"))
+    assert forbidden.status_code == 403
+    assert cyrillic.search(forbidden.json()["detail"]), forbidden.json()
+
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+    refused = _set_model(client, headers, "deepseek/deepseek-v4-flash-latest", _rejects("deepseek/x"))
+    assert cyrillic.search(refused.json()["detail"]), refused.json()
+    assert "Did you mean" not in refused.json()["detail"]
+
+    for call in (
+        lambda: brand.new_key("banner", "image/png"),
+        lambda: brand.new_key("logo", "application/pdf"),
+        lambda: provider_settings.apply(db, {"jwt_secret": "x"}, actor="root", ip=""),
+    ):
+        with _pytest.raises(ValueError) as caught:
+            call()
+        assert cyrillic.search(str(caught.value)), str(caught.value)
+
+
 def test_an_unreadable_catalogue_does_not_stop_the_save(client, db):
     """Refusing here would make an OpenRouter outage a settings lockout —
     including the outage an operator is trying to configure their way out of.

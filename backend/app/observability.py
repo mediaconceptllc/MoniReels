@@ -211,9 +211,14 @@ def purge_audit(keep_days: int) -> int:
     """Drop audit rows older than `keep_days` (housekeeping). The trail is
     for "who changed this, recently" — a year of it is plenty, and an
     append-only table with no end is a disk that fills one day."""
+    from sqlalchemy import delete
+
     from app.db import session_scope
     from app.dbmodels import AuditLog
 
     cutoff = time.time() - keep_days * 86400
     with session_scope() as db:
-        return db.execute(AuditLog.__table__.delete().where(AuditLog.at < cutoff)).rowcount or 0
+        result = db.execute(
+            delete(AuditLog).where(AuditLog.at < cutoff).execution_options(synchronize_session=False)
+        )
+        return result.rowcount or 0

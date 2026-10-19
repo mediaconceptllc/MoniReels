@@ -29,18 +29,18 @@ class UnknownSttProvider(ValueError):
 def build_client(settings: Settings) -> SttProvider:
     name = (settings.stt_provider or DUUDLAGA).strip().lower()
     if name == DUUDLAGA:
-        from app.stt.duudlaga_client import build_client as build
+        from app.stt.duudlaga_client import build_client as build_duudlaga
 
         logger.info("STT provider: duudlaga.dev")
-        return build(settings)
+        return build_duudlaga(settings)
     if name == ELEVENLABS:
-        from app.stt.elevenlabs_client import build_client as build
+        from app.stt.elevenlabs_client import build_client as build_elevenlabs
 
         logger.info(
             "STT provider: ElevenLabs %s (diarize=%s)",
             settings.elevenlabs_stt_model, settings.elevenlabs_diarize,
         )
-        return build(settings)
+        return build_elevenlabs(settings)
     raise UnknownSttProvider(
         f"Тодорхойгүй яриа таних систем: {settings.stt_provider!r}. "
         f"Боломжтой: {', '.join(PROVIDERS)}"
