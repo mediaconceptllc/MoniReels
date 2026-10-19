@@ -43,6 +43,7 @@ from app.transition.filtergraph import (
     TransitionPlan,
     audio_crossfade_chain,
     build_xfade_filtergraph,
+    exact_audio,
     plan_transition,
     video_xfade_chain,
 )
@@ -67,6 +68,20 @@ def _scaled_progress(
     return callback
 
 
+def clip_frames(duration: float, fps: float) -> int:
+    """How many output frames a range of `duration` seconds becomes.
+
+    The one rounding every length in a render goes through: the cut makes
+    exactly this many frames, and the join and the subtitles plan with
+    `frames / fps` — so the plan is the file, to the frame.
+    """
+    return max(1, round(duration * fps))
+
+
+def audio_samples(duration: float) -> int:
+    return round(duration * AUDIO_SAMPLE_RATE)
+
+
 async def _cut_and_normalize_clip(
     binaries: FfmpegBinaries,
     handle: JobHandle,
@@ -85,9 +100,30 @@ async def _cut_and_normalize_clip(
     voice_path: Path | None = None,
     original_volume: float = 1.0,
     bed_path: Path | None = None,
+    frames: int | None = None,
 ) -> None:
-    vf = build_video_filter(width, height, fps, orientation, portrait_fill)
-    duration = clip.end - clip.start
+    """Cuts one range and normalizes it — to EXACTLY `frames` frames of
+    picture and the same length of sound (see clip_frames).
+
+    The plan the join and the subtitles follow is built from those lengths,
+    so a clip that comes out longer than planned moves everything after it.
+    `-ss`/`-to` alone gave one frame too many about half the time and a
+    sound track 21 ms too long (AAC's priming, kept as audio by
+    `-avoid_negative_ts make_zero`, which also started the picture 21 ms
+    late). The picture is
+    now counted (`trim`, a cloned last frame where the source runs out) and
+    the sound padded and cut to the sample.
+    """
+    frames = frames if frames is not None else clip_frames(clip.end - clip.start, fps)
+    duration = frames / fps
+    samples = audio_samples(duration)
+    # Counted in the graph, not with -frames:v: a stream stopped by its frame
+    # limit ends the whole file, and the sound lost up to its last 15 ms.
+    vf = (
+        f"{build_video_filter(width, height, fps, orientation, portrait_fill)},"
+        f"tpad=stop=-1:stop_mode=clone,trim=end_frame={frames}"
+    )
+    exact = f"apad=whole_len={samples},atrim=end_sample={samples}"
 
     args = [
         *filter_thread_args(),
@@ -107,27 +143,26 @@ async def _cut_and_normalize_clip(
         if bed_path is not None:
             args += ["-i", str(bed_path)]
             bed_input = 2 if voice_path is not None else 1
+        mix = build_voice_mix(
+            af, original_volume, has_audio, voice_input=voice_input, bed_input=bed_input,
+        )
         args += [
             "-map", "0:v", "-vf", vf,
-            "-filter_complex", build_voice_mix(
-                af, original_volume, has_audio, voice_input=voice_input, bed_input=bed_input,
-            ),
-            "-map", "[vo_mix]",
+            "-filter_complex", f"{mix};[vo_mix]{exact}[vo_exact]",
+            "-map", "[vo_exact]",
         ]
-        if not has_audio and bed_path is None:
-            args += ["-shortest"]
     elif has_audio:
         af = build_audio_filter(AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_LAYOUT)
-        args += ["-vf", vf, "-af", af]
+        args += ["-vf", vf, "-af", f"{af},{exact}"]
     else:
         args += [
             "-f", "lavfi",
             "-i", f"anullsrc=channel_layout={AUDIO_CHANNEL_LAYOUT}:sample_rate={AUDIO_SAMPLE_RATE}",
-            "-vf", vf, "-map", "0:v", "-map", "1:a", "-shortest",
+            "-vf", vf, "-af", exact, "-map", "0:v", "-map", "1:a",
         ]
     args += build_video_encoder_args(crf, preset)
     args += build_audio_encoder_args()
-    args += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(out_path)]
+    args += ["-movflags", "+faststart", str(out_path)]
 
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
@@ -143,23 +178,51 @@ async def _join_concat(
     binaries: FfmpegBinaries,
     handle: JobHandle,
     normalized_paths: list[Path],
-    total_duration: float,
+    clip_durations: list[float],
     workdir: Path,
     out_path: Path,
 ) -> None:
-    list_path = workdir / "concat_list.txt"
-    list_path.write_text("\n".join(f"file '{p.name}'" for p in normalized_paths), encoding="utf-8")
+    """Clips end to end: the picture copied, the sound joined in one pass.
 
-    concat_args = [
-        "-f", "concat", "-safe", "0", "-i", "concat_list.txt",
-        "-c", "copy", "-movflags", "+faststart", str(out_path),
+    Copying the sound as well put every clip's AAC priming and last-frame
+    padding into the timeline — gapless joining is not something a copy of
+    AAC can do — and the sound slid against the picture clip by clip
+    (MEASURED: 0.39 s ahead of the picture by the 24th clip). Decoding it costs next to
+    nothing; each clip is held to its exact length (exact_audio) and joined
+    with concat, the picture still copied with its planned durations.
+    """
+    # `inpoint 0`: without it the demuxer starts each file where its EARLIEST
+    # stream starts — the sound's AAC priming, 21 ms before zero — and the
+    # copied picture landed 21 ms late against the sound. `duration` is the
+    # planned length, so each clip begins exactly where the plan says.
+    list_path = workdir / "concat_list.txt"
+    list_path.write_text(
+        "\n".join(
+            f"file '{p.name}'\ninpoint 0\nduration {d:.6f}"
+            for p, d in zip(normalized_paths, clip_durations, strict=True)
+        ),
+        encoding="utf-8",
+    )
+
+    concat_args = ["-f", "concat", "-safe", "0", "-i", "concat_list.txt"]
+    for p in normalized_paths:
+        concat_args += ["-vn", "-i", p.name]
+    trims, labels = exact_audio(
+        [f"{i + 1}:a" for i in range(len(normalized_paths))],
+        [audio_samples(d) for d in clip_durations],
+    )
+    joined = "".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[aout]"
+    concat_args += [
+        "-filter_complex", ";".join([*trims, joined]),
+        "-map", "0:v", "-map", "[aout]", "-c:v", "copy", *build_audio_encoder_args(),
+        "-movflags", "+faststart", str(out_path),
     ]
     run = FfmpegRun()
     handle.set_cancel_hook(run.cancel)
     await run.run(
         binaries.ffmpeg,  # type: ignore[arg-type]
         concat_args,
-        expected_duration_sec=total_duration,
+        expected_duration_sec=sum(clip_durations),
         cwd=workdir,
         on_progress=_scaled_progress(handle, 0.6, 0.9, "join"),
     )
@@ -193,14 +256,22 @@ class XfadeBatch:
     start_frame: int  # where the batch begins in the joined output
 
 
+#: How precisely the export writes xfade offsets and durations (see
+#: video_xfade_chain): to the microsecond.
+OFFSET_DIGITS = 6
+
+
 def _first_frame(offset: float, fps: float) -> int:
     """The output frame a clip's first frame lands on in a single-pass join.
 
     xfade starts the transition — and the next clip — at the first frame at
     or after its offset, and the offset it is given is the one written into
-    the graph: rounded to the millisecond.
+    the graph: rounded to the microsecond. An offset that IS a frame (whole
+    frames of clip and of transition — see render_timeline) may round a
+    fraction of a microsecond past it; ffmpeg's own rounding to its time
+    base brings that back onto the frame, and so does the tolerance here.
     """
-    return math.ceil(round(offset, 3) * fps - 1e-6)
+    return math.ceil(round(offset, OFFSET_DIGITS) * fps - 1e-3)
 
 
 def plan_xfade_batches(
@@ -251,7 +322,10 @@ async def _join_xfade(
 ) -> None:
     batches = plan_xfade_batches(clip_durations, plan, fps)
     if len(batches) == 1:
-        filter_complex, v_out, a_out = build_xfade_filtergraph(len(normalized_paths), xfade_name, plan)
+        filter_complex, v_out, a_out = build_xfade_filtergraph(
+            len(normalized_paths), xfade_name, plan, [audio_samples(d) for d in clip_durations],
+            digits=OFFSET_DIGITS,
+        )
         args = filter_thread_args()
         for p in normalized_paths:
             args += [*decoder_thread_args(len(normalized_paths)), "-i", str(p)]
@@ -273,8 +347,12 @@ async def _join_xfade(
             # As an input option: the demuxer drops the picture before any
             # decoder sees it.
             args += ["-vn", "-i", str(p)]
-        audio = audio_crossfade_chain([f"{i}:a" for i in range(len(normalized_paths))], plan.duration)
-        args += ["-filter_complex", ";".join(audio), "-map", "[aout]"]
+        trims, labels = exact_audio(
+            [f"{i}:a" for i in range(len(normalized_paths))],
+            [audio_samples(d) for d in clip_durations],
+        )
+        audio = audio_crossfade_chain(labels, plan.duration, digits=OFFSET_DIGITS)
+        args += ["-filter_complex", ";".join([*trims, *audio]), "-map", "[aout]"]
         args += [*build_audio_encoder_args(), str(audio_path)]
         await _run_join(binaries, handle, args, plan.final_duration, 0.6, 0.62)
 
@@ -331,8 +409,8 @@ def _batch_args(
             labels.append(f"p{i}")
         else:
             labels.append(f"{i}:v")
-    offsets = [round(plan.offsets[g], 3) - start for g in range(batch.first, batch.last)]
-    parts += video_xfade_chain(labels, xfade_name, plan.duration, offsets, digits=6)
+    offsets = [round(plan.offsets[g], OFFSET_DIGITS) - start for g in range(batch.first, batch.last)]
+    parts += video_xfade_chain(labels, xfade_name, plan.duration, offsets, digits=OFFSET_DIGITS)
     args += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-an"]
     args += build_video_encoder_args(crf, preset)
     args += ["-movflags", "+faststart"]
@@ -556,15 +634,19 @@ async def render_timeline(
                 if voice_path is not None:
                     voice_paths.append(voice_path)
                 bed_path = voice.bed_for(clip.start, clip.end)
+            frames = clip_frames(clip.end - clip.start, target_fps)
             await _cut_and_normalize_clip(
                 binaries, handle, clip, meta["has_audio"], width, height, target_fps,
                 crf, preset, orientation, portrait_fill, out_path, lo, hi,
                 voice_path=voice_path,
                 original_volume=voice.original_volume if voice is not None else 1.0,
                 bed_path=bed_path,
+                frames=frames,
             )
             normalized_paths.append(out_path)
-            clip_durations.append(clip.end - clip.start)
+            # What the clip IS, not what was asked for: the join's offsets
+            # and the subtitles' timings are built from these.
+            clip_durations.append(frames / target_fps)
 
         handle.raise_if_cancelled()
         await handle.set_progress(0.6, stage="join", message="Joining clips")
@@ -578,10 +660,10 @@ async def render_timeline(
         if transition.duration <= 0 or n == 1:
             clip_output_starts = _cumulative_starts(clip_durations)
             final_duration = sum(clip_durations)
-            await _join_concat(binaries, handle, normalized_paths, final_duration, workdir, join_target)
+            await _join_concat(binaries, handle, normalized_paths, clip_durations, workdir, join_target)
         else:
             xfade_name = resolve_transition(transition.type, supported_xfade)
-            plan = plan_transition(clip_durations, transition.duration)
+            plan = plan_transition(clip_durations, transition.duration, fps=target_fps)
             clip_output_starts = [0.0, *plan.offsets]
             final_duration = plan.final_duration
             if plan.reduced:
