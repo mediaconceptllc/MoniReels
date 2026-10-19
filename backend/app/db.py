@@ -38,8 +38,21 @@ def get_engine():
             pool_size=5,
             max_overflow=5,
             future=True,
+            connect_args={"options": session_options(settings)},
         )
     return _engine
+
+
+def session_options(settings) -> str:
+    """The server-side limits every app connection starts with (see
+    `db_*_timeout_ms` in app.config). Passed as libpq `options`, so they are
+    in force before the first statement and survive a pool reconnect."""
+    limits = {
+        "statement_timeout": settings.db_statement_timeout_ms,
+        "lock_timeout": settings.db_lock_timeout_ms,
+        "idle_in_transaction_session_timeout": settings.db_idle_in_transaction_timeout_ms,
+    }
+    return " ".join(f"-c {name}={int(ms)}" for name, ms in limits.items())
 
 
 def get_session_factory() -> sessionmaker[Session]:

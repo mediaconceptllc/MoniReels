@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app import metering, worker_report
+from app import metering, observability, worker_report
 from app.ai import usage as llm_usage
 from app.ai.localize import localize_suggestions
 from app.ai.openrouter_client import build_client as build_llm_client
@@ -56,6 +56,8 @@ from app.tts import voiceover
 from app.tts.elevenlabs import TtsError
 from app.tts.elevenlabs import build_client as build_tts_client
 from app.utils.logging import get_logger, setup_logging
+from app.utils.logging import job_id as job_id_var
+from app.utils.logging import job_kind as job_kind_var
 from app.utils.paths import (
     OutOfSpace,
     clear_all_workdirs,
@@ -792,6 +794,10 @@ def _elapsed(started: float) -> float:
 
 
 async def _run_job(job) -> None:
+    # Each job runs in its own task, so these belong to it alone: every log
+    # line it writes — and every thread it hands work to — carries its id.
+    job_id_var.set(job.id)
+    job_kind_var.set(job.kind)
     handle = JobHandle(job.id, job.kind, job.project_id, queue.payload_of(job), attempt=job.attempts)
     settle = functools.partial(queue.finish, job.id, attempt=job.attempts)
     usage = llm_usage.start()
@@ -891,6 +897,7 @@ async def _housekeeping(settings) -> None:
             ("reporting what this worker can do", _publish_report),
             ("reaping stale jobs", lambda: queue.reap_stale()),
             ("purging old jobs", lambda: queue.purge_old(settings.job_keep_days)),
+            ("purging old audit rows", lambda: observability.purge_audit(settings.audit_keep_days)),
             ("deleting retired scratch", purge_trash),
             ("aborting stale uploads", _abort_stale_uploads if settings.r2_enabled else None),
         ):
@@ -992,6 +999,7 @@ async def main() -> None:
     setup_logging()
     settings = get_settings()
     validate_registry(HANDLERS)
+    observability.init_error_reports("worker")
 
     threads = heavy_threads()
     # Must be set BEFORE torch is imported anywhere: torch reads these at

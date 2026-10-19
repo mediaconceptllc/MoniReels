@@ -261,6 +261,7 @@ const present: unknown[] = [
   raw.job_voiced.result.voice.beds_separated, raw.job_voiced.result.voice.bed_seconds,
   raw.job_voiced.result.voice.beds_cached,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
+  raw.queue.worker_seen_at,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs. Two machines, named: the
   // worker's disk is the one a render fills.

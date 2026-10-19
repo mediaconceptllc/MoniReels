@@ -10,12 +10,14 @@ that migrates would race the API on every deploy.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 
+from app.config import get_settings
 from app.db import get_engine
 from app.utils.logging import get_logger
 
@@ -36,14 +38,37 @@ def _alembic_config() -> Config:
     return config
 
 
+LOCK_POLL_S = 2.0
+
+
+def _take_lock(conn, wait_s: float) -> None:
+    """Wait for the migration lock, but not forever.
+
+    An instance that loses the race must WAIT for the migration rather than
+    start serving against the old schema — so it polls. It used to block in
+    `pg_advisory_lock` with no limit: a lock left by a stuck instance was a
+    deployment that hung with nothing in its log. Now it gives up with a
+    reason, and the platform's restart tries again.
+    """
+    deadline = time.monotonic() + wait_s
+    while True:
+        if conn.execute(text("SELECT pg_try_advisory_lock(:id)"), {"id": _LOCK_ID}).scalar():
+            conn.commit()
+            return
+        conn.commit()
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Another instance has held the migration lock for over {wait_s:.0f}s. "
+                "Check for a stuck API instance (pg_locks, advisory lock "
+                f"{_LOCK_ID}) before deploying again."
+            )
+        time.sleep(LOCK_POLL_S)
+
+
 def upgrade_to_head() -> None:
     engine = get_engine()
     with engine.connect() as conn:
-        # Blocking lock, not try-lock: an instance that loses the race must
-        # WAIT for the migration rather than start serving against the old
-        # schema.
-        conn.execute(text("SELECT pg_advisory_lock(:id)"), {"id": _LOCK_ID})
-        conn.commit()
+        _take_lock(conn, get_settings().migration_lock_wait_s)
         try:
             logger.info("Running database migrations")
             command.upgrade(_alembic_config(), "head")
