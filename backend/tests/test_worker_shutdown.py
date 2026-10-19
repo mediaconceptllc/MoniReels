@@ -18,14 +18,12 @@ and a process killed there settles nothing at all.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from pathlib import Path
 
 import pytest
 
 from app import worker
-from app.config import Settings
+from app.config import WORKER_DRAINING_S, Settings
 from app.dbmodels import Job, Project, User
 from app.jobs import queue
 from app.security import hash_password
@@ -33,22 +31,24 @@ from tests.conftest import must_finish, requires_db
 
 pytestmark = requires_db
 
-RAILWAY_WORKER = Path(__file__).resolve().parents[1] / "railway.worker.json"
-
-
 # --------------------------------------------------------------------------
 # The two numbers that have to agree.
+#
+# The platform's lives on Railway's dashboard (the worker service's draining
+# time), pinned in app.config as WORKER_DRAINING_S. It used to be read from
+# railway.worker.json — a file this project's deployments never applied
+# (they recorded no config file), so this check passed for months while
+# production ran on the default 0.
 # --------------------------------------------------------------------------
 
 
 def _draining_seconds() -> int:
-    config = json.loads(RAILWAY_WORKER.read_text())
-    return int(config["deploy"]["drainingSeconds"])
+    return WORKER_DRAINING_S
 
 
 def test_the_platform_window_is_configured_at_all():
-    """Railway's default is measured in seconds, not minutes. Leaving it
-    unset is what produced the ten seconds above."""
+    """Railway's default is 0 seconds. Leaving it unset is what produced the
+    ten seconds above."""
     assert _draining_seconds() >= 60
 
 
@@ -64,8 +64,8 @@ def test_shutdown_grace_fits_the_platform_window():
     grace = Settings().worker_shutdown_grace_s
     window = _draining_seconds()
     assert grace < window, (
-        f"WORKER_SHUTDOWN_GRACE_S ({grace}s) must stay under railway.worker.json's "
-        f"drainingSeconds ({window}s)"
+        f"WORKER_SHUTDOWN_GRACE_S ({grace}s) must stay under the worker service's "
+        f"draining time on Railway ({window}s, app.config.WORKER_DRAINING_S)"
     )
     # And with room to settle the jobs: that is several database round trips
     # after the wait ends, not an instant.

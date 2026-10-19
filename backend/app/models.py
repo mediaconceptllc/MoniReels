@@ -265,6 +265,11 @@ class Project(BaseModel):
     #: is what they all were.
     language: str = "mn"
     video: VideoMeta | None = None
+    #: What the browser declared it would upload, held until the upload is
+    #: confirmed: the presigned PUT does not bind a size, so upload-complete
+    #: compares the object R2 actually holds against this. None on projects
+    #: made before it existed — those are checked against the maximum only.
+    upload_size_bytes: int | None = None
     transcript: Transcript | None = None
     suggestions: Suggestions | None = None
     clips: list[Clip] = Field(default_factory=list)

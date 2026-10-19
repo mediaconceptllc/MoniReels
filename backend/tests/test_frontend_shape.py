@@ -386,6 +386,8 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     # contract, so it is the one thing faked here — everything else is the
     # real handler answering a real request.
     monkeypatch.setattr(r2, "exists", lambda key: True)
+    # upload-complete also compares the stored size with the declared one.
+    monkeypatch.setattr(r2, "object_size", lambda key: 1024)
 
     user = _admin(db)
     login = client.post(

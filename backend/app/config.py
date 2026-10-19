@@ -22,6 +22,15 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com"
+
+#: The worker service's draining time on Railway (Settings → Deploy →
+#: Draining seconds): how long SIGTERM is given before SIGKILL. It lives on
+#: the dashboard, not in this repository — `railway.worker.json` said 600 for
+#: months while the deployments recorded no config file at all and ran on the
+#: default 0 (measured: a 4-5 minute paid call killed 10 seconds into a
+#: deploy). Pinned here so the shutdown grace can be checked against it;
+#: change both together, and docs/DEPLOY.md with them.
+WORKER_DRAINING_S = 600
 _R2_ACCOUNT_RE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -198,10 +207,31 @@ class Settings(BaseSettings):
     elevenlabs_stt_usd_per_minute: float | None = Field(default=None, ge=0)
     elevenlabs_tts_usd_per_1k_chars: float | None = Field(default=None, ge=0)
 
+    # ---- What one account may put on the shared queue (app.quotas) -----
+    # The lanes are system-wide — one render, one paid call at a time — so
+    # without these one account, or one stolen password, could queue
+    # twenty-five exports and hold every other producer behind them, or run
+    # an unbounded provider bill (the audit measured both). Generous on
+    # purpose: an editor working normally never meets them. Admins are
+    # exempt. 0 turns a limit off.
+    #: Queued + running jobs per account (imports excluded: they follow an
+    #: upload, and the project limits below already bound uploads).
+    quota_active_jobs: int = Field(default=10, ge=0)
+    #: Of those, the PAID kinds (transcribe, suggest, translate).
+    quota_active_paid_jobs: int = Field(default=3, ge=0)
+    quota_projects_per_hour: int = Field(default=30, ge=0)
+    quota_projects_total: int = Field(default=500, ge=0)
+    #: Month-to-date KNOWN spend (USD, the usage ledger) at which an account's
+    #: next paid job is refused. Unset = no cap. Speech without a configured
+    #: rate above is recorded at an unknown price and cannot count toward it —
+    #: set those rates for the cap to see speech at all.
+    quota_monthly_usd: float | None = Field(default=None, ge=0)
+
     @field_validator(
         "duudlaga_usd_per_minute",
         "elevenlabs_stt_usd_per_minute",
         "elevenlabs_tts_usd_per_1k_chars",
+        "quota_monthly_usd",
         mode="before",
     )
     @classmethod
@@ -251,8 +281,9 @@ class Settings(BaseSettings):
     # generic verdict five minutes later.
     #
     # This MUST stay below the platform's own SIGTERM-to-SIGKILL window
-    # (`drainingSeconds` in railway.worker.json), or the worker is killed
-    # before it can settle anything and the wait buys nothing at all.
+    # (WORKER_DRAINING_S below: the worker service's draining time, set on
+    # Railway's dashboard), or the worker is killed before it can settle
+    # anything and the wait buys nothing at all.
     # `test_shutdown_grace_fits_the_platform_window` holds the two together.
     #
     # Costs nothing on an idle worker: the loop notices the signal within
