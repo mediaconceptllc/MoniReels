@@ -322,6 +322,9 @@ export interface ProjectSummary {
   /** Signed and short-lived, like every other media URL here. Null until the
    *  import has made one — or when storage is not configured at all. */
   thumbnail_url: string | null;
+  /** The latest import of this project's video failed: it will never be
+   *  processed until a new video is uploaded (the project page offers it). */
+  import_failed: boolean;
 }
 
 /**
@@ -444,6 +447,31 @@ export interface CreateProjectResponse {
   upload_url: string;
   upload_key: string;
   upload_expires_in_s: number;
+}
+
+/** `single`: PUT the whole file on the URL the project was created with.
+ *  `multipart`: PUT `part_count` parts of `part_size` bytes (the last one
+ *  shorter) on URLs from `signParts`, then `completeMultipart`. */
+export interface MultipartStart {
+  mode: "single" | "multipart";
+  upload_id: string | null;
+  part_size: number | null;
+  part_count: number | null;
+  sign_batch: number | null;
+}
+
+export interface MultipartSigned {
+  /** Part number, as a string key → presigned PUT URL. */
+  urls: Record<string, string>;
+  expires_in_s: number;
+}
+
+/** What R2 already holds, so a reloaded page uploads only the rest. */
+export interface MultipartStatus {
+  part_size: number;
+  part_count: number;
+  sign_batch: number;
+  parts: { part_number: number; size: number }[];
 }
 
 export interface QueueStatus {

@@ -307,6 +307,37 @@
     "role": "admin",
     "username": ""
   },
+  "multipart_aborted": {
+    "aborted": false
+  },
+  "multipart_completed": {
+    "completed": false,
+    "parts": 0
+  },
+  "multipart_signed": {
+    "expires_in_s": 0,
+    "urls": {
+      "*": ""
+    }
+  },
+  "multipart_started": {
+    "mode": "multipart",
+    "part_count": 0,
+    "part_size": 0,
+    "sign_batch": 0,
+    "upload_id": ""
+  },
+  "multipart_status": {
+    "part_count": 0,
+    "part_size": 0,
+    "parts": [
+      {
+        "part_number": 0,
+        "size": 0
+      }
+    ],
+    "sign_batch": 0
+  },
   "output_deleted": {
     "deleted": false
   },
@@ -593,6 +624,7 @@
       "used_for": []
     },
     "updated_at": 0.0,
+    "upload_key": null,
     "upload_size_bytes": null,
     "video": {
       "audio_key": "",
@@ -689,6 +721,7 @@
       "has_transcript": false,
       "has_video": false,
       "id": "",
+      "import_failed": false,
       "n_outputs": 0,
       "name": "",
       "thumbnail_url": "",
@@ -985,6 +1018,12 @@
   "upload_complete": {
     "job_id": "",
     "project_id": ""
+  },
+  "upload_restarted": {
+    "project_id": "",
+    "upload_expires_in_s": 0,
+    "upload_key": "",
+    "upload_url": ""
   },
   "usage": {
     "month_totals": [

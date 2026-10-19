@@ -45,6 +45,9 @@ import type {
   Job,
   JobStats,
   Me,
+  MultipartSigned,
+  MultipartStart,
+  MultipartStatus,
   Output,
   Project,
   ProjectSettingsSaved,
@@ -123,6 +126,13 @@ const writes = {
   admin_password_reset: contracts.admin_password_reset as { updated: boolean },
   admin_user_active: contracts.admin_user_active as { active: boolean },
   admin_job_retried: contracts.admin_job_retried as { requeued: boolean },
+  // A source in parts, and a new source for a project whose video failed.
+  multipart_started: contracts.multipart_started as MultipartStart,
+  multipart_signed: contracts.multipart_signed as MultipartSigned,
+  multipart_status: contracts.multipart_status as MultipartStatus,
+  multipart_completed: contracts.multipart_completed as { completed: boolean; parts: number },
+  multipart_aborted: contracts.multipart_aborted as { aborted: boolean },
+  upload_restarted: contracts.upload_restarted as CreateProjectResponse,
 };
 
 /* ------------------------------------------------------------------ *
@@ -145,6 +155,8 @@ const present: unknown[] = [
     // The card's picture. Signed per request, so it is the one field on a
     // list row that cannot be cached with the row.
     p.thumbnail_url,
+    // A video that will never be processed until a new one is uploaded.
+    p.import_failed,
   ]),
 
   // the project itself
@@ -230,6 +242,14 @@ const present: unknown[] = [
   raw.create_project.project_id, raw.create_project.upload_url,
   raw.create_project.upload_key, raw.create_project.upload_expires_in_s,
   raw.upload_complete.project_id, raw.upload_complete.job_id,
+  // the same upload in parts (lib/upload.ts), and starting it again
+  raw.multipart_started.mode, raw.multipart_started.upload_id, raw.multipart_started.part_size,
+  raw.multipart_started.part_count, raw.multipart_started.sign_batch,
+  raw.multipart_signed.urls,
+  raw.multipart_status.part_size, raw.multipart_status.part_count, raw.multipart_status.sign_batch,
+  raw.multipart_status.parts.map((part) => [part.part_number, part.size]),
+  raw.multipart_completed.completed, raw.multipart_aborted.aborted,
+  raw.upload_restarted.project_id, raw.upload_restarted.upload_url,
 
   // outputs: play and download are two different URLs on purpose — the
   // second carries a Content-Disposition, so one link cannot do both.

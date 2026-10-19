@@ -12,7 +12,8 @@
     "check-ui": "node scripts/check-ui.mjs",
     "check-sse": "tsx scripts/check-sse.ts",
     "check-auth": "tsx scripts/check-auth.ts",
-    "check-copy": "tsx scripts/check-copy.ts"
+    "check-copy": "tsx scripts/check-copy.ts",
+    "check-upload": "tsx scripts/check-upload.ts"
   },
   "dependencies": {
     "next": "^15.1.0",
