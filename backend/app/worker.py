@@ -35,7 +35,7 @@ from app.audio import dub_bed
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
 from app.jobs import cancel, queue
-from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
+from app.jobs.kinds import MAX_ATTEMPTS, lane_of, open_lanes, parse_lanes, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
 from app.languages import (
     lines_used,
@@ -1094,11 +1094,21 @@ async def main() -> None:
     os.environ.setdefault("MKL_NUM_THREADS", str(threads))
 
     worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
+    # This worker's own capacity per lane (see app.jobs.kinds). A bad
+    # WORKER_LANES stops it here, before it claims anything.
+    lanes = parse_lanes(settings.worker_lanes)
+    ceiling = settings.worker_concurrency
     logger.info(
-        "Worker %s starting (threads=%d, concurrency=%d, separation=%s, dub=%s)",
-        worker_id, threads, settings.worker_concurrency, settings.enable_separation,
-        dub_bed.available(),
+        "Worker %s starting (threads=%d, lanes=%s, concurrency=%s, separation=%s, dub=%s)",
+        worker_id, threads, " ".join(f"{lane}={cap}" for lane, cap in lanes.items()),
+        ceiling or "lanes", settings.enable_separation, dub_bed.available(),
     )
+    if ceiling and ceiling < sum(lanes.values()):
+        logger.warning(
+            "WORKER_CONCURRENCY=%d is below the lanes' %d, so work will wait while a lane "
+            "still has room. Unset it to let the lanes alone bound this worker.",
+            ceiling, sum(lanes.values()),
+        )
     clear_all_workdirs()
 
     loop = asyncio.get_running_loop()
@@ -1126,12 +1136,15 @@ async def main() -> None:
             chores = asyncio.create_task(_housekeeping(settings))
 
         running = {t: j for t, j in running.items() if not t.done()}
-        if len(running) >= settings.worker_concurrency:
+        # Counted HERE, from this worker's own jobs: a lane bounds this box's
+        # resources and its share of a provider, not the whole system's.
+        room = open_lanes(lanes, [lane_of(j.kind) for j in running.values()], ceiling)
+        if not room:
             await asyncio.sleep(POLL_IDLE_SEC)
             continue
 
         try:
-            job = await asyncio.to_thread(queue.claim, worker_id)
+            job = await asyncio.to_thread(queue.claim, worker_id, room)
         except Exception:  # noqa: BLE001 - a database blip must not end the worker
             logger.exception("Failed to claim a job")
             await asyncio.sleep(POLL_IDLE_SEC * 2)

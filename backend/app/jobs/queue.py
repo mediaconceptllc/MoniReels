@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeGuard
@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.db import session_scope
 from app.dbmodels import Job
 from app.jobs.cancel import JobCancelled
-from app.jobs.kinds import LANE_LIMITS, MAX_ATTEMPTS, lane_of, no_retry, priority_of
+from app.jobs.kinds import LANE_LIMITS, MAX_ATTEMPTS, kinds_in, lane_of, no_retry, priority_of
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -343,33 +343,32 @@ def reap_stale() -> Reaped:
         return Reaped(requeued=requeued, failed=failed)
 
 
-def claim(worker_id: str) -> Job | None:
-    """Take the next runnable job, or None.
+def claim(worker_id: str, lanes: Collection[str] | None = None) -> Job | None:
+    """Take the next runnable job in one of `lanes` (default: every lane),
+    or None.
 
-    Lane capacity is checked against rows that are actually alive (running
-    AND heartbeating), never against the raw `running` count — otherwise a
-    dead worker's corpse permanently blocks its lane.
+    Which lanes have room is the CALLING worker's question, answered from
+    the jobs it is running itself (app.jobs.kinds.open_lanes). This used to
+    count live rows per lane across every worker, which made each cap
+    system-wide (audit ARCH-2) — and racy besides: two workers could both
+    count a free slot and both take it. Counting in-process has neither
+    problem, and no dead worker's `running` corpse can hold a lane shut,
+    because nobody counts it.
+
+    Filtered by KIND, not by the stored `lane`: a row queued before a lane
+    was renamed or split still carries the old name, and is claimed by what
+    its kind is now.
     """
-    cutoff = time.time() - _stale_sec()
+    kinds = kinds_in(LANE_LIMITS if lanes is None else lanes)
+    if not kinds:
+        return None
     with session_scope() as db:
-        live_by_lane: dict[str, int] = {
-            lane: n
-            for lane, n in db.execute(
-                select(Job.lane, func.count())
-                .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > cutoff)
-                .group_by(Job.lane)
-            )
-        }
-        open_lanes = [lane for lane, limit in LANE_LIMITS.items() if live_by_lane.get(lane, 0) < limit]
-        if not open_lanes:
-            return None
-
         now = time.time()
         job = db.scalars(
             select(Job)
             .where(
                 Job.state == "queued",
-                Job.lane.in_(open_lanes),
+                Job.kind.in_(kinds),
                 # A retry waiting out its backoff is not runnable yet.
                 or_(Job.available_at.is_(None), Job.available_at <= now),
             )
@@ -380,6 +379,7 @@ def claim(worker_id: str) -> Job | None:
         if job is None:
             return None
 
+        job.lane = lane_of(job.kind)
         job.state = "running"
         job.claimed_by = worker_id
         job.heartbeat_at = now
