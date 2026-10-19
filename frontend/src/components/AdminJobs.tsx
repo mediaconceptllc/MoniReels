@@ -14,8 +14,16 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { duration, fileSize, relativeTime } from "@/lib/format";
-import { JOB_LABELS } from "@/lib/jobs";
-import type { AdminJob, AdminJobsPage, JobState, JobStats, JobStatsRow, QueueStatus } from "@/lib/types";
+import { JOB_LABELS, LANE_LABELS, laneNames } from "@/lib/jobs";
+import type {
+  AdminJob,
+  AdminJobsPage,
+  JobState,
+  JobStats,
+  JobStatsRow,
+  QueueStatus,
+  WorkerInfo,
+} from "@/lib/types";
 import { Alert, Badge, Button, Card, Field, Loading, Select, Skeleton } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { STATE_LABEL, stateTone } from "@/components/JobHistory";
@@ -104,6 +112,14 @@ function StatsCard({ stats, days, onDays }: { stats: JobStats | null; days: numb
             {stats.queue.stalled && (
               <Alert tone="warn">
                 Ажил хүлээж байгаа ч амьд worker алга — worker үйлчилгээ зогссон байж магадгүй.
+              </Alert>
+            )}
+            {/* One pool down beside a healthy one: "a worker is alive" is
+                true, and every job of that lane still waits for nobody. */}
+            {stats.queue.unserved_lanes.length > 0 && (
+              <Alert tone="warn">
+                {laneNames(stats.queue.unserved_lanes)} ажил хүлээж байгаа ч түүнийг гүйцэтгэх амьд worker
+                алга. Энэ эгнээг ажиллуулдаг worker (WORKER_LANES) зогссон эсвэл тохируулагдаагүй байна.
               </Alert>
             )}
 
@@ -200,6 +216,66 @@ function DiskCard({ queue }: { queue: QueueStatus | null }) {
             <span className="text-xs text-ink-3">Энэ нь хүсэлт хүлээн авдаг машин — экспорт энд бичигддэггүй.</span>
           </div>
         </div>
+      </div>
+    </Card>
+  );
+}
+
+/** Which lanes a worker runs, by name, with how many of each at once. */
+function servedLanes(worker: WorkerInfo): string {
+  const served = Object.entries(worker.lanes).filter(([, cap]) => cap > 0);
+  if (!served.length) return "Эгнээгүй";
+  return served.map(([lane, cap]) => `${LANE_LABELS[lane] ?? lane} ×${cap}`).join(" · ");
+}
+
+function WorkersCard({ queue }: { queue: JobStats["queue"] | null }) {
+  if (!queue) return null;
+  return (
+    <Card className="p-5">
+      <div className="flex flex-col gap-3">
+        <h2 className="font-display text-lg font-semibold text-ink">Worker ба эгнээ</h2>
+        <ul className="grid gap-2 sm:grid-cols-3">
+          {queue.lanes.map((l) => (
+            <li key={l.lane} className="flex flex-col gap-1 rounded-md border border-rule p-3">
+              <span className="text-[13px] font-medium text-ink-2">{LANE_LABELS[l.lane] ?? l.lane}</span>
+              <span className="tabular text-sm text-ink">
+                {l.workers} worker · {l.runnable} хүлээж буй
+              </span>
+              {l.served === false && (
+                <span>
+                  <Badge tone={l.runnable ? "danger" : "warn"}>Гүйцэтгэх worker алга</Badge>
+                </span>
+              )}
+              {l.served === null && (
+                <span className="text-xs text-ink-3">Тодорхойгүй — worker эгнээгээ мэдээлээгүй</span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {queue.workers.length === 0 ? (
+          <p className="text-sm text-ink-3">Энэ хувилбарын worker хараахан мэдээлээгүй байна.</p>
+        ) : (
+          <ul className="divide-y divide-rule-soft">
+            {queue.workers.map((w) => (
+              <li key={w.id} className="flex flex-col gap-1 py-2.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Badge tone={w.live ? "fit" : "danger"}>{w.live ? "Амьд" : "Зогссон"}</Badge>
+                  <span className="font-mono text-xs text-ink [overflow-wrap:anywhere]">{w.id}</span>
+                  {w.separation && <Badge tone="accent">Demucs</Badge>}
+                  <span className="tabular ml-auto text-xs text-ink-3">
+                    Сүүлд: {relativeTime(w.seen_at)}
+                  </span>
+                </div>
+                <p className="text-xs text-ink-2">{servedLanes(w)}</p>
+                <p className="tabular text-xs text-ink-3">
+                  Эхэлсэн: {relativeTime(w.started_at)}
+                  {w.commit && ` · ${w.commit.slice(0, 7)}`}
+                  {w.disk && ` · ${fileSize(w.disk.free_bytes)} сул`}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </Card>
   );
@@ -302,6 +378,7 @@ export function AdminJobs() {
       {notice && <Alert tone="accent">{notice}</Alert>}
 
       <StatsCard stats={stats} days={days} onDays={setDays} />
+      <WorkersCard queue={stats?.queue ?? null} />
       <DiskCard queue={queue} />
 
       <Card className="p-5">

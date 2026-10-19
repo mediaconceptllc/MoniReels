@@ -78,6 +78,7 @@ _LITERAL = frozenset({
     "role", "state", "kind", "source", "orientation", "portrait_fill",
     "position", "capabilities.name", "subtitle_language", "project.language",
     "used_for", "source_speech", "multipart_started.mode",
+    "lanes.lane", "unserved_lanes", "error_code",
 })
 
 #: `Record<string, …>` in api.ts: the KEYS are data, not field names, so they
@@ -441,7 +442,9 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         Job(
             id="shapejob2", project_id=row.id, kind="export", state="failed",
             progress=0.4, stage="rendering", message="Дүрслэл",
-            result={"payload": {}, "output": {"elapsed_sec": 3.0}},
+            # `error_code` is what decides whether the page offers a retry
+            # (frontend lib/job-errors), so it is captured as the literal it is.
+            result={"payload": {}, "output": {"elapsed_sec": 3.0, "error_code": "disk_never_fits"}},
             error="RuntimeError: жишээ", attempts=2,
         ),
         # An export that read a Mongolian voice: the history shows the
@@ -488,6 +491,22 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     worker_report.publish(db, worker_report.WorkerReport(
         separation=False, model="htdemucs", at=time.time(),
         disk={"free_bytes": 1, "total_bytes": 2, "min_free_bytes": 1},
+    ))
+    # Two workers, one of each pool: a render worker that stopped (its commit
+    # and disk captured as the strings and objects they are) and an I/O
+    # worker alive (both null). With an import waiting, the heavy lane is the
+    # one nobody serves — so `unserved_lanes` holds a real lane, not [].
+    for me, at, disk in (
+        (worker_report.Identity("render-shape", {"heavy": 1, "stt": 0, "llm": 0}, 1.0, "abc123"),
+         time.time() - 600, {"free_bytes": 1, "total_bytes": 2, "min_free_bytes": 1}),
+        (worker_report.Identity("io-shape", {"heavy": 0, "stt": 2, "llm": 4}, 1.0, None),
+         time.time(), None),
+    ):
+        worker_report.beat(db, me, worker_report.WorkerReport(
+            separation=False, model="htdemucs", at=at, disk=disk, worker=me.id,
+        ))
+    db.add(Job(
+        id="shapejob4", project_id=None, kind="import_video", lane="heavy", state="queued", attempts=0,
     ))
     db.commit()
 
@@ -675,6 +694,7 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         "job_kinds": {k: 0 for k in kinds.KINDS},
         "output_kinds": {o["kind"]: 0 for o in shape["outputs"]},
         "cut_roles": {c["role"]: 0 for c in shape["project"]["suggestions"]["shorts"][0]["cuts"]},
+        "lanes": {lane: 0 for lane in kinds.LANE_LIMITS},
     })
 
 

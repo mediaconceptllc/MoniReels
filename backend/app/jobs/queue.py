@@ -26,6 +26,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import worker_report
 from app.db import session_scope
 from app.dbmodels import Job
 from app.jobs.cancel import JobCancelled
@@ -193,9 +194,9 @@ def list_for_project(project_id: str, limit: int = 50, db: Session | None = None
         return [to_dict(j) for j in rows]
 
 
-# A worker publishes its report every minute (app.worker._housekeeping);
-# three missed rounds is a worker that is gone, not one that is busy.
-WORKER_REPORT_STALE_SEC = 180
+# A worker speaks every minute (app.worker); three missed rounds is a worker
+# that is gone, not one that is busy. One number, kept where it is read.
+WORKER_REPORT_STALE_SEC = worker_report.STALE_SEC
 
 
 def queue_overview(db: Session | None = None) -> dict:
@@ -208,9 +209,15 @@ def queue_overview(db: Session | None = None) -> dict:
     (a lane already busy, a retry still backing off) read as "the worker is
     down". The worker's own report is the second sign of life — published
     on a timer whether or not it has work.
-    """
-    from app import worker_report
 
+    Per lane, too. With a render pool and an I/O pool (#64) one of them can
+    be down while the other is healthy, and "is any worker alive" says yes
+    while every export waits for a worker that is not coming. `lanes` says,
+    for each lane, how much runnable work waits in it and whether any live
+    worker serves it; `served` is null when that cannot be known — no
+    worker running this code is alive, or an older build that does not say
+    its lanes still is — never a guess that raises an alarm.
+    """
     with _use(db) as session:
         counts: dict[str, int] = {
             state: n for state, n in session.execute(select(Job.state, func.count()).group_by(Job.state))
@@ -222,30 +229,58 @@ def queue_overview(db: Session | None = None) -> dict:
             .select_from(Job)
             .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
         )
-        report = worker_report.read(session)
-        reported = report is not None and now - report.at < WORKER_REPORT_STALE_SEC
         waiting = counts.get("queued", 0)
         # A retry waiting out its backoff is not work a live worker would have
         # taken: counted as waiting, it reported a healthy idle worker as
         # down for up to RETRY_BACKOFF_MAX_SEC after every failure.
-        runnable = session.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(
-                Job.state == "queued",
-                or_(Job.available_at.is_(None), Job.available_at <= now),
+        by_kind: dict[str, int] = {
+            kind: n
+            for kind, n in session.execute(
+                select(Job.kind, func.count())
+                .where(
+                    Job.state == "queued",
+                    or_(Job.available_at.is_(None), Job.available_at <= now),
+                )
+                .group_by(Job.kind)
             )
-        ) if waiting else 0
+        } if waiting else {}
+        runnable = sum(by_kind.values())
+        per_lane: dict[str, int] = {}
+        for kind, n in by_kind.items():
+            per_lane[lane_of(kind)] = per_lane.get(lane_of(kind), 0) + n
+
+        beats = worker_report.heartbeats(session)
+        alive = [b for b in beats if b.live(now)]
+        legacy = worker_report.read_legacy(session)
+        legacy_fresh = legacy is not None and now - legacy.at < WORKER_REPORT_STALE_SEC
+        # A fresh single row that no heartbeat wrote: an older build is still
+        # running, and its lanes are unknown.
+        unseen = legacy_fresh and legacy is not None and legacy.worker is None
+        reported = bool(alive) or legacy_fresh
+
+        lanes = []
+        for lane in LANE_LIMITS:
+            serving = sum(1 for b in alive if b.serves(lane))
+            served = True if serving else (None if not alive or unseen else False)
+            lanes.append(
+                {"lane": lane, "runnable": per_lane.get(lane, 0), "workers": serving, "served": served}
+            )
+        seen = [b.seen_at for b in beats] + ([legacy.at] if legacy is not None else [])
         return {
             "counts": counts,
             "waiting": waiting,
             "live_workers": live or 0,
             # When a worker last said it was alive, whatever it was doing.
-            "worker_seen_at": report.at if report is not None else None,
+            "worker_seen_at": max(seen) if seen else None,
             # Runnable work with nothing actually alive to do it: a retry
             # still backing off is not runnable, and an idle worker that
             # reported recently is alive.
             "stalled": bool(runnable and not live and not reported),
+            "lanes": lanes,
+            # Lanes with runnable work and, as far as can be known, nobody to
+            # run it — the warning, already decided here so every page that
+            # shows it says the same thing.
+            "unserved_lanes": [row["lane"] for row in lanes if row["runnable"] and row["served"] is False],
         }
 
 

@@ -3,9 +3,11 @@
 Гурван зүйл: Railway дээр **хоёр сервис** (API ба worker), Vercel дээр вэб,
 Cloudflare дээр R2 сан.
 
-Хоёр Railway сервис нь **ижил Docker image** ажиллуулна, зөвхөн эхлэх
-команд нь өөр. Хоёр image барих шаардлагагүй ба тэгвэл кодын хувилбар нь
-зөрөх эрсдэлтэй.
+Хоёр Railway сервис нь **нэг Dockerfile-аас, нэг commit-оос** build хийгдэнэ,
+эхлэх команд нь өөр. Image нь харин ижил БИШ байж болно: worker сервист
+`INSTALL_DUB=1` тавьбал түүний image-д torch, Demucs ба загварын жин
+нэмэгдэнэ (§4 «Цэвэр дубляж»), API-гийнх нимгэн хэвээр. Хоёр тусдаа
+Dockerfile хөтлөх шаардлагагүй — тэгвэл кодын хувилбар нь зөрөх эрсдэлтэй.
 
 ---
 
@@ -124,7 +126,7 @@ Railway → сервис → **Deployments** → өмнөх deploy-ийн «⋯�
 Rollback нь тухайн deploy-ийн image ба хувьсагчдыг сэргээнэ
 ([Roll Back a Bad Deploy](https://docs.railway.com/guides/roll-back-bad-deploy),
 [Deployment Actions](https://docs.railway.com/deployments/deployment-actions#rollback)).
-**API ба worker хоёуланг** буцаа — нэг image тул нэг commit-д байх ёстой.
+**API ба worker хоёуланг** буцаа — нэг Dockerfile, нэг commit тул хоёулаа нэг commit-д байх ёстой.
 
 - **Аюулгүй:** миграц нь дээрх дүрмийг дагасан бол. API ба worker хоёулаа
   шинэ схем дээр асна (логт «newer than this code» анхааруулга).
@@ -379,7 +381,7 @@ transcribe. Иймээс provider-ийн консол дээрх зэрэгцэ�
 `replica × stt × DUUDLAGA_CONCURRENCY`-аар тооцоол.
 
 **Ирээдүйд I/O ба render-ийг тусад нь ажиллуулах** (жишээ нь heavy эгнээний
-p95 хүлээлт хоёр долоо хоног 15 минутаас их байвал): ижил image-ээс хоёр worker сервис үүсгэж, dashboard дээр
+p95 хүлээлт хоёр долоо хоног 15 минутаас их байвал): ижил Dockerfile-аас хоёр worker сервис үүсгэж, dashboard дээр
 `WORKER_LANES`-ийг өөр өөрөөр тавина.
 
 - render pool: `WORKER_LANES=heavy=1`. Том CPU/RAM/диск, dub image.
@@ -389,8 +391,12 @@ p95 хүлээлт хоёр долоо хоног 15 минутаас их ба�
 (`hevy=1`) worker асахгүй — эгнээ чимээгүй унтрахаас асахгүй байх нь дээр.
 
 Эгнээ бүрийг ядаж нэг worker ажиллуулж байх ёстой. Эс бөгөөс тэр эгнээний
-ажил дараалалд мөнхөд үлдэнэ. Дарааллын хуудасны «worker алга» гэсэн
-сэрэмжлүүлэг одоогоор эгнээ тус бүрээр шалгадаггүй.
+ажил дараалалд мөнхөд үлдэнэ. Worker бүр өөрийн мөрийг `worker_heartbeats`
+хүснэгтэд минут тутам бичдэг (эгнээ, commit, Demucs, диск) тул Админ →
+Ажлууд хуудас эгнээ тус бүрээр «Гүйцэтгэх worker алга» гэж, хүлээж буй ажил
+байвал анхааруулгаар нэрлэнэ — нэг pool зогсож нөгөө нь амьд үед ч. Цэвэр
+унтарсан worker мөрөө тэр дор нь устгана, гэнэт үхсэнийх 3 минутын дараа
+«Зогссон» болж, нэг цагийн дараа цэвэрлэгдэнэ.
 
 ### Цэвэр дубляж — эх яриаг арилгах (сонголт)
 
@@ -435,7 +441,19 @@ Dockerfile-аас өөр image гаргана. Build нь torch (CPU), Demucs б
 
 VAD ба Demucs-ыг асаах:
 
-1. `Dockerfile`-д `RUN pip install -r requirements-ml.txt` нэмнэ
+1. `Dockerfile` нь одоогоор үүнийг суулгадаггүй. Нөхцөлгүй
+   `RUN pip install -r requirements-ml.txt` НЭМЭХГҮЙ: Dockerfile нь API ба
+   worker хоёрт нэг тул torch API image-д ч орно. `INSTALL_DUB`-ийн хажууд
+   ижил хэлбэрийн build ARG нэмж зөвхөн worker сервист асаана:
+
+   ```dockerfile
+   ARG INSTALL_ML=0
+   COPY requirements-ml.txt ./
+   RUN if [ "$INSTALL_ML" = "1" ]; then pip install --no-cache-dir -r requirements-ml.txt; fi
+   ```
+
+   `requirements-ml.txt` нь `requirements-dub.txt`-ийг (torch, Demucs) агуулдаг
+   тул нэмэгдэх нь silero-vad ба soundfile.
 2. `ENABLE_SEPARATION=true`
 
 **Зөвхөн worker сервист.** torch нь контейнерийн cgroup CPU хязгаарыг
@@ -459,6 +477,14 @@ NEXT_PUBLIC_API_URL=https://<railway-api-домэйн>
 Энэ нь **build-д шингэдэг** тул солиход дахин deploy шаардана. Тэр нь зөв:
 энэ бол апп юутай ярьдгийн нэг хэсэг болохоос хэрэглэгчийн өөрчлөх ёстой
 тохиргоо биш.
+
+**Одоогийн production утга репод байна:** `frontend/vercel.json`-ийн
+`build.env.NEXT_PUBLIC_API_URL`. API-гийн домэйн солигдвол ТЭР файлыг засаж
+commit хийнэ. `build.env` нь Vercel-ийн хуучирсан (legacy) талбар тул
+Project Settings → Environment Variables руу шилжүүлэх нь зөв; шилжүүлэхдээ
+эхлээд Vercel дээр хувьсагчаа тавиад, ДАРАА нь файлаас хасна — эсрэгээр
+хийвэл хаяггүй build гарч, апп `localhost` руу хандана (`lib/api.ts` үүнийг
+нэрлэнэ).
 
 Deploy хийсний дараа Vercel-ийн домэйныг Railway-гийн `CORS_ORIGINS` руу
 БУЦААЖ нэмэхээ мартаж болохгүй. Урьдчилсан (preview) домэйн бүр өөр тул

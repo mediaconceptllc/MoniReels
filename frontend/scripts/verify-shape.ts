@@ -36,7 +36,7 @@
  */
 import contracts from "../.shape/contracts.json";
 import registry from "../.shape/registry.json";
-import { JOB_LABELS, STAGE_LABELS } from "../src/lib/jobs";
+import { JOB_LABELS, LANE_LABELS, STAGE_LABELS } from "../src/lib/jobs";
 import type {
   AdminJobsPage,
   AdminUser,
@@ -272,7 +272,7 @@ const present: unknown[] = [
   raw.job.result.elapsed_sec, raw.job.result.llm.calls,
   raw.job.result.llm.prompt_tokens, raw.job.result.llm.completion_tokens,
   raw.job.result.llm.cost_usd, raw.job.result.llm.models,
-  raw.job_failed.result.elapsed_sec,
+  raw.job_failed.result.elapsed_sec, raw.job_failed.result.error_code,
   // What a voice-over did, in characters — the one cost of it this system
   // can state — and the lines it had to hurry or cut.
   raw.job_voiced.result.voice.lines, raw.job_voiced.result.voice.synthesized,
@@ -285,6 +285,10 @@ const present: unknown[] = [
   raw.job_voiced.result.voice.beds_cached,
   raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
   raw.queue.worker_seen_at,
+  // Per lane: a render pool down beside a healthy I/O pool, which `stalled`
+  // cannot see.
+  raw.queue.lanes.map((l) => [l.lane, l.runnable, l.workers, l.served]),
+  raw.queue.unserved_lanes,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs. Two machines, named: the
   // worker's disk is the one a render fills.
@@ -354,6 +358,12 @@ const present: unknown[] = [
   raw.admin_job_stats.queue.waiting, raw.admin_job_stats.queue.running,
   raw.admin_job_stats.queue.live_workers, raw.admin_job_stats.queue.stalled,
   raw.admin_job_stats.queue.oldest_waiting_sec,
+  raw.admin_job_stats.queue.lanes.map((l) => [l.lane, l.runnable, l.workers, l.served]),
+  raw.admin_job_stats.queue.unserved_lanes,
+  raw.admin_job_stats.queue.workers.map((w) => [
+    w.id, w.lanes.heavy, w.lanes.stt, w.lanes.llm, w.started_at, w.seen_at, w.live,
+    w.separation, w.model, w.commit, w.disk,
+  ]),
 
   // brand assets, empty and filled
   raw.brand.storage, raw.brand.logo.key, raw.brand.logo.url,
@@ -415,6 +425,16 @@ if (strayKinds.length) {
   );
 }
 
+const backendLanes = Object.keys(registry.lanes);
+const unlabelledLanes = backendLanes.filter((l) => !LANE_LABELS[l]);
+const strayLanes = Object.keys(LANE_LABELS).filter((l) => !backendLanes.includes(l));
+if (unlabelledLanes.length || strayLanes.length) {
+  throw new Error(
+    `LANE_LABELS нь backend-ийн эгнээтэй таарахгүй байна (дутуу: ${unlabelledLanes.join(", ") || "—"}; ` +
+      `илүү: ${strayLanes.join(", ") || "—"}) — \`src/lib/jobs.ts\` ба \`app/jobs/kinds.LANE_LIMITS\`.`,
+  );
+}
+
 /**
  * Stages are checked one way only. The backend emits them from a dozen call
  * sites with no registry to compare against, so this can prove a label is
@@ -434,7 +454,8 @@ console.log(
   `✓ Типүүд таарч байна · гэрээ ${Object.keys(contracts).length} · ` +
     `талбар ${present.length} · ажлын төрөл ${backendKinds.length} · ` +
     `гаралт ${Object.keys(registry.output_kinds).length} · ` +
-    `огтлолын үүрэг ${Object.keys(registry.cut_roles).length}`,
+    `огтлолын үүрэг ${Object.keys(registry.cut_roles).length} · ` +
+    `эгнээ ${backendLanes.length}`,
 );
 
 // Keeps the compiler from pruning the two lists above as unused. They exist

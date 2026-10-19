@@ -235,8 +235,14 @@ export interface JobResult {
   };
   /** Present only on an export that read a Mongolian voice. */
   voice?: VoiceReport;
+  /** On a failure the worker names by a stable code rather than by its
+   *  words (lib/job-errors decides from it whether a retry can help). */
+  error_code?: JobErrorCode;
   [field: string]: unknown;
 }
+
+/** Backend app/utils/paths: OutOfSpace.code and NeverFits.code. */
+export type JobErrorCode = "disk_full" | "disk_never_fits";
 
 /** What a voice-over did. ElevenLabs bills per character and the price per
  *  character depends on the account's plan, so the characters are the cost
@@ -492,6 +498,41 @@ export interface MultipartStatus {
   parts: { part_number: number; size: number }[];
 }
 
+/** The resource a job exhausts (backend app/jobs/kinds): `heavy` renders on
+ *  this box, `stt` and `llm` wait on a paid provider. */
+export type Lane = "heavy" | "stt" | "llm";
+
+/** One lane of the queue, as the backend judged it. */
+export interface QueueLane {
+  lane: Lane;
+  /** Queued work in this lane a worker could take now — a retry still
+   *  backing off is not counted. */
+  runnable: number;
+  /** Live workers that run this lane. */
+  workers: number;
+  /** Whether a live worker runs it. Null when that cannot be known: no
+   *  worker running this code is alive, or an older build that does not say
+   *  its lanes still is. */
+  served: boolean | null;
+}
+
+/** One worker, as its own heartbeat row says. Admin only. */
+export interface WorkerInfo {
+  id: string;
+  /** How many jobs of each lane it runs at once; 0 = not here. */
+  lanes: Record<Lane, number>;
+  started_at: number;
+  seen_at: number;
+  /** Spoke within the last three rounds. A dead one stays listed for an
+   *  hour, so the one that stopped can be named. */
+  live: boolean;
+  separation: boolean;
+  model: string;
+  /** The deployed commit, when the platform said it. */
+  commit: string | null;
+  disk: { free_bytes: number; total_bytes: number; min_free_bytes: number } | null;
+}
+
 export interface QueueStatus {
   counts: Record<string, number>;
   waiting: number;
@@ -502,6 +543,10 @@ export interface QueueStatus {
   /** Work is waiting and nothing alive is doing it — the worker service is
    *  down. The single most common cause of "my job never starts". */
   stalled: boolean;
+  lanes: QueueLane[];
+  /** Lanes with runnable work and no live worker to run it — a render pool
+   *  down beside a healthy I/O pool, which `stalled` cannot see. */
+  unserved_lanes: Lane[];
   /** The API container's own disk. It renders nothing, so this is NOT the
    *  disk an export fills — it used to be shown as if it were. */
   api_disk: {
@@ -580,6 +625,9 @@ export interface JobStats {
     live_workers: number;
     stalled: boolean;
     oldest_waiting_sec: number | null;
+    lanes: QueueLane[];
+    unserved_lanes: Lane[];
+    workers: WorkerInfo[];
   };
 }
 

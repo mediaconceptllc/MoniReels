@@ -16,7 +16,7 @@
 
 import { duration, relativeTime, usd } from "@/lib/format";
 import { JOB_LABELS } from "@/lib/jobs";
-import { explainJobError } from "@/lib/job-errors";
+import { explainJob } from "@/lib/job-errors";
 import type { Job, JobState, ProjectSpend } from "@/lib/types";
 import { Badge, TAP } from "@/components/ui";
 
@@ -98,7 +98,7 @@ export function JobHistory({
               {job.error && (
                 <>
                   {job.state === "failed" && (
-                    <p className="text-xs leading-snug text-tally">{explainJobError(job.error).message}</p>
+                    <p className="text-xs leading-snug text-tally">{explainJob(job).message}</p>
                   )}
                   <p className="font-mono text-[11px] leading-snug text-tally [overflow-wrap:anywhere]">
                     {job.error}

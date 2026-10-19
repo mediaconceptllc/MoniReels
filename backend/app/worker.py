@@ -82,6 +82,9 @@ REAP_INTERVAL_SEC = 60.0
 # reach a database and a third-party API, and both can stall for minutes.
 SLOW_CHORE_SEC = 10.0
 HEARTBEAT_SEC = 5.0
+# How long a clean shutdown waits for a report round still writing before it
+# removes this worker's row (see _sign_off).
+SIGN_OFF_WAIT_SEC = 5.0
 
 _GiB = 1024**3
 
@@ -977,6 +980,9 @@ async def _run_job(job) -> None:
         output = {"elapsed_sec": _elapsed(started)}
         if isinstance(e, NeverFits) or job.attempts >= MAX_ATTEMPTS:
             error = str(e)
+            # Which of the two, by name: the page offers a retry for a full
+            # disk (room may come back) and not for one too small in all.
+            output["error_code"] = e.code
             if not isinstance(e, NeverFits):
                 error += f" {job.attempts} удаа хүлээсэн ч зай гарсангүй — админд хандана уу."
             logger.warning("Job %s (%s) failed for lack of disk: %s", job.id, job.kind, e)
@@ -1052,14 +1058,16 @@ async def _housekeeping(settings) -> None:
     """
     try:
         for label, work in (
-            # First: one row, and the API's clean-dub guard reads it. Behind
-            # a reap stuck on a dead worker's lock it would wait out that lock.
-            ("reporting what this worker can do", _publish_report),
+            # What this worker can do is NOT a step here: it is its own task on
+            # the same cadence (see main), because a pass stuck on a dead
+            # worker's lock would hold it, and three missed rounds read as a
+            # dead worker.
             ("reaping stale jobs", lambda: queue.reap_stale()),
             ("purging old jobs", lambda: queue.purge_old(settings.job_keep_days)),
             ("purging old audit rows", lambda: observability.purge_audit(settings.audit_keep_days)),
             ("deleting retired scratch", purge_trash),
             ("aborting stale uploads", _abort_stale_uploads if settings.r2_enabled else None),
+            ("forgetting workers that stopped without saying so", _purge_workers),
         ):
             if work is None:
                 continue
@@ -1093,13 +1101,46 @@ def _abort_stale_uploads() -> int:
     return r2.abort_stale_uploads()
 
 
-def _publish_report() -> int:
-    """What this worker can do, for the API to read (app.worker_report).
-    Every pass, not only at start: a worker redeployed without Demucs has
-    said so within a minute, before a producer asks it for a dub."""
+def _purge_workers() -> int:
     with session_scope() as db:
-        worker_report.publish(db, worker_report.current())
+        return worker_report.purge(db)
+
+
+def _publish_report(me: worker_report.Identity) -> int:
+    """What this worker serves and can do, for the API to read
+    (app.worker_report). Every round, not only at start: a worker
+    redeployed without Demucs has said so within a minute, before a
+    producer asks it for a dub — and a worker that stops saying anything is
+    one the queue page can name as gone."""
+    with session_scope() as db:
+        worker_report.beat(db, me, worker_report.current(me.id))
     return 0
+
+
+async def _report(me: worker_report.Identity) -> None:
+    """One round of `_publish_report`, off the loop. Never raises: a missed
+    round is the next round's to make up, not the worker's end."""
+    try:
+        await asyncio.to_thread(_publish_report, me)
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.exception("Could not report what this worker can do; retrying next round")
+
+
+async def _sign_off(me: worker_report.Identity, report: asyncio.Task | None) -> None:
+    """A clean shutdown takes this worker off the list at once. A round
+    still writing finishes FIRST — deleting the row under it would leave the
+    row behind, and a worker that left read as alive for three minutes."""
+    try:
+        if report is not None and not report.done():
+            await asyncio.wait_for(report, timeout=SIGN_OFF_WAIT_SEC)
+        await asyncio.to_thread(_forget, me.id)
+    except Exception:  # noqa: BLE001 - leaving must not fail; the row ages out
+        logger.exception("Could not remove this worker's heartbeat; it will age out")
+
+
+def _forget(worker_id: str) -> None:
+    with session_scope() as db:
+        worker_report.forget(db, worker_id)
 
 
 async def _drain(running: dict[asyncio.Task, Any], grace_s: int) -> None:
@@ -1215,6 +1256,7 @@ async def main() -> None:
     # This worker's own capacity per lane (see app.jobs.kinds). A bad
     # WORKER_LANES stops it here, before it claims anything.
     lanes = parse_lanes(settings.worker_lanes)
+    me = worker_report.Identity.of(worker_id, lanes)
     ceiling = settings.worker_concurrency
     logger.info(
         "Worker %s starting (threads=%d, lanes=%s, concurrency=%s, separation=%s, dub=%s)",
@@ -1244,10 +1286,16 @@ async def main() -> None:
 
     running: dict[asyncio.Task, Any] = {}
     chores: asyncio.Task | None = None
-    last_reap = 0.0
+    report: asyncio.Task | None = None
+    last_reap = last_report = 0.0
 
     while not _shutdown.is_set():
         _turned()
+        # This worker's heartbeat row, on the housekeeping cadence but as its
+        # own task: liveness must not wait behind a stuck chore.
+        if (report is None or report.done()) and time.time() - last_report > REAP_INTERVAL_SEC:
+            last_report = time.time()
+            report = asyncio.create_task(_report(me))
         # Housekeeping runs BESIDE the loop, never inside it. Every call it
         # makes can block for minutes — a lock held by a killed worker's
         # connection until TCP gives up, an R2 request that never answers —
@@ -1286,6 +1334,9 @@ async def main() -> None:
         chores.cancel()
     if running:
         await _drain(running, settings.worker_shutdown_grace_s)
+    # After the drain: until its jobs are settled this worker is still the one
+    # running them.
+    await _sign_off(me, report)
     logger.info("Worker %s stopped", worker_id)
 
 

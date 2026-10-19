@@ -15,6 +15,8 @@
  * reach the service".
  */
 
+import type { Job } from "@/lib/types";
+
 export interface JobErrorExplained {
   message: string;
   /** Whether running the same step again could succeed. A missing audio
@@ -22,7 +24,24 @@ export interface JobErrorExplained {
   retry: boolean;
 }
 
+/**
+ * Causes the worker names by a stable code (`job.result.error_code`) rather
+ * than by its words. The words are Mongolian now, written for a person, and
+ * are passed through as they are; whether a retry can help is decided by the
+ * code, because matching on a sentence that may be reworded is how a page
+ * ends up offering «Дахин оролдох» for a failure no retry fixes.
+ */
+const CODES: Record<string, { retry: boolean }> = {
+  // More scratch than the disk holds in all: the same disk fails the same way
+  // until the video is cut or the disk enlarged.
+  disk_never_fits: { retry: false },
+  // Full now, after every wait: room may still come back.
+  disk_full: { retry: true },
+};
+
 const RULES: [RegExp, JobErrorExplained][] = [
+  // The worker's words before its messages were Mongolian; jobs written then
+  // still say this.
   [
     /Not enough scratch space/i,
     {
@@ -122,7 +141,19 @@ const UNKNOWN: JobErrorExplained = {
 
 const CYRILLIC = /[\u0400-\u04FF]/;
 
-export function explainJobError(error: string | null | undefined): JobErrorExplained {
+export function explainJobError(error: string | null | undefined, code?: string | null): JobErrorExplained {
+  const explained = explainText(error);
+  const known = code ? CODES[code] : undefined;
+  return known ? { message: explained.message, retry: known.retry } : explained;
+}
+
+/** A job's failure, with its code when the worker gave one. */
+export function explainJob(job: Pick<Job, "error" | "result">): JobErrorExplained {
+  const code = job.result?.error_code;
+  return explainJobError(job.error, typeof code === "string" ? code : null);
+}
+
+function explainText(error: string | null | undefined): JobErrorExplained {
   if (!error) return UNKNOWN;
   for (const [pattern, explained] of RULES) {
     if (pattern.test(error)) return explained;

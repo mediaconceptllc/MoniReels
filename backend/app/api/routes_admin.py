@@ -525,6 +525,7 @@ def job_stats(
       attempt count: for the rest, the gap also holds an earlier failed run
       and the stale-heartbeat timeout, which is not time spent in a queue.
     """
+    from app import worker_report
     from app.config import get_settings
     from app.jobs import queue
     from app.jobs.kinds import KINDS
@@ -574,6 +575,26 @@ def job_stats(
             "live_workers": overview["live_workers"],
             "stalled": overview["stalled"],
             "oldest_waiting_sec": round(max(0.0, now - oldest), 1) if oldest is not None else None,
+            "lanes": overview["lanes"],
+            "unserved_lanes": overview["unserved_lanes"],
+            # Each worker by name, for the admin only: which box serves what,
+            # which commit it runs and when it last spoke. A dead one stays
+            # listed until it is purged, so "which worker stopped" has an
+            # answer here and not only in the platform's logs.
+            "workers": [
+                {
+                    "id": b.id,
+                    "lanes": b.lanes,
+                    "started_at": b.started_at,
+                    "seen_at": b.seen_at,
+                    "live": b.live(now),
+                    "separation": b.separation,
+                    "model": b.model,
+                    "commit": b.commit,
+                    "disk": b.disk,
+                }
+                for b in worker_report.heartbeats(db)
+            ],
         },
     }
 

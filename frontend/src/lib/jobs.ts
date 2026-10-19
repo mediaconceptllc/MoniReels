@@ -140,6 +140,18 @@ export const JOB_LABELS: Record<string, string> = {
   export: "Экспортлох",
 };
 
+/** What a lane does, in the words of the jobs that run in it. */
+export const LANE_LABELS: Record<string, string> = {
+  heavy: "Видео бэлтгэх, экспорт",
+  stt: "Яриаг текст болгох",
+  llm: "Орчуулга, санал",
+};
+
+/** Several lanes, each named, in one line. */
+export function laneNames(lanes: string[]): string {
+  return lanes.map((lane) => `«${LANE_LABELS[lane] ?? lane}»`).join(", ");
+}
+
 export const STAGE_LABELS: Record<string, string> = {
   starting: "Эхэлж байна",
   download: "Файл татаж байна",

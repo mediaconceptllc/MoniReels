@@ -1,4 +1,8 @@
-"""duudlaga.dev — Mongolian speech-to-text. The only STT provider.
+"""duudlaga.dev — Mongolian speech-to-text, one of the two recognisers.
+
+ElevenLabs Scribe is the other (app.stt.elevenlabs_client): it hears every
+video not in Mongolian, and a Mongolian one when selected. app.stt.factory
+chooses.
 
 Replaces Chimege. Everything that was NOT Chimege-specific already moved to
 app.stt.chunking; what remains here is transport only.
