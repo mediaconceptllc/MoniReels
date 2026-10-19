@@ -51,7 +51,11 @@ ARG INSTALL_DUB=0
 ARG DEMUCS_MODEL=htdemucs
 
 COPY requirements.txt requirements-dub.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+# The base image's own pip (24.0) carries advisories, and CI's pip-audit
+# reads every package in the image, pip included. Pinned like the rest, and
+# first: it is also the pip that installs everything below.
+RUN pip install --no-cache-dir pip==26.2.1 \
+    && pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_DUB" = "1" ]; then pip install --no-cache-dir -r requirements-dub.txt; fi
 
 # The weights are baked in, not fetched on the first dub: a download in the
