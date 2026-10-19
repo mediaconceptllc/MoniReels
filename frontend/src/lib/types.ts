@@ -444,6 +444,9 @@ export interface QueueStatus {
   counts: Record<string, number>;
   waiting: number;
   live_workers: number;
+  /** When a worker last reported itself alive, busy or not; null before any
+   *  worker running this code has. */
+  worker_seen_at: number | null;
   /** Work is waiting and nothing alive is doing it — the worker service is
    *  down. The single most common cause of "my job never starts". */
   stalled: boolean;
