@@ -270,6 +270,12 @@ class Project(BaseModel):
     #: compares the object R2 actually holds against this. None on projects
     #: made before it existed — those are checked against the maximum only.
     upload_size_bytes: int | None = None
+    #: Where the upload in progress is going. The row's `video_key` is set
+    #: from it only once upload-complete has verified the object, so a list
+    #: never says "video in" for an upload that was cancelled or never
+    #: arrived (audit UX-6). None on projects made before it existed — their
+    #: `video_key` was set at creation and is used as is.
+    upload_key: str | None = None
     transcript: Transcript | None = None
     suggestions: Suggestions | None = None
     clips: list[Clip] = Field(default_factory=list)

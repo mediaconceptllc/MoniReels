@@ -111,12 +111,16 @@ class CreateProjectIn(BaseModel):
     @field_validator("filename")
     @classmethod
     def _known_extension(cls, v: str) -> str:
-        suffix = ("." + v.rsplit(".", 1)[-1]).lower() if "." in v else ""
-        if suffix not in UPLOAD_EXTENSIONS:
-            allowed = ", ".join(sorted(UPLOAD_EXTENSIONS))
-            shown = f" ({suffix})" if suffix else ""
-            raise ValueError(f"Энэ файлын төрөл дэмжигдэхгүй{shown}. Зөвшөөрөгдөх: {allowed}.")
-        return v
+        return _known_upload_extension(v)
+
+
+def _known_upload_extension(v: str) -> str:
+    suffix = ("." + v.rsplit(".", 1)[-1]).lower() if "." in v else ""
+    if suffix not in UPLOAD_EXTENSIONS:
+        allowed = ", ".join(sorted(UPLOAD_EXTENSIONS))
+        shown = f" ({suffix})" if suffix else ""
+        raise ValueError(f"Энэ файлын төрөл дэмжигдэхгүй{shown}. Зөвшөөрөгдөх: {allowed}.")
+    return v
 
 
 class CreateProjectOut(BaseModel):
@@ -126,6 +130,72 @@ class CreateProjectOut(BaseModel):
     upload_url: str
     upload_key: str
     upload_expires_in_s: int
+
+
+class ReuploadIn(BaseModel):
+    """A new source for a project whose video never arrived or failed to
+    import (audit UX-6): the same file rules as creating one."""
+
+    filename: str = Field(min_length=1, max_length=NAME_MAX)
+    size_bytes: int = Field(ge=1, le=UPLOAD_MAX_BYTES)
+
+    @field_validator("filename")
+    @classmethod
+    def _known_extension(cls, v: str) -> str:
+        return _known_upload_extension(v)
+
+
+class MultipartStartOut(BaseModel):
+    """`single`: use the presigned PUT already handed out. `multipart`: PUT
+    `part_count` parts of `part_size` bytes (the last one shorter) on URLs
+    from /upload/multipart/sign, then /upload/multipart/complete."""
+
+    mode: Literal["single", "multipart"]
+    upload_id: str | None = None
+    part_size: int | None = None
+    part_count: int | None = None
+    #: How many part URLs one /sign call hands out.
+    sign_batch: int | None = None
+
+
+#: An S3/R2 upload id is opaque; this bounds it, nothing more.
+UPLOAD_ID_MAX = 1024
+MULTIPART_SIGN_BATCH = 50
+
+
+class MultipartUploadIn(BaseModel):
+    upload_id: str = Field(min_length=1, max_length=UPLOAD_ID_MAX)
+
+
+class MultipartSignIn(MultipartUploadIn):
+    part_numbers: list[int] = Field(min_length=1, max_length=MULTIPART_SIGN_BATCH)
+
+    @field_validator("part_numbers")
+    @classmethod
+    def _in_range(cls, v: list[int]) -> list[int]:
+        if any(n < 1 or n > 10_000 for n in v):
+            raise ValueError("Хэсгийн дугаар 1-ээс 10000-ын хооронд байна.")
+        return v
+
+
+class MultipartSignOut(BaseModel):
+    #: Part number (as a string — JSON keys are) → presigned PUT URL.
+    urls: dict[str, str]
+    expires_in_s: int
+
+
+class MultipartPart(BaseModel):
+    part_number: int
+    size: int
+
+
+class MultipartStatusOut(BaseModel):
+    """What R2 already holds, so a reloaded page uploads only the rest."""
+
+    part_size: int
+    part_count: int
+    sign_batch: int
+    parts: list[MultipartPart]
 
 
 class RenameProjectIn(BaseModel):

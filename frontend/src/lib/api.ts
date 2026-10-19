@@ -21,6 +21,9 @@ import type {
   Job,
   JobStats,
   Me,
+  MultipartSigned,
+  MultipartStart,
+  MultipartStatus,
   Output,
   Project,
   ProjectDocument,
@@ -189,6 +192,43 @@ export const api = {
   uploadComplete: (id: string) =>
     request<{ project_id: string; job_id: string }>(`/projects/${id}/upload-complete`, {
       method: "POST",
+    }),
+
+  /** A new source for a project whose video never arrived or failed to
+   *  import: a fresh presigned PUT, the old object and parts cleared. */
+  reupload: (id: string, filename: string, size_bytes: number) =>
+    request<CreateProjectResponse>(`/projects/${id}/upload`, {
+      method: "POST",
+      body: JSON.stringify({ filename, size_bytes }),
+    }),
+
+  // Multipart upload — see lib/upload.ts. The server decides whether to
+  // split, signs parts in batches, and completes from R2's own listing.
+  startMultipart: (id: string) =>
+    request<MultipartStart>(`/projects/${id}/upload/multipart`, { method: "POST" }),
+
+  signParts: (id: string, upload_id: string, part_numbers: number[]) =>
+    request<MultipartSigned>(`/projects/${id}/upload/multipart/sign`, {
+      method: "POST",
+      body: JSON.stringify({ upload_id, part_numbers }),
+    }),
+
+  multipartStatus: (id: string, upload_id: string) =>
+    request<MultipartStatus>(`/projects/${id}/upload/multipart/status`, {
+      method: "POST",
+      body: JSON.stringify({ upload_id }),
+    }),
+
+  completeMultipart: (id: string, upload_id: string) =>
+    request<{ completed: boolean; parts: number }>(`/projects/${id}/upload/multipart/complete`, {
+      method: "POST",
+      body: JSON.stringify({ upload_id }),
+    }),
+
+  abortMultipart: (id: string, upload_id: string) =>
+    request<{ aborted: boolean }>(`/projects/${id}/upload/multipart/abort`, {
+      method: "POST",
+      body: JSON.stringify({ upload_id }),
     }),
 
   /** Answers with the saved document — NOT the full project: `media` and

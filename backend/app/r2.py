@@ -313,6 +313,177 @@ def abort_stale_uploads() -> int:
     return aborted
 
 
+# ---------------------------------------------------------------------------
+# Browser multipart upload (audit UP-1)
+#
+# One presigned PUT cannot carry more than ~5 GiB — R2, like S3, refuses a
+# larger single object PUT — while the upload limit is 20 GiB, so a 6 GB
+# video failed after uploading for an hour; and a dropped connection started
+# a 4 GB upload over from the first byte. Multipart fixes both: the browser
+# PUTs fixed-size parts straight to R2 on per-part presigned URLs (the bytes
+# still never touch the API), a failed part is retried alone, and the parts
+# already stored survive a page reload.
+#
+# The API never trusts the browser's account of the parts. It completes the
+# upload from R2's OWN listing, after checking every part is there and the
+# size the plan says — so the browser needs no ETag (no bucket CORS change)
+# and cannot stitch together an object other than the one declared.
+# ---------------------------------------------------------------------------
+
+MIB = 1024**2
+#: Below this a single PUT is simpler and loses little on a retry.
+MULTIPART_MIN_BYTES = 64 * MIB
+#: R2: every part but the last at least 5 MiB, all of them the SAME size,
+#: at most 10,000 of them. 16 MiB keeps a retried part cheap and a 20 GiB
+#: file at 1,280 parts.
+PART_MIN_BYTES = 16 * MIB
+MAX_PARTS = 10_000
+#: list_parts returns at most 1,000 a page; 10,000 parts is ten pages, and
+#: the walk stops there whatever IsTruncated says (see abort_stale_uploads).
+MAX_PART_PAGES = MAX_PARTS // 1000 + 1
+
+
+class NoSuchUpload(R2Error):
+    """The multipart upload is gone: completed, aborted, or expired."""
+
+
+def part_plan(size: int) -> tuple[int, int]:
+    """(part_size, part_count) for a file of `size` bytes.
+
+    The same function answers for the start, the signing and the completion,
+    so all three agree on what "part 7" is without storing anything.
+    """
+    if size <= 0:
+        raise ValueError("size must be positive")
+    per_part = -(-size // MAX_PARTS)  # ceil
+    part_size = max(PART_MIN_BYTES, -(-per_part // MIB) * MIB)
+    return part_size, -(-size // part_size)
+
+
+def expected_part_size(size: int, part_number: int) -> int:
+    part_size, count = part_plan(size)
+    return part_size if part_number < count else size - part_size * (count - 1)
+
+
+def _is_no_such_upload(err: Exception) -> bool:
+    code = getattr(err, "response", {}).get("Error", {}).get("Code")
+    return code in ("NoSuchUpload", "404")
+
+
+def create_multipart(key: str, content_type: str) -> str:
+    settings = get_settings()
+    reply = _client_or_raise().create_multipart_upload(
+        Bucket=settings.r2_bucket, Key=key, ContentType=content_type
+    )
+    return str(reply["UploadId"])
+
+
+def presign_upload_part(key: str, upload_id: str, part_number: int, ttl_s: int | None = None) -> str:
+    settings = get_settings()
+    return _client_or_raise().generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": settings.r2_bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=ttl_s or settings.r2_presign_ttl_s,
+    )
+
+
+def list_parts(key: str, upload_id: str) -> list[dict]:
+    """[{part_number, size, etag}] of the parts R2 holds, in order."""
+    settings = get_settings()
+    client = _client_or_raise()
+    parts: list[dict] = []
+    marker = 0
+    for _ in range(MAX_PART_PAGES):
+        kwargs: dict = {"Bucket": settings.r2_bucket, "Key": key, "UploadId": upload_id, "MaxParts": 1000}
+        if marker:
+            kwargs["PartNumberMarker"] = marker
+        try:
+            page = client.list_parts(**kwargs)
+        except Exception as e:  # noqa: BLE001 - re-raised, typed when it means "gone"
+            if _is_no_such_upload(e):
+                raise NoSuchUpload(upload_id) from e
+            raise
+        for part in page.get("Parts", []):
+            parts.append(
+                {
+                    "part_number": int(part["PartNumber"]),
+                    "size": int(part["Size"]),
+                    "etag": str(part["ETag"]),
+                }
+            )
+        nxt = int(page.get("NextPartNumberMarker") or 0)
+        if not page.get("IsTruncated") or nxt <= marker:
+            break
+        marker = nxt
+    return sorted(parts, key=lambda p: p["part_number"])
+
+
+def complete_multipart(key: str, upload_id: str, parts: list[dict]) -> None:
+    settings = get_settings()
+    try:
+        _client_or_raise().complete_multipart_upload(
+            Bucket=settings.r2_bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [{"PartNumber": p["part_number"], "ETag": p["etag"]} for p in parts]
+            },
+        )
+    except Exception as e:  # noqa: BLE001 - re-raised, typed when it means "gone"
+        if _is_no_such_upload(e):
+            raise NoSuchUpload(upload_id) from e
+        raise
+
+
+def abort_multipart(key: str, upload_id: str) -> bool:
+    """Abort one upload. False when it was already gone, which is the state
+    the caller wanted anyway."""
+    settings = get_settings()
+    try:
+        _client_or_raise().abort_multipart_upload(Bucket=settings.r2_bucket, Key=key, UploadId=upload_id)
+    except Exception as e:  # noqa: BLE001 - re-raised unless it means "gone"
+        if _is_no_such_upload(e):
+            return False
+        raise
+    return True
+
+
+def abort_uploads_under(prefix: str) -> int:
+    """Abort every unfinished multipart upload under `prefix`.
+
+    A deleted project, or one whose upload is started again, must not leave
+    parts behind: they are billed, and no object listing shows them.
+    """
+    if not any(prefix.startswith(p) for p in MANAGED_PREFIXES):
+        raise R2Error(f"Refusing to abort uploads outside a managed prefix: {prefix!r}")
+    settings = get_settings()
+    client = _client_or_raise()
+    aborted = 0
+    marker: dict = {}
+    seen: set[tuple[str, str]] = set()
+    for _ in range(MAX_MPU_PAGES):
+        page = client.list_multipart_uploads(Bucket=settings.r2_bucket, Prefix=prefix, **marker)
+        for upload in page.get("Uploads", []):
+            if abort_multipart(upload["Key"], upload["UploadId"]):
+                aborted += 1
+        if not page.get("IsTruncated"):
+            break
+        marker = {
+            "KeyMarker": page.get("NextKeyMarker", ""),
+            "UploadIdMarker": page.get("NextUploadIdMarker", ""),
+        }
+        cursor = (marker["KeyMarker"], marker["UploadIdMarker"])
+        if cursor in seen:
+            break
+        seen.add(cursor)
+    return aborted
+
+
 def content_type_for(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     return {

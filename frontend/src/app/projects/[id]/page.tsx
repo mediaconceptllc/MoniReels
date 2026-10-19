@@ -16,6 +16,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, LANGUAGE_LABELS, usd } from "@/lib/format";
+import { explainJobError } from "@/lib/job-errors";
 import { useLeaveGuard } from "@/lib/unsaved";
 import type { Job, Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
@@ -37,6 +38,7 @@ import { LanguagePanel } from "@/components/LanguagePanel";
 import { OutputList } from "@/components/OutputList";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Shell } from "@/components/Shell";
+import { SourceStatus, sourceSummary, type SourceState } from "@/components/SourceStatus";
 import { SuggestionList } from "@/components/SuggestionList";
 import { TranscriptEditor, type EditorHandle } from "@/components/TranscriptEditor";
 
@@ -239,6 +241,19 @@ export default function ProjectPage() {
 
   const hasVideo = !!project.video;
   const hasTranscript = !!project.transcript?.segments.length;
+  // Where the video is, said from the import job — the newest one, the list
+  // is newest first. A project with no import at all never had its upload
+  // confirmed: it gets the way to upload one, not "processing" for ever.
+  const importJob = project.jobs.find((job) => job.kind === "import_video");
+  const source: SourceState = hasVideo
+    ? "ready"
+    : importJob?.state === "queued" || importJob?.state === "running"
+      ? importJob.state
+      : importJob?.state === "failed"
+        ? "failed"
+        : importJob?.state === "canceled"
+          ? "canceled"
+          : "missing";
   const hasSuggestions = !!project.suggestions?.shorts.length;
 
   const segments = project.transcript?.segments.length ?? 0;
@@ -292,7 +307,13 @@ export default function ProjectPage() {
         ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}${
             unsaved.export || unsaved.style ? " · хадгалаагүй" : ""
           }`
-        : "Боловсруулагдаж байна",
+        : source === "queued" || source === "running"
+          ? "Боловсруулагдаж байна"
+          : source === "failed"
+            ? "Боловсруулж чадсангүй"
+            : source === "canceled"
+              ? "Боловсруулалт цуцлагдсан"
+              : "Видео хуулаагүй",
     },
     {
       key: "transcript",
@@ -599,6 +620,9 @@ export default function ProjectPage() {
             ),
           disabled: running || !!textUnsaved || !hasTranscript,
         };
+      case "import_video":
+        // A failed import is answered with a new video, on the source tab.
+        return { label: "Дахин хуулах", onRun: () => setTab("source") };
       case "export_all":
       case "export":
         return {
@@ -635,7 +659,7 @@ export default function ProjectPage() {
             <p className="tabular mt-1 text-sm text-ink-3">
               {hasVideo
                 ? `${duration(project.video!.duration_sec)} · ${project.video!.width}×${project.video!.height}`
-                : "Видео боловсруулагдаж байна…"}
+                : sourceSummary(source)}
               {translation.needed ? ` · ${LANGUAGE_LABELS[project.language]} яриа` : ""}
             </p>
           </div>
@@ -678,7 +702,7 @@ export default function ProjectPage() {
         {panel(
           "source",
           <div className="flex flex-col gap-6">
-            {project.media.source_url ? (
+            {hasVideo && project.media.source_url ? (
               <video
                 controls
                 preload="metadata"
@@ -687,7 +711,12 @@ export default function ProjectPage() {
                 className="w-full max-w-3xl rounded-lg bg-black"
               />
             ) : (
-              <Empty title="Видео боловсруулагдаж байна" hint="Хуулалт дууссаны дараа энд харагдана." />
+              <SourceStatus
+                projectId={projectId}
+                state={source}
+                reason={source === "failed" ? explainJobError(importJob?.error).message : null}
+                onUploaded={() => void refresh()}
+              />
             )}
             <Card className="p-5">
               <h3 className="font-display text-base font-semibold">Экспортын тохиргоо</h3>
