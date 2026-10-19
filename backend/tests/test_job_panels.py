@@ -163,6 +163,39 @@ async def test_the_events_stream_carries_the_place_in_line(db):
     assert json.loads(first["data"])["queue_ahead"] == 1
 
 
+def test_an_open_stream_holds_no_pooled_connection(client, db, monkeypatch):
+    """FastAPI 0.118 moved a yield dependency's teardown to AFTER the response
+    is sent — for this route, when the stream ends. The request's session
+    (`current_user` shares it) would then pin a pooled connection for every
+    open job panel, up to MAX_STREAM_SEC: ten tabs and the pool (5 + 5) is
+    gone, and every other request waits on it (audit DEP-1).
+
+    Over HTTP, through the real dependencies — calling the endpoint directly
+    skips exactly the teardown in question. Counted from inside the stream,
+    before its own short read takes a connection; the job is finished, so the
+    stream sends one frame and ends."""
+    from app.db import get_engine
+
+    me = _user(db, "maker")
+    headers = _auth(client, "maker")
+    job = _job(db, _project(db, me), "transcribe", state="done")
+
+    pool = get_engine().pool
+    idle = pool.checkedout()
+    held: list[int] = []
+    snapshot = routes_jobs._snapshot
+
+    def counting(job_id: str):
+        held.append(pool.checkedout())
+        return snapshot(job_id)
+
+    monkeypatch.setattr(routes_jobs, "_snapshot", counting)
+    response = client.get(f"/jobs/{job.id}/events", headers=headers)
+    assert response.status_code == 200, response.text
+    assert "event: job" in response.text
+    assert held == [idle]
+
+
 # ---------------------------------------------------------------------------
 # /jobs/latest
 # ---------------------------------------------------------------------------

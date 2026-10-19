@@ -51,7 +51,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://monireels:monireels@localhost:5432/monireels_test
-      JWT_SECRET: ci-secret-not-a-real-key
+      # 32+ bytes: PyJWT warns on every call with a shorter HS256 key.
+      JWT_SECRET: ci-secret-not-a-real-key-32-bytes-long
       LOG_LEVEL: WARNING
 
     defaults:
@@ -102,6 +103,9 @@ jobs:
       - name: Migrations reverse cleanly
         run: alembic downgrade base && alembic upgrade head
 
+      # A failing test also prints an `::error file=…,line=…` annotation
+      # (tests/conftest.py): annotations come with the check run, so the
+      # failure can be read without fetching this job's log.
       - name: Tests
         run: pytest tests -q
 
@@ -138,22 +142,14 @@ jobs:
 
       - run: npm ci
 
-      # Blocking at CRITICAL: there is none today, and a new one should stop
-      # the merge that brings it in.
-      - name: No critical advisory in the dependencies
-        run: npm audit --audit-level=critical
-
-      # High and below are reported, not blocking, until the upgrade PR (audit
-      # DEP-1): in October 2026 that was sharp, source-map-js and brace-expansion
-      # (high), Next.js (moderate) and braces through eslint-config-next (high,
-      # dev only — its fix is a breaking downgrade). DEP-1 lowers the bar above.
-      - name: Known advisories (report only until DEP-1)
-        continue-on-error: true
-        run: |
-          status=0
-          npm audit --audit-level=high > /tmp/npm-audit.txt || status=$?
-          { echo "### npm audit"; echo '```'; cat /tmp/npm-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          exit $status
+      # Blocking at HIGH since the upgrade (audit DEP-1). `npm audit` cannot
+      # ignore anything, so the script runs it and lets through only the
+      # advisories it names, each with its reason — today one: braces, which
+      # has no fixed release and reaches only the linter. Every advisory,
+      # blocking or not, goes to the job summary and a blocking one also to an
+      # annotation.
+      - name: No high or critical advisory in the dependencies
+        run: npm run check-audit
 
       - run: npm run typecheck
 
@@ -249,18 +245,17 @@ jobs:
 
       # What the image actually runs — every installed package, the
       # transitive ones included — checked against the advisory databases.
-      # NOT blocking yet: the pins audited in October 2026 (PyJWT 2.10.1,
-      # Starlette under FastAPI 0.115.6, python-multipart 0.0.20, torch 2.5.1)
-      # have advisories the upgrade PR (audit DEP-1) removes; that PR makes
-      # this step blocking. Until then the findings are in the job summary.
-      - name: Known advisories in the image (report only until DEP-1)
-        continue-on-error: true
+      # Blocking since the upgrade (audit DEP-1). An advisory that cannot be
+      # fixed yet is let through BY NAME — `--ignore-vuln <ID>` on the line
+      # below, with a comment saying why and when to look again; none is
+      # today. The findings go to the job summary and to annotations.
+      - name: No known advisory in the image
         run: |
           docker run --rm monireels-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
           status=0
           pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
-            --progress-spinner off -f markdown -o /tmp/audit.md || status=$?
-          { echo "### pip-audit: monireels-ci:latest"; cat /tmp/audit.md 2>/dev/null || echo "pip-audit did not run"; } >> "$GITHUB_STEP_SUMMARY"
+            --progress-spinner off -f json -o /tmp/audit.json || status=$?
+          python3 .github/scripts/pip_audit_report.py /tmp/audit.json monireels-ci:latest || status=$?
           exit $status
 
   dub-image:
@@ -306,16 +301,15 @@ jobs:
 
       # What the image actually runs — every installed package, the
       # transitive ones included — checked against the advisory databases.
-      # NOT blocking yet: the pins audited in October 2026 (PyJWT 2.10.1,
-      # Starlette under FastAPI 0.115.6, python-multipart 0.0.20, torch 2.5.1)
-      # have advisories the upgrade PR (audit DEP-1) removes; that PR makes
-      # this step blocking. Until then the findings are in the job summary.
-      - name: Known advisories in the image (report only until DEP-1)
-        continue-on-error: true
+      # Blocking since the upgrade (audit DEP-1). An advisory that cannot be
+      # fixed yet is let through BY NAME — `--ignore-vuln <ID>` on the line
+      # below, with a comment saying why and when to look again; none is
+      # today. The findings go to the job summary and to annotations.
+      - name: No known advisory in the worker image
         run: |
           docker run --rm monireels-dub-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
           status=0
           pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
-            --progress-spinner off -f markdown -o /tmp/audit.md || status=$?
-          { echo "### pip-audit: monireels-dub-ci:latest"; cat /tmp/audit.md 2>/dev/null || echo "pip-audit did not run"; } >> "$GITHUB_STEP_SUMMARY"
+            --progress-spinner off -f json -o /tmp/audit.json || status=$?
+          python3 .github/scripts/pip_audit_report.py /tmp/audit.json monireels-dub-ci:latest || status=$?
           exit $status
