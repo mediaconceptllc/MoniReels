@@ -187,20 +187,37 @@ def list_for_project(project_id: str, limit: int = 50, db: Session | None = None
         return [to_dict(j) for j in rows]
 
 
+# A worker publishes its report every minute (app.worker._housekeeping);
+# three missed rounds is a worker that is gone, not one that is busy.
+WORKER_REPORT_STALE_SEC = 180
+
+
 def queue_overview(db: Session | None = None) -> dict:
     """What the queue page shows. A queue with waiting work and no genuinely
     live worker means the worker service is down — the single most common
-    cause of "my job never starts"."""
+    cause of "my job never starts".
+
+    "Live" used to mean "running a job with a fresh heartbeat", so an IDLE
+    worker counted as dead: any waiting job it was not allowed to take yet
+    (a lane already busy, a retry still backing off) read as "the worker is
+    down". The worker's own report is the second sign of life — published
+    on a timer whether or not it has work.
+    """
+    from app import worker_report
+
     with _use(db) as session:
         counts = dict(
             session.execute(select(Job.state, func.count()).group_by(Job.state)).all()  # type: ignore[arg-type]
         )
-        stale_cutoff = time.time() - _stale_sec()
+        now = time.time()
+        stale_cutoff = now - _stale_sec()
         live = session.scalar(
             select(func.count())
             .select_from(Job)
             .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
         )
+        report = worker_report.read(session)
+        reported = report is not None and now - report.at < WORKER_REPORT_STALE_SEC
         waiting = counts.get("queued", 0)
         # A retry waiting out its backoff is not work a live worker would have
         # taken: counted as waiting, it reported a healthy idle worker as
@@ -210,15 +227,19 @@ def queue_overview(db: Session | None = None) -> dict:
             .select_from(Job)
             .where(
                 Job.state == "queued",
-                or_(Job.available_at.is_(None), Job.available_at <= time.time()),
+                or_(Job.available_at.is_(None), Job.available_at <= now),
             )
         ) if waiting else 0
         return {
             "counts": counts,
             "waiting": waiting,
             "live_workers": live or 0,
-            # Runnable work with nothing actually alive to do it.
-            "stalled": bool(runnable and not live),
+            # When a worker last said it was alive, whatever it was doing.
+            "worker_seen_at": report.at if report is not None else None,
+            # Runnable work with nothing actually alive to do it: a retry
+            # still backing off is not runnable, and an idle worker that
+            # reported recently is alive.
+            "stalled": bool(runnable and not live and not reported),
         }
 
 

@@ -36,6 +36,29 @@ class Settings(BaseSettings):
     ffmpeg_path: str = ""  # optional override for a local checkout
     log_level: str = "INFO"
     environment: str = "production"
+    # Error reports (app.observability). Empty = off: nothing is imported and
+    # nothing leaves the process. Traces are off unless asked for — every
+    # sampled request is an event someone pays for.
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    # How long admin audit rows are kept (app.observability.record_audit).
+    audit_keep_days: int = Field(default=365, ge=1)
+
+    # ---- database timeouts -------------------------------------------
+    # Set on every connection the app opens (app.db), never on the
+    # migrations' own (app/migrations/env.py), which may legitimately run
+    # long. Without them one stuck statement or forgotten transaction held
+    # its locks and its connection until the process died. 0 = no limit.
+    db_statement_timeout_ms: int = Field(default=60_000, ge=0)
+    db_lock_timeout_ms: int = Field(default=15_000, ge=0)
+    # Generous: an async route can hold a transaction open across a provider
+    # call (the settings page asks for the STT balance). This reaps the
+    # abandoned ones, not the slow ones.
+    db_idle_in_transaction_timeout_ms: int = Field(default=300_000, ge=0)
+    # How long an API instance waits for another to finish migrating before
+    # refusing to start. It used to wait forever, which on a stuck lock is a
+    # deployment that hangs with nothing in the log.
+    migration_lock_wait_s: int = Field(default=600, ge=1)
 
     # Comma-separated exact origins. "*" is refused at startup by main.py:
     # with credentials allowed, Starlette answers a wildcard by echoing back
