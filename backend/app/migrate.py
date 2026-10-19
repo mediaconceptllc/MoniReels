@@ -6,7 +6,10 @@ Railway can start several instances at once, and two `alembic upgrade head`
 runs racing on the same database is how a half-applied migration happens.
 
 The worker deliberately does NOT migrate. One writer is enough, and a worker
-that migrates would race the API on every deploy.
+that migrates would race the API on every deploy. It WAITS instead
+(schema_state): Railway starts both services of a deploy at once, and the
+worker that came up first claimed against the old schema until the API had
+migrated it.
 """
 from __future__ import annotations
 
@@ -15,6 +18,9 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from sqlalchemy import text
 
 from app.config import get_settings
@@ -76,3 +82,32 @@ def upgrade_to_head() -> None:
         finally:
             conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _LOCK_ID})
             conn.commit()
+
+
+def schema_state() -> tuple[str, set[str], set[str]]:
+    """Where the database is against this code's migrations.
+
+    Returns (state, the database's revisions, the code's heads), the state
+    one of:
+
+    - "ready": at this code's head.
+    - "behind": not migrated yet — an older revision, or none at all (a new
+      database the API has not reached yet). The API is about to migrate it;
+      a worker waits.
+    - "ahead": a revision this code does not know: the database was
+      migrated by NEWER code, so this is a rollback. Migrations here only
+      add, so older code runs on a newer schema — and a worker that waited
+      for it would wait forever.
+    """
+    script = ScriptDirectory.from_config(_alembic_config())
+    heads = set(script.get_heads())
+    with get_engine().connect() as conn:
+        current = set(MigrationContext.configure(conn).get_current_heads())
+    if current == heads:
+        return "ready", current, heads
+    for revision in current:
+        try:
+            script.get_revision(revision)
+        except CommandError:
+            return "ahead", current, heads
+    return "behind", current, heads
