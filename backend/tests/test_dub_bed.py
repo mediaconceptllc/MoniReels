@@ -255,7 +255,14 @@ def test_the_bed_is_the_range_on_the_clips_own_timeline(tmp_path, bucket):
     stored as FLAC — and it starts where the range does and ends where it
     does. A second of padding left in would delay the whole bed behind the
     picture."""
-    src = _source(tmp_path / "src.wav", 12.0, 5.0, 9.0)
+    # In a video container, as the bed's source always is (the upload): the
+    # read is confined to the containers an upload may be (app.video.inputs).
+    wav = _source(tmp_path / "src.wav", 12.0, 5.0, 9.0)
+    src = tmp_path / "src.mkv"
+    subprocess.run(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(wav), "-c:a", "copy", str(src)],
+        check=True,
+    )
     beds, _ = asyncio.run(prepare(
         Path(FFMPEG), "p1", src, [(5.0, 9.0), (10.0, 14.0)], tmp_path / "beds",
         model_name="htdemucs", separate=lambda pcm: pcm,

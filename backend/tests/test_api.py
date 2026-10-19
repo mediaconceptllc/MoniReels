@@ -95,6 +95,37 @@ def test_unknown_user_and_wrong_password_are_indistinguishable(client, db):
     assert unknown.json()["detail"] == wrong.json()["detail"]
 
 
+def test_a_blocked_account_is_not_revealed_without_its_password(client, db, monkeypatch):
+    """A wrong password on a blocked account must read exactly like a wrong
+    password anywhere else (audit SEC-7). It used to answer 403 "blocked" at
+    once — the account confirmed by the answer, and by the ~7 ms it took
+    against ~160 ms for a name with no account.
+
+    The timing is asserted as the work done, not the clock: the password is
+    hashed for the blocked account just as for any other."""
+    from app.api import routes_auth
+
+    blocked = _user(db, "bob")
+    blocked.active = False
+    db.commit()
+
+    checked = []
+    real = routes_auth.verify_password
+    monkeypatch.setattr(
+        routes_auth, "verify_password", lambda *a: checked.append(a[0]) or real(*a)
+    )
+    unknown = client.post("/auth/login", json={"username": "nobody", "password": "whatever12345"})
+    wrong = client.post("/auth/login", json={"username": "bob", "password": "whatever12345"})
+    assert wrong.status_code == unknown.status_code == 401
+    assert wrong.json() == unknown.json()
+    assert checked == ["whatever12345"]
+
+    # Only the holder of the password learns the account is blocked.
+    right = client.post("/auth/login", json={"username": "bob", "password": "hunter2hunter2"})
+    assert right.status_code == 403
+    assert "хаагдсан" in right.json()["detail"]
+
+
 def test_repeated_failures_are_rate_limited(client, db):
     """PBKDF2 costs ~100ms of CPU per attempt. Unbounded, a few dozen
     concurrent guesses stall every worker — this is availability protection

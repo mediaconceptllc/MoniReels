@@ -12,6 +12,8 @@ translated.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
+
 MONGOLIAN = "mn"
 ENGLISH = "en"
 
@@ -100,10 +102,48 @@ def lines_used(project, ranges: list[tuple[float, float]]) -> list:
     transcript = project.transcript
     if transcript is None or not ranges:
         return []
-    return [
-        s for s in transcript.segments
-        if (s.text or "").strip() and any(s.end > start and s.start < end for start, end in ranges)
-    ]
+    starts, ends = _disjoint([r for r in ranges if r[1] > r[0]])
+    # An empty or reversed range still catches a line that straddles it under
+    # the rule below; never seen in practice, so tested the slow way.
+    odd = [r for r in ranges if r[1] <= r[0]]
+    used = []
+    for s in transcript.segments:
+        if not (s.text or "").strip():
+            continue
+        if s.end < s.start or odd:
+            if any(s.end > start and s.start < end for start, end in ranges):
+                used.append(s)
+            continue
+        # The first stretch ending after this line starts is the only one
+        # that can overlap it: the stretches are disjoint and in order.
+        i = bisect_right(ends, s.start)
+        if i < len(starts) and starts[i] < s.end:
+            used.append(s)
+    return used
+
+
+def _disjoint(ranges: list[tuple[float, float]]) -> tuple[list[float], list[float]]:
+    """`ranges` as disjoint stretches in order, (starts, ends) — the same set
+    of instants, so "overlaps one of them" asks exactly what it asked of the
+    ranges.
+
+    Every line was tested against every range: 4,000 lines and the forty-odd
+    cuts of ten ideas is 160,000 comparisons, twice per read of the project
+    page (audit PERF-10). Merged and bisected it is one lookup a line.
+
+    Only ranges that truly OVERLAP merge. Two that merely touch stay apart:
+    the test is strict (a line ending exactly where a range starts is not in
+    it), and a zero-length line at the shared instant is in neither.
+    """
+    starts: list[float] = []
+    ends: list[float] = []
+    for start, end in sorted(ranges):
+        if ends and start < ends[-1]:
+            ends[-1] = max(ends[-1], end)
+        else:
+            starts.append(start)
+            ends.append(end)
+    return starts, ends
 
 
 def suggested_ranges(project) -> list[tuple[float, float]]:

@@ -1,6 +1,11 @@
 # One image, two entrypoints: the API (default) and the worker
 # (`python -m app.worker`). Deploying the same image twice on Railway keeps
 # the two services on identical code without a second build.
+#
+# By tag, not by digest: this environment cannot reach Docker Hub to resolve
+# one, and a digest pinned by hand without the tooling to move it is a base
+# image that silently stops getting security fixes. Pin it together with an
+# updater (Dependabot's docker ecosystem) that bumps the digest in a PR.
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
@@ -63,10 +68,27 @@ from demucs.pretrained import get_model; get_model('$DEMUCS_MODEL')"; \
 COPY alembic.ini ./
 COPY app ./app
 
+# Not root (audit OPS-7). ffmpeg and ffprobe read media a stranger sent, and
+# a parser bug in them should land in an account that owns nothing but its
+# scratch. Safe with this deployment as it stands (checked 2026-10-19):
+# neither Railway service mounts a volume — a root-owned volume is what
+# breaks an unprivileged writer, and RAILWAY_RUN_UID=0 on the service is
+# Railway's documented way back if one is ever added. WORK_DIR has to be a
+# place this user can write — /tmp/monireels, made below, or anywhere else
+# under /tmp; app.utils.paths.work_dir names it when it is not.
+#
 # Scratch space. Nothing here survives a restart by design — every artifact
 # worth keeping is uploaded to R2.
 ENV WORK_DIR=/tmp/monireels
-RUN mkdir -p /tmp/monireels
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /home/app --create-home app \
+    && mkdir -p /tmp/monireels \
+    && chown app:app /tmp/monireels
+USER app
+# The build fails here, not the first job in production, if the scratch
+# directory is out of this user's reach.
+RUN python -c "from app.utils.paths import job_workdir; job_workdir('build-check')" \
+    && rm -rf /tmp/monireels/jobs
 
 # Railway injects PORT; this is only the local default.
 ENV PORT=8000

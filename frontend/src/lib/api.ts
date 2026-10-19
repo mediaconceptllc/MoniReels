@@ -26,8 +26,8 @@ import type {
   MultipartStatus,
   Output,
   Project,
-  ProjectDocument,
   ProjectSummary,
+  ProjectSettingsSaved,
   ProjectVoices,
   ProviderReadiness,
   ProviderSettings,
@@ -231,10 +231,10 @@ export const api = {
       body: JSON.stringify({ upload_id }),
     }),
 
-  /** Answers with the saved document — NOT the full project: `media` and
-   *  `jobs` are assembled per read and this route does not build them. */
+  /** Answers with what it saved — the settings, not the document. Read the
+   *  project again for anything derived from them (translation, voice). */
   updateProject: (id: string, patch: Record<string, unknown>) =>
-    request<ProjectDocument>(`/projects/${id}`, {
+    request<ProjectSettingsSaved>(`/projects/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),

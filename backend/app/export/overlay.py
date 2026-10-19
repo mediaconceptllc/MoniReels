@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.video.inputs import IMAGE_FORMATS, untrusted
+
 # Corners only. "Somewhere in the middle" is not a brand mark, it is a
 # watermark across the face the short is about.
 POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right")
@@ -113,7 +115,7 @@ def build_burn_args(
     """
     args = ["-i", input_path]
     if logo_path is not None:
-        args += ["-i", logo_path]
+        args += untrusted(logo_path, IMAGE_FORMATS)
     args += ["-filter_complex", graph, "-map", "[v]", "-map", "0:a?"]
     args += encoder_args
     args += audio_args

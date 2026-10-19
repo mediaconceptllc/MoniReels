@@ -9,6 +9,7 @@ only copy of everything.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import uuid
@@ -23,13 +24,59 @@ _ASCII_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class OutOfSpace(RuntimeError):
-    pass
+    """Not enough room on the work disk now; there may be later, when
+    another job's scratch is cleared."""
+
+
+class NeverFits(OutOfSpace):
+    """More than the work disk holds in all: waiting cannot help."""
+
+
+def _gb(n: int) -> str:
+    return f"{n / 1024**3:.1f} GB"
+
+
+#: Where scratch goes when WORK_DIR is out of this user's reach: the image's
+#: own default, created writable for it at build time (backend/Dockerfile).
+FALLBACK_WORK_DIR = Path("/tmp/monireels")
+_fallback_noted = False
+
+
+def _writable(d: Path) -> bool:
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(d, os.W_OK | os.X_OK)
 
 
 def work_dir() -> Path:
+    """The scratch root.
+
+    The image runs as an unprivileged user (audit OPS-7), so a WORK_DIR set
+    on the dashboard to a root-owned path would leave every job failing on
+    Errno 13. No service mounts a volume — the scratch is the container's own
+    disk wherever it points — so such a WORK_DIR falls back to the image's
+    default with a warning instead of taking the worker down; only when that
+    is out of reach too is it an error, named.
+    """
+    global _fallback_noted
     d = get_settings().resolved_work_dir
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    if _writable(d):
+        return d
+    if d != FALLBACK_WORK_DIR and _writable(FALLBACK_WORK_DIR):
+        if not _fallback_noted:
+            _fallback_noted = True
+            logger.warning(
+                "WORK_DIR %s is not writable by uid %d; using %s instead. Point WORK_DIR under /tmp, "
+                "or set RAILWAY_RUN_UID=0 if a root-owned volume is mounted there.",
+                d, os.getuid(), FALLBACK_WORK_DIR,
+            )
+        return FALLBACK_WORK_DIR
+    raise PermissionError(
+        f"WORK_DIR {d} is not writable by uid {os.getuid()}. Point WORK_DIR under /tmp "
+        "(the image's default is /tmp/monireels), or set RAILWAY_RUN_UID=0 to run as root."
+    )
 
 
 def job_workdir(job_id: str) -> Path:
@@ -100,16 +147,24 @@ def ensure_free(need_bytes: int = 0) -> None:
 
     Every job that downloads a source video or writes a render calls this
     FIRST. Discovering there is no room halfway through costs the whole job
-    and leaves a partial file behind; discovering it up front costs nothing
-    and the job simply waits for the next attempt.
+    and leaves a partial file behind; discovering it up front costs nothing,
+    and the worker puts the job back to wait for room (OutOfSpace) — or
+    fails it at once when the disk could never hold it (NeverFits).
+
+    The messages are the job's error, which the page shows as it is.
     """
     settings = get_settings()
     floor = settings.work_free_min_mb * 1024 * 1024
-    available = free_bytes()
-    if available < floor + need_bytes:
+    usage = shutil.disk_usage(work_dir())
+    want = floor + need_bytes
+    if want > usage.total:
+        raise NeverFits(
+            f"Энэ ажилд {_gb(want)} түр зай хэрэгтэй, worker-ийн диск нийтдээ {_gb(usage.total)}. "
+            "Видеог хэсэглэж хуулах эсвэл админаар worker-ийн дискийг томруулна уу."
+        )
+    if usage.free < want:
         raise OutOfSpace(
-            f"Not enough scratch space: {available / 1e9:.2f} GB free, "
-            f"need {(floor + need_bytes) / 1e9:.2f} GB"
+            f"Серверийн түр зай хүрэлцэхгүй байна: {_gb(usage.free)} сул, {_gb(want)} хэрэгтэй."
         )
 
 
@@ -123,13 +178,20 @@ def disk_report() -> dict:
     }
 
 
+#: A file name is at most 255 bytes, and callers put a prefix in front of
+#: this one ("reel_1_…"). The stem is often a title the model wrote, and
+#: nothing bounds how long that is (audit REL-9).
+FILENAME_STEM_MAX = 96
+
+
 def ascii_safe_filename(name: str) -> str:
-    """Collapse a filename to ASCII, preserving the extension."""
+    """Collapse a filename to ASCII, preserving the extension, with a stem of
+    at most FILENAME_STEM_MAX characters."""
     stem, _, ext = name.rpartition(".")
     stem = stem or name
     ext = f".{ext}" if ext and stem != name else (f".{ext}" if ext else "")
-    safe_stem = _ASCII_SAFE.sub("_", stem).strip("_") or uuid.uuid4().hex[:8]
-    return f"{safe_stem}{ext}"
+    safe_stem = _ASCII_SAFE.sub("_", stem).strip("_")[:FILENAME_STEM_MAX].rstrip("_.-")
+    return f"{safe_stem or uuid.uuid4().hex[:8]}{ext}"
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:

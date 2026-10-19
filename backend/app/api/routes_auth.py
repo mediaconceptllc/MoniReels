@@ -41,10 +41,13 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)) -> Tok
     if user is None:
         hash_password(body.password, "00" * 16)
         raise _bad_credentials()
-    if not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Энэ бүртгэл хаагдсан байна.")
     if not verify_password(body.password, user.pw_salt, user.pw_hash):
         raise _bad_credentials()
+    # Only after the password: "blocked" before it told anyone who typed a
+    # name that the account exists — by the answer and by skipping the hash
+    # (~7 ms against ~160 ms; audit SEC-7).
+    if not user.active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Энэ бүртгэл хаагдсан байна.")
 
     ratelimit.login_succeeded(body.username, ip)
     settings = get_settings()
