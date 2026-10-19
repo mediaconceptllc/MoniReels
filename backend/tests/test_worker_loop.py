@@ -107,6 +107,7 @@ async def test_the_loop_keeps_claiming_while_housekeeping_is_stuck(monkeypatch):
     monkeypatch.setattr(worker.queue, "reap_stale", never_returns)
     monkeypatch.setattr(worker.queue, "purge_old", lambda *_: 0)
     monkeypatch.setattr(worker.queue, "claim", claim)
+    monkeypatch.setattr(worker.migrate, "schema_state", lambda: ("ready", set(), set()))
     monkeypatch.setattr(worker, "clear_all_workdirs", lambda: None)
     monkeypatch.setattr(worker, "validate_registry", lambda _h: None)
     monkeypatch.setattr(worker, "POLL_IDLE_SEC", 0.01)
