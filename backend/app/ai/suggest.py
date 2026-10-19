@@ -44,6 +44,7 @@ from app.ai.schema import (
     postprocess_suggestions,
     validate_llm_output,
 )
+from app.jobs.cancel import JobCancelled
 from app.models import Suggestions, Transcript
 from app.utils.logging import get_logger
 
@@ -301,6 +302,10 @@ async def restore_sentences(client: LLMClient, transcript: Transcript) -> tuple[
                 punctuate.SCHEMA["name"],
                 max_tokens=punctuate.call_budget(restored.segments, chunk),
             )
+        except JobCancelled:
+            # Not a failed chunk: the job was canceled, and every chunk after
+            # this one would be bought for a run nobody wants.
+            raise
         except Exception:  # noqa: BLE001 - quality step; the pipeline works without it
             logger.exception(
                 "Could not punctuate lines %d-%d; keeping them as transcribed", chunk[0], chunk[-1]

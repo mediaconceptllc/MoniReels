@@ -30,6 +30,7 @@ import httpx
 from app import metering
 from app.ai import usage as usage_meter
 from app.ai.llm_client import LLMError
+from app.jobs import cancel
 from app.utils import provider_errors
 from app.utils.logging import get_logger
 
@@ -245,6 +246,10 @@ class OpenRouterClient:
         return body
 
     async def _post(self, body: dict) -> dict:
+        # Every model call passes here — each chunk, each repair retry, each
+        # capability fallback — so this is where a canceled job stops buying
+        # (app.jobs.cancel).
+        cancel.check()
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",

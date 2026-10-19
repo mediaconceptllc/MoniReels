@@ -31,6 +31,7 @@ from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 
 from app.ai.llm_client import LLMClient
+from app.jobs.cancel import JobCancelled
 from app.models import Segment, Transcript
 from app.utils.logging import get_logger
 
@@ -111,13 +112,16 @@ class Report:
     translated: int  # of those, how many came back
     over_budget: int  # translated, but longer than a viewer can read in time
     failed_chunks: int
+    # The job was canceled before every chunk was sent. What came back is in
+    # the transcript returned beside this report, and is paid for.
+    stopped: bool = False
 
     @property
     def missing(self) -> int:
         return self.asked - self.translated
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "lines": self.lines,
             "asked": self.asked,
             "translated": self.translated,
@@ -125,6 +129,9 @@ class Report:
             "over_budget": self.over_budget,
             "failed_chunks": self.failed_chunks,
         }
+        if self.stopped:
+            out["stopped"] = True
+        return out
 
 
 def line_budget(segment: Segment) -> int:
@@ -252,6 +259,7 @@ async def translate_transcript(
     translated: list[int] = []
     over: list[int] = []
     failed = 0
+    stopped = False
     context: list[tuple[int, str, str]] = []
     for n, chunk in enumerate(chunks, 1):
         try:
@@ -262,6 +270,11 @@ async def translate_transcript(
                 SCHEMA["name"],
                 max_tokens=call_budget(transcript.segments, chunk),
             )
+        except JobCancelled:
+            # Canceled: no more chunks are bought, and the ones that came back
+            # are returned rather than discarded — they are paid for.
+            stopped = True
+            break
         except Exception:  # noqa: BLE001 - one chunk's failure must not cost the others
             logger.exception("Could not translate lines %d-%d; they stay as they were", chunk[0], chunk[-1])
             failed += 1
@@ -283,10 +296,10 @@ async def translate_transcript(
         if on_progress:
             await on_progress(n / len(chunks))
 
-    if not translated:
+    if not translated and not stopped:
         raise TranslationError(f"None of the {len(todo)} line(s) could be translated")
 
-    report = Report(len(segments), len(todo), len(translated), len(over), failed)
+    report = Report(len(segments), len(todo), len(translated), len(over), failed, stopped)
     if report.missing or report.over_budget:
         logger.info(
             "Translated %d/%d line(s); %d missing, %d over their reading budget",

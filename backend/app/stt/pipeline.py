@@ -36,6 +36,7 @@ from app.audio.vad_chunking import (
     group_vad_segments_into_chunks,
 )
 from app.config import Settings
+from app.jobs.cancel import JobCancelled
 from app.models import Transcript
 from app.stt.chunking import merge_transcripts
 from app.utils.logging import get_logger
@@ -196,7 +197,12 @@ async def transcribe_audio(
         except VoiceExtractionError:
             logger.exception("Voice-only extraction failed for chunk %d; skipping it", i)
             continue
-        text = await client.transcribe_chunk_text(chunk_path)
+        try:
+            text = await client.transcribe_chunk_text(chunk_path)
+        except JobCancelled as e:
+            # How far it got, as the pause-chunking path says it: the chunks
+            # before this one are paid for and kept for the next run.
+            raise JobCancelled({"chunks_done": i, "chunks_total": len(chunk_groups)}) from e
         chunk_transcripts.append(chunk_text_to_transcript(text, group))
         if on_progress:
             await on_progress(0.4 + 0.6 * (i + 1) / len(chunk_groups))

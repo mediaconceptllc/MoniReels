@@ -229,6 +229,24 @@ def test_a_clip_is_stored_the_moment_it_arrives(tmp_path, bucket):
     assert objects[uploads[0]] == "mp3:Нэг.".encode()
 
 
+def test_a_canceled_export_says_how_many_clips_it_had_bought(tmp_path, bucket):
+    """The clips before the cancel are in storage, so the next export reads
+    them; the job says how far it got rather than a bare "canceled"."""
+    from app.jobs.cancel import JobCancelled
+
+    class Canceled(FakeTts):
+        async def synthesize(self, text, voice_id=None):
+            if text == "Хоёр.":
+                raise JobCancelled()
+            return await super().synthesize(text, voice_id)
+
+    objects, uploads = bucket
+    with pytest.raises(JobCancelled) as stopped:
+        asyncio.run(prepare(Canceled(), "p1", TRANSCRIPT, [(0.0, 12.0)], tmp_path))
+    assert stopped.value.detail == {"voice_clips_done": 1, "voice_clips_total": 3}
+    assert [objects[k] for k in uploads] == ["mp3:Нэг.".encode()]
+
+
 def test_a_line_with_no_translation_is_counted_and_not_read(tmp_path, bucket):
     segments = [_seg(0, 0.0, 2.0, "Нэг."), _seg(1, 2.0, 4.0, None), _seg(2, 4.0, 5.0, None, text=" ")]
     client = FakeTts()
