@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app import metering, observability, worker_report
+from app import metering, migrate, observability, worker_report
 from app.ai import usage as llm_usage
 from app.ai.localize import localize_suggestions
 from app.ai.openrouter_client import build_client as build_llm_client
@@ -92,6 +92,11 @@ DISK_NEED_BYTES = {
 }
 
 _shutdown = asyncio.Event()
+
+# Before the first claim: how often to look at the schema, and how often to
+# say, while it is behind, that the worker is still waiting.
+SCHEMA_POLL_SEC = 3.0
+SCHEMA_NOTE_SEC = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -1029,6 +1034,49 @@ async def _drain(running: dict[asyncio.Task, Any], grace_s: int) -> None:
         )
 
 
+async def _wait_for_schema() -> None:
+    """Hold the first claim until the API has migrated the database.
+
+    A deploy starts the worker and the API together, and only the API
+    migrates (app.migrate). MEASURED (production, the deploy that added
+    jobs.started_at): the new worker was up 11 s before the API had
+    migrated, and every claim and the housekeeping pass failed with
+    "column jobs.started_at does not exist" until it had. Nothing was lost
+    that time — a failed claim takes nothing — but a migration that takes
+    longer, or fails, left a worker spinning on errors that look like a
+    broken database rather than "not migrated yet".
+
+    Waits while the schema is "behind"; a database AHEAD of this code is a
+    rollback and goes on with a warning (see migrate.schema_state). Says
+    what it is waiting for at once and then once a minute, never per poll.
+    """
+    noted = -SCHEMA_NOTE_SEC
+    while not _shutdown.is_set():
+        try:
+            state, current, heads = await asyncio.to_thread(migrate.schema_state)
+        except Exception:  # noqa: BLE001 - an unreachable database is waited out too
+            state, current, heads = "unknown", set(), set()
+            if time.monotonic() - noted >= SCHEMA_NOTE_SEC:
+                logger.exception("Could not read the database's migration revision; retrying")
+                noted = time.monotonic()
+        if state == "ready":
+            return
+        if state == "ahead":
+            logger.warning(
+                "The database is at %s, newer than this code's %s — running anyway (a rollback?)",
+                ", ".join(sorted(current)), ", ".join(sorted(heads)),
+            )
+            return
+        if state == "behind" and time.monotonic() - noted >= SCHEMA_NOTE_SEC:
+            logger.warning(
+                "Waiting for the API to migrate the database to %s (it is at %s) before claiming jobs",
+                ", ".join(sorted(heads)), ", ".join(sorted(current)) or "nothing",
+            )
+            noted = time.monotonic()
+        # A sleep, like the claim loop's: SIGTERM is seen within one poll.
+        await asyncio.sleep(SCHEMA_POLL_SEC)
+
+
 async def main() -> None:
     setup_logging()
     settings = get_settings()
@@ -1056,6 +1104,9 @@ async def main() -> None:
 
     # Keyed by task so an abandoned one can still be NAMED at shutdown; a
     # bare set of tasks cannot say which job it was.
+    # Before housekeeping too: it reads the same tables the claim does.
+    await _wait_for_schema()
+
     running: dict[asyncio.Task, Any] = {}
     chores: asyncio.Task | None = None
     last_reap = 0.0
