@@ -204,3 +204,97 @@ def test_the_heartbeat_survives_a_database_error(monkeypatch):
 
     asyncio.run(run())
     assert beats["n"] >= 3
+
+
+# --- liveness (audit OPS-7) -------------------------------------------------
+
+def _watch(monkeypatch, worker, *, stale: bool) -> list[int]:
+    """Runs the watchdog for a few of its checks; returns the exit codes it asked for."""
+    import threading
+
+    exits: list[int] = []
+    stop = threading.Event()
+
+    def fake_exit(code: int) -> None:
+        exits.append(code)
+        stop.set()
+
+    monkeypatch.setattr(worker, "_exit", fake_exit)
+    monkeypatch.setattr(worker, "WATCHDOG_EVERY_SEC", 0.01)
+    monkeypatch.setattr(worker, "LOOP_STALL_EXIT_SEC", 5.0)
+    monkeypatch.setattr(worker, "_last_turn", time.monotonic() - (6.0 if stale else 0.0))
+    thread = threading.Thread(target=worker._watchdog, args=(stop,))
+    thread.start()
+    thread.join(timeout=0.3)
+    stop.set()
+    thread.join(timeout=1)
+    return exits
+
+
+def test_a_wedged_loop_ends_the_process_so_the_platform_restarts_it(monkeypatch):
+    """Railway restarts a worker only when its process exits: a loop stuck
+    for good used to sit "running" with every job queued behind it."""
+    from app import worker
+
+    assert _watch(monkeypatch, worker, stale=True) == [1]
+
+
+def test_a_loop_that_turns_is_left_alone(monkeypatch):
+    from app import worker
+
+    assert _watch(monkeypatch, worker, stale=False) == []
+
+
+@pytest.mark.asyncio
+async def test_the_loop_keeps_its_pulse_and_stops_the_watchdog_on_the_way_out(monkeypatch):
+    import threading
+
+    from app import worker
+
+    began = time.monotonic()
+    pulses: list[float] = []
+
+    def claim(*_args):
+        pulses.append(worker._last_turn)
+        time.sleep(0.005)
+        if len(pulses) >= 3:
+            worker._shutdown.set()
+        return None
+
+    monkeypatch.setattr(worker.queue, "reap_stale", lambda: worker.queue.Reaped())
+    monkeypatch.setattr(worker.queue, "purge_old", lambda *_: 0)
+    monkeypatch.setattr(worker.queue, "claim", claim)
+    monkeypatch.setattr(worker.migrate, "schema_state", lambda: ("ready", set(), set()))
+    monkeypatch.setattr(worker, "clear_all_workdirs", lambda: None)
+    monkeypatch.setattr(worker, "validate_registry", lambda _h: None)
+    monkeypatch.setattr(worker, "purge_trash", lambda: 0)
+    monkeypatch.setattr(worker, "POLL_IDLE_SEC", 0.01)
+    monkeypatch.setattr(worker, "_last_turn", began - 1000)
+    worker._shutdown.clear()
+    try:
+        await asyncio.wait_for(worker.main(), timeout=10)
+    finally:
+        worker._shutdown.clear()
+
+    assert pulses[0] >= began
+    assert pulses == sorted(set(pulses)), "the pulse did not move with each turn of the loop"
+    await asyncio.sleep(0)
+    deadline = time.monotonic() + 2
+    while any(t.name == "watchdog" and t.is_alive() for t in threading.enumerate()):
+        assert time.monotonic() < deadline, "the watchdog outlived the loop"
+        time.sleep(0.01)
+
+
+def test_a_work_dir_this_user_cannot_write_is_named(monkeypatch, tmp_path):
+    """The image runs unprivileged: a WORK_DIR out of its reach must say so,
+    not surface as Errno 13 halfway through the first job."""
+    import os
+
+    from app import config
+    from app.utils import paths
+
+    monkeypatch.setenv("WORK_DIR", str(tmp_path / "work"))
+    config.get_settings.cache_clear()
+    monkeypatch.setattr(os, "access", lambda path, mode: False)
+    with pytest.raises(PermissionError, match="WORK_DIR .* is not writable"):
+        paths.work_dir()

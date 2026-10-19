@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from app.utils.logging import get_logger
+from app.video.inputs import guard, untrusted
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,9 @@ async def probe_video(ffprobe_path: Path, video_path: Path) -> dict:
         "-print_format", "json",
         "-show_format",
         "-show_streams",
+        # An upload, or an intro/outro; also our own render — every one of
+        # them a container on the list (see app.video.inputs).
+        *guard(),
         str(video_path),
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -79,7 +83,7 @@ async def generate_thumbnail(
         str(ffmpeg_path),
         "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{max(0.0, at_sec):.3f}",
-        "-i", str(video_path),
+        *untrusted(video_path),
         "-frames:v", "1",
         str(output_path),
     ]

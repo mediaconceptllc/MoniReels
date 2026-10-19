@@ -110,6 +110,22 @@ async def test_render_all_ideas_reels_only(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_long_title_still_makes_a_file_name_the_disk_accepts(tmp_path, monkeypatch):
+    """The title the model writes is the file's name. A 300-letter English
+    title went past the 255-byte limit of a file name, and the render's
+    output could not be opened (audit REL-9, the same unbounded text)."""
+    title = "How this one simple idea changed everything " * 8
+    suggestions = Suggestions(shorts=[_short(title, (0, 10), (20, 30))], youtube=[])
+    results, _ = await _run(monkeypatch, tmp_path, suggestions)
+
+    path = Path(results[0]["output_path"])
+    assert len(path.name.encode()) <= 120
+    assert path.name.startswith("reel_1_How_this_one_simple_idea") and path.suffix == ".mp4"
+    path.write_bytes(b"")  # the name is one this filesystem takes
+    assert results[0]["title"] == title  # the idea keeps its whole title
+
+
+@pytest.mark.asyncio
 async def test_render_all_ideas_reels_and_youtube(tmp_path, monkeypatch):
     suggestions = Suggestions(
         shorts=[

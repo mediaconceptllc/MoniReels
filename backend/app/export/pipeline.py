@@ -50,6 +50,7 @@ from app.transition.registry import resolve as resolve_transition
 from app.utils.logging import get_logger
 from app.utils.paths import ascii_safe_filename, atomic_write_text, job_workdir
 from app.video.ffmpeg import FfmpegBinaries, FfmpegCancelled, FfmpegRun
+from app.video.inputs import guard
 from app.video.probe import probe_video
 
 if TYPE_CHECKING:
@@ -92,7 +93,8 @@ async def _cut_and_normalize_clip(
     args = [
         *filter_thread_args(),
         "-ss", f"{clip.start:.3f}", "-to", f"{clip.end:.3f}",
-        *decoder_thread_args(), "-i", clip.source_path,
+        # The upload (or a brand intro/outro), confined: see app.video.inputs.
+        *guard(), *decoder_thread_args(), "-i", clip.source_path,
     ]
     if voice_path is not None or bed_path is not None:
         # The voice track and the bed are built on the clip's own timeline

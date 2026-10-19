@@ -18,6 +18,7 @@ the store, the key builders, the SRT writer, the models.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -932,6 +933,33 @@ def test_a_second_export_keeps_the_first_exports_files(world, project, db):
     assert len({row.r2_key for row in rows}) == 12
 
 
+def test_a_title_longer_than_its_column_does_not_throw_the_render_away(world, project, db):
+    """Nothing bounds how long a title the model writes (audit REL-9). Saved
+    as it came, one past outputs.title's 300 characters failed the job at the
+    very end — after every short had been rendered and uploaded. The row
+    keeps a shortened title; the idea itself keeps the whole one."""
+    from app import worker
+    from app.dbmodels import Output
+
+    suggestions = _suggestions()
+    long_title = "Монгол " * 120  # 840 characters, Cyrillic as the cards are
+    suggestions.shorts[0].title = long_title
+    _ready_to_render(db, project.id, clips=False, suggestions=suggestions)
+    world.r2.put(f"sources/{project.id}/source.mp4")
+
+    result = asyncio.run(worker.handle_export_all(_handle(db, project.id, "export_all")))
+
+    assert len(result["outputs"]) == 3
+    db.expire_all()
+    titles = sorted(
+        (row.title for row in db.query(Output).filter(Output.project_id == project.id)), key=len
+    )
+    limit = Output.__table__.c.title.type.length
+    assert limit * 3 // 4 < len(titles[-1]) <= limit
+    assert titles[-1].endswith("…") and long_title.startswith(titles[-1][:-1])
+    assert sorted(titles[:2]) == ["Short 1", "Short 2"]
+
+
 def test_a_retried_export_does_not_list_its_videos_twice(world, project, db):
     """A retry of the same job lands on the same keys. If its first attempt
     recorded some outputs before failing, the retry updates those rows."""
@@ -1222,11 +1250,23 @@ def test_a_handler_raising_JobCancelled_ends_as_cancelled(world, project, db, mo
     assert db.get(Job, job.id).state == "canceled"
 
 
-def test_a_job_with_no_room_on_disk_is_deferred_before_it_starts(world, project, db, monkeypatch):
+def _no_room(monkeypatch, *, total: int = 50 * 1024**3, free: int = 1024**3) -> None:
+    """The work disk as `total` bytes with `free` of them free."""
+    import collections
+    import shutil
+
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(total, total - free, free))
+
+
+def test_a_job_with_no_room_on_disk_waits_for_room_before_it_starts(world, project, db, monkeypatch):
     """Checked up front rather than discovered halfway through as [Errno 28],
-    which is the version that leaves a half-written file behind."""
+    which is the version that leaves a half-written file behind — and then
+    WAITED OUT, as the check always said it would be (audit REL-19): the
+    job failed for good, while the log called it "deferred". Room comes
+    back when another job's scratch is cleared, so the job goes back to the
+    queue — even a paid one, since nothing has been spent yet."""
     from app import worker
-    from app.utils.paths import OutOfSpace
 
     started = []
 
@@ -1234,20 +1274,116 @@ def test_a_job_with_no_room_on_disk_is_deferred_before_it_starts(world, project,
         started.append(handle.job_id)
         return {}
 
-    def no_room(need):
-        raise OutOfSpace("needs 8.0 GB, 1.2 GB free")
+    monkeypatch.setitem(worker.HANDLERS, "transcribe", should_not_run)
+    _no_room(monkeypatch)
+    job = _running_job(db, project.id, "transcribe")
+    assert job.no_retry  # billed per attempt — and still safe to wait here
 
-    monkeypatch.setitem(worker.HANDLERS, "export", should_not_run)
-    monkeypatch.setattr(worker, "ensure_free", no_room)
+    before = time.time()
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    row = db.get(Job, job.id)
+    assert row.state == "queued"
+    assert row.available_at >= before + worker.DISK_RETRY_DELAY_S - 1
+    assert "зай" in row.error and "GB" in row.error  # in Mongolian, with the numbers
+    assert started == []
+
+
+def test_room_that_never_comes_ends_the_job_after_its_attempts(world, project, db, monkeypatch):
+    from app import worker
+    from app.jobs.kinds import MAX_ATTEMPTS
+
+    monkeypatch.setitem(worker.HANDLERS, "export", lambda handle: None)
+    _no_room(monkeypatch)
+    job = _running_job(db, project.id, "export")
+    job.attempts = MAX_ATTEMPTS
+    db.commit()
+
+    asyncio.run(worker._run_job(job))
+
+    db.expire_all()
+    row = db.get(Job, job.id)
+    assert row.state == "failed"
+    assert "зай" in row.error and str(MAX_ATTEMPTS) in row.error
+
+
+def test_a_job_bigger_than_the_whole_disk_fails_at_once_and_says_why(world, project, db, monkeypatch):
+    """Waiting cannot help a job that needs more than the disk has in all."""
+    from app import worker
+
+    load_ = load(db, project.id)
+    load_.upload_size_bytes = 30 * 1024**3
+    save(db, load_)
+    db.commit()
+    monkeypatch.setitem(worker.HANDLERS, "export", lambda handle: None)
+    _no_room(monkeypatch, total=20 * 1024**3, free=19 * 1024**3)
     job = _running_job(db, project.id, "export")
 
     asyncio.run(worker._run_job(job))
 
     db.expire_all()
-    failed = db.get(Job, job.id)
-    assert failed.state == "failed"
-    assert "1.2 GB free" in failed.error
-    assert started == []
+    row = db.get(Job, job.id)
+    assert row.state == "failed"
+    assert "20.0 GB" in row.error  # the disk's size, so the fix is plain
+
+
+def test_the_disk_a_job_needs_follows_the_size_of_its_source(world, project, db):
+    """A fixed number per kind — 8 GB for an export of a 20 GB upload — let
+    a big upload start and run out halfway (audit REL-19)."""
+    from app import worker
+
+    GiB = 1024**3
+
+    def need(kind: str, size: int | None) -> int:
+        row = load(db, project.id)
+        row.upload_size_bytes = size
+        save(db, row)
+        db.commit()
+        return worker._disk_need(_running_job(db, project.id, kind))
+
+    assert need("export", 20 * GiB) > 20 * GiB * 2
+    assert need("export", 100 * 1024**2) < worker.DISK_NEED_BYTES["export"]
+    assert need("import_video", 20 * GiB) > 20 * GiB
+    # Size unknown (a project from before sizes were kept): the old budget.
+    assert need("export", None) == worker.DISK_NEED_BYTES["export"]
+    assert need("suggest", 20 * GiB) == 0
+
+
+def test_a_transcription_from_the_stored_audio_does_not_budget_for_the_video(world, project, db):
+    from app import worker
+
+    GiB = 1024**3
+    _with_video(db, project.id)
+    row = load(db, project.id)
+    row.upload_size_bytes = 20 * GiB
+    save(db, row)
+    db.commit()
+
+    assert worker._disk_need(_running_job(db, project.id, "transcribe")) < 2 * GiB
+
+    _with_video(db, project.id, audio_key="")  # imported before the audio shortcut
+    row = load(db, project.id)
+    row.upload_size_bytes = 20 * GiB
+    save(db, row)
+    db.commit()
+    assert worker._disk_need(_running_job(db, project.id, "transcribe")) > 20 * GiB
+
+
+def test_separation_budgets_for_its_stems_by_the_length_of_the_audio(world, project, db, monkeypatch):
+    """Demucs's stems grow with minutes, not megabytes: a two-hour video
+    needs ~30 GB of them whatever its file size (the audit's measurement)."""
+    from app import worker
+
+    GiB = 1024**3
+    monkeypatch.setattr(worker, "separation_available", lambda s: True)
+    _with_video(db, project.id, duration_sec=7200.0)
+    row = load(db, project.id)
+    row.upload_size_bytes = 2 * GiB
+    save(db, row)
+    db.commit()
+
+    assert worker._disk_need(_running_job(db, project.id, "transcribe")) > 30 * GiB
 
 
 def test_a_job_without_a_project_names_that_rather_than_crashing(world, db):

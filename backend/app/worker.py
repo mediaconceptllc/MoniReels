@@ -19,6 +19,7 @@ import functools
 import os
 import signal
 import socket
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -60,6 +61,7 @@ from app.utils.logging import get_logger, setup_logging
 from app.utils.logging import job_id as job_id_var
 from app.utils.logging import job_kind as job_kind_var
 from app.utils.paths import (
+    NeverFits,
     OutOfSpace,
     clear_all_workdirs,
     clear_job_workdir,
@@ -81,17 +83,65 @@ REAP_INTERVAL_SEC = 60.0
 SLOW_CHORE_SEC = 10.0
 HEARTBEAT_SEC = 5.0
 
-# Rough scratch budget per job kind, checked before the job starts rather
-# than discovered halfway through as [Errno 28].
+_GiB = 1024**3
+
+# Scratch a job needs, checked before it starts rather than discovered
+# halfway through as [Errno 28] — from the size of the source it works on:
+# a fixed overhead, and how many copies of the source it holds at once
+# (audit REL-19: a fixed 8 GB for an export of a 20 GB upload let it start
+# and run out halfway).
+DISK_BUDGET = {
+    "import_video": (1 * _GiB, 1),  # the download; its 16 kHz WAV and thumbnail are small
+    "transcribe": (1 * _GiB, 1),    # the download, when the stored WAV cannot serve (_disk_need)
+    "export": (2 * _GiB, 2),        # the download, and the clips and render made from it
+    "export_all": (3 * _GiB, 3),    # the download, and up to six renders
+}
+# Demucs's stems are float WAVs: they grow with the length of the audio, not
+# the size of the file. ~30 GB for two hours, as the audit measured.
+SEPARATION_BYTES_PER_SEC = 4 * 1024 * 1024
+# The old fixed budget, for a source whose size is not known (a project from
+# before sizes were kept).
 DISK_NEED_BYTES = {
-    "import_video": 4 * 1024**3,
-    "transcribe": 6 * 1024**3,
-    "export": 8 * 1024**3,
-    "export_all": 12 * 1024**3,
+    "import_video": 4 * _GiB,
+    "transcribe": 6 * _GiB,
+    "export": 8 * _GiB,
+    "export_all": 12 * _GiB,
     "suggest": 0,
 }
+# How long a job without room waits before its next look: long enough for a
+# render beside it to finish and clear its scratch.
+DISK_RETRY_DELAY_S = 300.0
 
 _shutdown = asyncio.Event()
+
+# The loop's own pulse (audit OPS-7). Railway restarts a worker only when its
+# process exits — a healthcheck is for deploys, and only for a service with a
+# port — so a loop wedged for good (a claim stuck on a dead TCP connection, a
+# handler blocking the event loop) sat "running" with every job queued
+# behind it. A loop that has not turned for this long is wedged: the claim
+# is bounded by the database's statement timeout and every wait in it is
+# seconds. Running jobs whose heartbeats stopped with it are requeued by the
+# reaper of the restarted worker.
+LOOP_STALL_EXIT_SEC = 900.0
+WATCHDOG_EVERY_SEC = 30.0
+_last_turn = time.monotonic()
+_exit = os._exit  # a seam for the tests; os._exit because the loop that would run cleanup is the stuck part
+
+
+def _turned() -> None:
+    global _last_turn
+    _last_turn = time.monotonic()
+
+
+def _watchdog(stop: threading.Event) -> None:
+    while not stop.wait(WATCHDOG_EVERY_SEC):
+        idle = time.monotonic() - _last_turn
+        if idle > LOOP_STALL_EXIT_SEC:
+            logger.critical(
+                "The worker loop has not turned for %.0fs; exiting so the platform restarts it", idle
+            )
+            _exit(1)
+            return
 
 # Before the first claim: how often to look at the schema, and how often to
 # say, while it is behind, that the worker is still waiting.
@@ -610,6 +660,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
             srt_key = key.rsplit(".", 1)[0] + ".srt"
             await asyncio.to_thread(r2.upload_file, srt_local, srt_key, "text/plain; charset=utf-8")
 
+        title = output_title(item.get("title", ""))
         with session_scope() as db:
             # A retry of this job uploads to the same keys, and its earlier
             # attempt may have recorded some of them before it failed: update
@@ -622,7 +673,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
                     Output(
                         project_id=project_id,
                         kind=kind,
-                        title=item.get("title", ""),
+                        title=title,
                         r2_key=key,
                         srt_key=srt_key,
                         size_bytes=size,
@@ -630,7 +681,7 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
                     )
                 )
             else:
-                row.title = item.get("title", "")
+                row.title = title
                 row.srt_key = srt_key
                 row.size_bytes = size
                 row.duration_sec = duration
@@ -651,6 +702,27 @@ async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
     if voice is not None:
         out["voice"] = voice.report.to_dict()
     return out
+
+
+def output_title(text: str) -> str:
+    """A title the outputs row can hold.
+
+    The model's title has no length limit (audit REL-9): one past the
+    column failed the job at its very end, after every file had been
+    rendered and uploaded. Shortened at a word where one is near, with an
+    ellipsis so it reads as shortened; the idea keeps its whole title.
+    """
+    from app.dbmodels import Output
+
+    # The column's own width, so the two cannot drift apart.
+    limit = Output.__table__.c.title.type.length
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    space = cut.rfind(" ")
+    if space > limit * 3 // 4:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
 
 
 async def _rendered_duration(binaries, path: Path) -> float:
@@ -755,8 +827,8 @@ def _retry_cannot_help(error: Exception) -> bool:
 
     A spent character quota or a revoked key at the voice provider: every
     retry of the export claims the render slot and downloads the source again
-    to be refused the same way. Settled at once, like a full disk, with the
-    provider's reason as the error.
+    to be refused the same way. Settled at once, like a job bigger than the
+    whole disk, with the provider's reason as the error.
     """
     if isinstance(error, dub_bed.DubUnavailable):
         return True
@@ -820,6 +892,36 @@ def _elapsed(started: float) -> float:
     return round(time.time() - started, 1)
 
 
+def _disk_need(job) -> int:
+    """The scratch space `job` needs, from the size of its project's source
+    (see DISK_BUDGET). Unknown size: the old fixed budget."""
+    if job.kind not in DISK_BUDGET or not job.project_id:
+        return DISK_NEED_BYTES.get(job.kind, 0)
+    from app import provider_settings
+
+    with session_scope() as db:
+        try:
+            doc = get_row(db, job.project_id).doc or {}
+        except ProjectNotFound:
+            return 0  # the handler says so, in its own words
+        size = doc.get("upload_size_bytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            return DISK_NEED_BYTES.get(job.kind, 0)
+        base, copies = DISK_BUDGET[job.kind]
+        if job.kind != "transcribe":
+            return base + copies * size
+        # The same choice handle_transcribe makes: the stored 16 kHz WAV
+        # (small) unless separation wants the source's own rate.
+        video = doc.get("video") or {}
+        separating = separation_available(provider_settings.effective(db))
+    if video.get("audio_key") and not separating:
+        return base
+    need = base + copies * size
+    if separating:
+        need += int(float(video.get("duration_sec") or 0) * SEPARATION_BYTES_PER_SEC)
+    return need
+
+
 async def _run_job(job) -> None:
     # Each job runs in its own task, so these belong to it alone: every log
     # line it writes — and every thread it hands work to — carries its id.
@@ -835,7 +937,7 @@ async def _run_job(job) -> None:
     beat = asyncio.create_task(_heartbeat_loop(handle))
     started = time.time()
     try:
-        need = DISK_NEED_BYTES.get(job.kind, 0)
+        need = await asyncio.to_thread(_disk_need, job)
         if need:
             ensure_free(need)
 
@@ -861,13 +963,24 @@ async def _run_job(job) -> None:
             output["stopped"] = e.detail
         await asyncio.to_thread(settle, state="canceled", output=output)
     except OutOfSpace as e:
-        logger.warning("Job %s (%s) deferred: %s", job.id, job.kind, e)
-        await asyncio.to_thread(
-            settle,
-            state="failed",
-            error=str(e),
-            output={"elapsed_sec": _elapsed(started)},
-        )
+        # Raised before the handler ran, so nothing was spent: waiting is
+        # safe even for a job that must never be retried once it has called
+        # a paid provider.
+        output = {"elapsed_sec": _elapsed(started)}
+        if isinstance(e, NeverFits) or job.attempts >= MAX_ATTEMPTS:
+            error = str(e)
+            if not isinstance(e, NeverFits):
+                error += f" {job.attempts} удаа хүлээсэн ч зай гарсангүй — админд хандана уу."
+            logger.warning("Job %s (%s) failed for lack of disk: %s", job.id, job.kind, e)
+            await asyncio.to_thread(settle, state="failed", error=error, output=output)
+        else:
+            logger.warning(
+                "Job %s (%s) deferred %ds for lack of disk: %s", job.id, job.kind, DISK_RETRY_DELAY_S, e
+            )
+            await asyncio.to_thread(
+                queue.requeue, job.id, error=f"{e} Зай гармагц дахин оролдоно.",
+                attempt=job.attempts, output=output, delay=DISK_RETRY_DELAY_S,
+            )
     except ProjectNotFound:
         await asyncio.to_thread(
             settle,
@@ -1107,11 +1220,16 @@ async def main() -> None:
     # Before housekeeping too: it reads the same tables the claim does.
     await _wait_for_schema()
 
+    _turned()
+    watchdog_stop = threading.Event()
+    threading.Thread(target=_watchdog, args=(watchdog_stop,), name="watchdog", daemon=True).start()
+
     running: dict[asyncio.Task, Any] = {}
     chores: asyncio.Task | None = None
     last_reap = 0.0
 
     while not _shutdown.is_set():
+        _turned()
         # Housekeeping runs BESIDE the loop, never inside it. Every call it
         # makes can block for minutes — a lock held by a killed worker's
         # connection until TCP gives up, an R2 request that never answers —
@@ -1141,6 +1259,8 @@ async def main() -> None:
         logger.info("Claimed job %s (%s, lane=%s)", job.id, job.kind, job.lane)
         running[asyncio.create_task(_run_job(job))] = job
 
+    # Draining waits on its jobs, not on the loop: no pulse to watch.
+    watchdog_stop.set()
     if chores and not chores.done():
         chores.cancel()
     if running:

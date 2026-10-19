@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +32,7 @@ from app.config import Settings, get_settings
 from app.db import session_scope
 from app.dbmodels import User
 from app.secretbox import SecretKeyError
-from app.security import client_ip, hash_password
+from app.security import client_ip, current_user, hash_password
 from app.utils.logging import get_logger, request_id, setup_logging
 from app.video.capabilities import Capabilities, build_capabilities
 from app.video.ffmpeg import discover_ffmpeg
@@ -267,6 +267,10 @@ async def health(request: Request) -> JSONResponse:
     Deliberately does NOT touch the database: a slow database would make the
     platform restart a process that is perfectly capable of serving, and the
     restart takes down whatever else it was doing.
+
+    Public, so it says whether ffmpeg is there and not which build: an exact
+    version is a lookup key into ffmpeg's advisories for anyone probing the
+    API (audit SEC-5); /capabilities gives it to a signed-in user.
     """
     caps: Capabilities = request.app.state.capabilities
     settings = get_settings()
@@ -274,15 +278,16 @@ async def health(request: Request) -> JSONResponse:
         {
             "status": "ok",
             "ffmpeg": caps.ffmpeg_available,
-            "ffmpeg_version": caps.ffmpeg_version,
             "storage": settings.r2_enabled,
             "environment": settings.environment,
         }
     )
 
 
-@app.get("/capabilities")
+@app.get("/capabilities", dependencies=[Depends(current_user)])
 async def capabilities(request: Request) -> dict:
+    """The ffmpeg build and its transitions — for a signed-in user only,
+    for the reason /health leaves the version out."""
     caps: Capabilities = request.app.state.capabilities
     return caps.to_dict()
 
