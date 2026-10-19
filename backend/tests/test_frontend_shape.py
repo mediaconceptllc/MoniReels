@@ -77,7 +77,7 @@ SHAPE_DIR = Path(__file__).resolve().parents[2] / "frontend" / ".shape"
 _LITERAL = frozenset({
     "role", "state", "kind", "source", "orientation", "portrait_fill",
     "position", "capabilities.name", "subtitle_language", "project.language",
-    "used_for", "source_speech",
+    "used_for", "source_speech", "multipart_started.mode",
 })
 
 #: `Record<string, …>` in api.ts: the KEYS are data, not field names, so they
@@ -90,6 +90,7 @@ _LITERAL = frozenset({
 _MAPS = {
     "counts": 1,   # QueueStatus.counts — one entry per job state present
     "speaker_voices": 1,   # ExportSettings.speaker_voices — {speaker: voice id}
+    "multipart_signed.urls": 1,   # MultipartSigned.urls — {part number: URL}
 }
 
 _FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -625,6 +626,38 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
         "POST", f"/admin/users/{made['id']}/password", json={"new_password": "secondpass2"}
     )
     shape["admin_user_active"] = send("POST", f"/admin/users/{made['id']}/active?active=false")
+
+    # A source in parts. The multipart calls are R2's — what ought to be
+    # stored is not part of the contract — so they are the faked part; the
+    # routes around them answer for real.
+    big_size = 100 * 1024**2
+    part_size, part_count = r2.part_plan(big_size)
+    planned = [
+        {"part_number": n, "size": r2.expected_part_size(big_size, n), "etag": f'"e{n}"'}
+        for n in range(1, part_count + 1)
+    ]
+    monkeypatch.setattr(r2, "create_multipart", lambda key, content_type: "shape-upload-1")
+    monkeypatch.setattr(r2, "list_parts", lambda key, upload_id: planned)
+    monkeypatch.setattr(r2, "complete_multipart", lambda key, upload_id, parts: None)
+    monkeypatch.setattr(r2, "abort_multipart", lambda key, upload_id: True)
+    monkeypatch.setattr(r2, "abort_uploads_under", lambda prefix: 0)
+    monkeypatch.setattr(r2, "delete_prefix", lambda prefix: 0)
+    big = send(
+        "POST", "/projects",
+        json={"name": "shape multipart", "filename": "film.mp4", "size_bytes": big_size},
+    )["project_id"]
+    started = send("POST", f"/projects/{big}/upload/multipart")
+    shape["multipart_started"] = started
+    upload = {"upload_id": started["upload_id"]}
+    shape["multipart_signed"] = send(
+        "POST", f"/projects/{big}/upload/multipart/sign", json={**upload, "part_numbers": [1, 2]}
+    )
+    shape["multipart_status"] = send("POST", f"/projects/{big}/upload/multipart/status", json=upload)
+    shape["multipart_completed"] = send("POST", f"/projects/{big}/upload/multipart/complete", json=upload)
+    shape["multipart_aborted"] = send("POST", f"/projects/{big}/upload/multipart/abort", json=upload)
+    shape["upload_restarted"] = send(
+        "POST", f"/projects/{big}/upload", json={"filename": "film.mov", "size_bytes": 2048}
+    )
 
     created = shape["create_project"]["project_id"]
     shape["upload_complete"] = send("POST", f"/projects/{created}/upload-complete")

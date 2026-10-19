@@ -153,7 +153,11 @@ export default function ProjectsPage() {
                       />
                     ) : (
                       <span className="flex h-full items-center justify-center text-xs text-paper/60">
-                        {project.has_video ? "Хальс бэлдэж байна" : "Видеогүй"}
+                        {project.import_failed
+                          ? "Боловсруулж чадсангүй"
+                          : project.has_video
+                            ? "Хальс бэлдэж байна"
+                            : "Видеогүй"}
                       </span>
                     )}
                     {project.duration_sec > 0 && (
@@ -232,14 +236,18 @@ function stateLabel(p: ProjectSummary): string {
   if (p.n_outputs > 0) return `${p.n_outputs} видео бэлэн`;
   if (p.has_suggestions) return "Санал бэлэн";
   if (p.has_transcript) return "Текст бэлэн";
+  // Before "has video": the video is in, but it will never be processed
+  // until a new one is uploaded — the project page says why and offers it.
+  if (p.import_failed) return "Видео алдаатай";
   if (p.has_video) return "Видео орсон";
   return "Видеогүй";
 }
 
-function stateTone(p: ProjectSummary): "fit" | "accent" | "default" | "warn" {
+function stateTone(p: ProjectSummary): "fit" | "accent" | "default" | "warn" | "danger" {
   if (p.n_outputs > 0) return "fit";
   if (p.has_suggestions) return "accent";
   if (p.has_transcript) return "accent";
+  if (p.import_failed) return "danger";
   if (p.has_video) return "default";
   return "warn";
 }
