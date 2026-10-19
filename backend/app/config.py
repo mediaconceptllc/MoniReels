@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # signed with an empty key through. DEPLOY.md's recipe makes 64.
     jwt_secret: str = ""
     jwt_hours: int = 12
+    # Seals the provider keys the admin page stores in the database
+    # (app.secretbox). A Fernet key, or a comma-separated list to rotate:
+    # the first seals, all open. Unset, keys are stored as before and the
+    # admin page says so. Set it on BOTH services — the worker opens the
+    # keys too. Lose it and the stored keys must be entered again.
+    settings_encryption_key: str = ""
     # Creates the first admin at startup ONLY when the users table is
     # empty. Without it a fresh deployment has no way in at all; with it
     # unconditional, rotating the variable would silently reset an

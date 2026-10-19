@@ -29,6 +29,7 @@ from app.bodylimit import BodyLimit
 from app.config import Settings, get_settings
 from app.db import session_scope
 from app.dbmodels import User
+from app.secretbox import SecretKeyError
 from app.security import client_ip, hash_password
 from app.utils.logging import get_logger, setup_logging
 from app.video.capabilities import Capabilities, build_capabilities
@@ -115,6 +116,16 @@ async def lifespan(app: FastAPI):
 
     upgrade_to_head()
 
+    # After the schema, before the first request: keys stored before the
+    # encryption key was set are sealed now, and a malformed key stops the
+    # API here — loudly — instead of on the first paid job.
+    from app import provider_settings
+
+    with session_scope() as db:
+        sealed = provider_settings.seal_stored(db)
+    if sealed:
+        logger.info("Sealed %d stored provider key(s) with SETTINGS_ENCRYPTION_KEY", sealed)
+
     try:
         _bootstrap_admin()
     except Exception:  # noqa: BLE001 - a bootstrap failure must not stop the API from serving
@@ -190,6 +201,16 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
             )
         },
     )
+
+
+@app.exception_handler(SecretKeyError)
+async def secret_key_error(request: Request, exc: SecretKeyError) -> JSONResponse:
+    """A stored key that cannot be opened: named, as a 503 the page can show.
+
+    Not a 500 with a traceback, and never a call made with the ciphertext.
+    The message names the variable and the fields, never a value.
+    """
+    return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": str(exc)})
 
 
 @app.middleware("http")

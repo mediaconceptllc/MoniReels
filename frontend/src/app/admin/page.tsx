@@ -4,7 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
-import type { BalanceRow, Capability, ProviderSettings, ProviderSettingsPatch, SttStatus } from "@/lib/types";
+import type {
+  BalanceRow,
+  Capability,
+  ProviderSettings,
+  ProviderSettingsPatch,
+  SecretStorage,
+  SttStatus,
+} from "@/lib/types";
 import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TAP, TextInput } from "@/components/ui";
 import { AdminJobs } from "@/components/AdminJobs";
 import { AdminUsers } from "@/components/AdminUsers";
@@ -110,6 +117,48 @@ function balanceValue(row: BalanceRow): string {
   return row.value;
 }
 
+/** Whether the keys typed on this page sit in the database in plain text.
+ *
+ *  A database dump or backup used to be a dump of every paid account: the
+ *  keys were stored as typed. With the variable set on both services they
+ *  are sealed, and this says which variable to set until then — and, worse,
+ *  when a sealed key can no longer be opened, which stops every paid job. */
+function SecretStorageNotice({ secrets }: { secrets: SecretStorage }) {
+  const label = (name: string) => SECRETS.find((s) => s.name === name)?.label ?? name;
+  const names = (list: string[]) => list.map(label).join(", ");
+  const variable = <span className="font-mono">{secrets.variable}</span>;
+
+  if (secrets.error) return <Alert>{secrets.error}</Alert>;
+  if (secrets.unreadable.length > 0) {
+    return (
+      <Alert>
+        Хадгалсан түлхүүрийг тайлж чадахгүй байна: {names(secrets.unreadable)}. Төлбөртэй ажил
+        зогсоно. {variable}-ийг API ба worker хоёуланд ижил утгаар тавина уу, эсвэл түлхүүрийг
+        доор дахин оруулна уу.
+      </Alert>
+    );
+  }
+  if (!secrets.encrypted) {
+    return (
+      <Alert tone="warn">
+        {secrets.plaintext.length > 0
+          ? `Энэ хуудсаар оруулсан түлхүүр шифрлэлтгүй хадгалагдаж байна: ${names(secrets.plaintext)}. `
+          : "Энэ хуудсаар оруулах түлхүүр шифрлэлтгүй хадгалагдана. "}
+        Railway-ийн API ба worker сервисүүдэд {variable} тавивал API дараагийн асалтаараа
+        шифрлэнэ.
+      </Alert>
+    );
+  }
+  if (secrets.plaintext.length > 0) {
+    return (
+      <Alert tone="warn">
+        Шифрлэгдээгүй хэвээр: {names(secrets.plaintext)}. API дахин асмагц шифрлэгдэнэ.
+      </Alert>
+    );
+  }
+  return null;
+}
+
 /** What the selected recogniser says it has left.
  *
  *  The server asked for this on every visit and the page never showed it,
@@ -178,6 +227,7 @@ export default function AdminPage() {
   const [sttProviders, setSttProviders] = useState<string[]>([]);
   const [sttProvider, setSttProvider] = useState<string>("");
   const [stt, setStt] = useState<SttStatus | null>(null);
+  const [secrets, setSecrets] = useState<SecretStorage | null>(null);
   const [tab, setTab] = useState<Tab>("settings");
 
   useEffect(() => {
@@ -209,9 +259,11 @@ export default function AdminPage() {
       setSttProviders(status.stt_providers ?? []);
       setSttProvider(status.stt?.provider ?? "");
       setStt(status.stt ?? null);
+      setSecrets(status.secret_storage ?? null);
     } catch {
       setCapabilities([]);
       setStt(null);
+      setSecrets(null);
     }
   }, []);
 
@@ -357,8 +409,10 @@ export default function AdminPage() {
                     <h2 className="font-display text-lg font-semibold text-ink">API түлхүүрүүд</h2>
                     <p className="mt-1 text-sm text-ink-3">
                       Хадгалагдсан түлхүүр буцаж уншигдахгүй — сүүлийн 4 тэмдэгт нь л харагдана.
+                      {secrets?.encrypted && " Өгөгдлийн санд шифрлэгдэж хадгалагдана."}
                     </p>
                   </div>
+                  {secrets && <SecretStorageNotice secrets={secrets} />}
                   {SECRETS.map((secret) => (
                     <Field
                       key={secret.name}
