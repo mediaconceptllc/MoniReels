@@ -36,22 +36,47 @@ def _gb(n: int) -> str:
     return f"{n / 1024**3:.1f} GB"
 
 
-def work_dir() -> Path:
-    d = get_settings().resolved_work_dir
+#: Where scratch goes when WORK_DIR is out of this user's reach: the image's
+#: own default, created writable for it at build time (backend/Dockerfile).
+FALLBACK_WORK_DIR = Path("/tmp/monireels")
+_fallback_noted = False
+
+
+def _writable(d: Path) -> bool:
     try:
         d.mkdir(parents=True, exist_ok=True)
-        writable = os.access(d, os.W_OK | os.X_OK)
-    except PermissionError:
-        writable = False
-    if not writable:
-        # The image runs as an unprivileged user (audit OPS-7), so a WORK_DIR
-        # outside its reach is a configuration error — named, not a bare
-        # Errno 13 in the middle of the first job.
-        raise PermissionError(
-            f"WORK_DIR {d} is not writable by uid {os.getuid()}. Point WORK_DIR under /tmp "
-            "(the image's default is /tmp/monireels), or set RAILWAY_RUN_UID=0 to run as root."
-        )
-    return d
+    except OSError:
+        return False
+    return os.access(d, os.W_OK | os.X_OK)
+
+
+def work_dir() -> Path:
+    """The scratch root.
+
+    The image runs as an unprivileged user (audit OPS-7), so a WORK_DIR set
+    on the dashboard to a root-owned path would leave every job failing on
+    Errno 13. No service mounts a volume — the scratch is the container's own
+    disk wherever it points — so such a WORK_DIR falls back to the image's
+    default with a warning instead of taking the worker down; only when that
+    is out of reach too is it an error, named.
+    """
+    global _fallback_noted
+    d = get_settings().resolved_work_dir
+    if _writable(d):
+        return d
+    if d != FALLBACK_WORK_DIR and _writable(FALLBACK_WORK_DIR):
+        if not _fallback_noted:
+            _fallback_noted = True
+            logger.warning(
+                "WORK_DIR %s is not writable by uid %d; using %s instead. Point WORK_DIR under /tmp, "
+                "or set RAILWAY_RUN_UID=0 if a root-owned volume is mounted there.",
+                d, os.getuid(), FALLBACK_WORK_DIR,
+            )
+        return FALLBACK_WORK_DIR
+    raise PermissionError(
+        f"WORK_DIR {d} is not writable by uid {os.getuid()}. Point WORK_DIR under /tmp "
+        "(the image's default is /tmp/monireels), or set RAILWAY_RUN_UID=0 to run as root."
+    )
 
 
 def job_workdir(job_id: str) -> Path:

@@ -285,9 +285,36 @@ async def test_the_loop_keeps_its_pulse_and_stops_the_watchdog_on_the_way_out(mo
         time.sleep(0.01)
 
 
-def test_a_work_dir_this_user_cannot_write_is_named(monkeypatch, tmp_path):
-    """The image runs unprivileged: a WORK_DIR out of its reach must say so,
-    not surface as Errno 13 halfway through the first job."""
+def test_a_work_dir_this_user_cannot_write_falls_back_to_the_images_own(monkeypatch, tmp_path, caplog):
+    """The image runs unprivileged and no service mounts a volume: a WORK_DIR
+    set to a root-owned path must not take the worker down — it falls back to
+    the image's default, and says so once."""
+    import os
+    from pathlib import Path
+
+    from app import config
+    from app.utils import paths
+
+    blocked = tmp_path / "work"
+    fallback = tmp_path / "fallback"
+    monkeypatch.setenv("WORK_DIR", str(blocked))
+    config.get_settings.cache_clear()
+    monkeypatch.setattr(paths, "FALLBACK_WORK_DIR", fallback)
+    monkeypatch.setattr(paths, "_fallback_noted", False)
+    real_access = os.access
+    monkeypatch.setattr(
+        os, "access", lambda path, mode: False if Path(path) == blocked else real_access(path, mode)
+    )
+    with caplog.at_level(logging.WARNING, logger="app.utils.paths"):
+        assert paths.work_dir() == fallback
+        assert paths.job_workdir("j").parent.parent == fallback
+    warnings = [r.getMessage() for r in caplog.records if "is not writable" in r.getMessage()]
+    assert len(warnings) == 1, warnings
+
+
+def test_a_work_dir_with_nowhere_writable_is_named(monkeypatch, tmp_path):
+    """Neither WORK_DIR nor the image's default writable: say so, not Errno 13
+    halfway through the first job."""
     import os
 
     from app import config
@@ -295,6 +322,7 @@ def test_a_work_dir_this_user_cannot_write_is_named(monkeypatch, tmp_path):
 
     monkeypatch.setenv("WORK_DIR", str(tmp_path / "work"))
     config.get_settings.cache_clear()
+    monkeypatch.setattr(paths, "FALLBACK_WORK_DIR", tmp_path / "fallback")
     monkeypatch.setattr(os, "access", lambda path, mode: False)
     with pytest.raises(PermissionError, match="WORK_DIR .* is not writable"):
         paths.work_dir()
