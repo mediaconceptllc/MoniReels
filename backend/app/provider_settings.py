@@ -198,7 +198,7 @@ def apply(
     """
     unknown = sorted(set(changes) - set(EDITABLE))
     if unknown:
-        raise ValueError(f"not editable: {', '.join(unknown)}")
+        raise ValueError(f"Энэ тохиргоог эндээс өөрчлөх боломжгүй: {', '.join(unknown)}")
 
     touched: list[str] = []
     for name, raw in changes.items():

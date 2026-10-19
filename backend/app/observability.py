@@ -26,8 +26,14 @@ import os
 import re
 import time
 import uuid
+from typing import TYPE_CHECKING
 
 from app.utils.logging import get_logger, job_id, job_kind, request_id
+
+if TYPE_CHECKING:
+    # Types only: the SDK stays an optional import at run time (see
+    # init_error_reports).
+    from sentry_sdk.types import Event, Hint
 
 logger = get_logger(__name__)
 
@@ -97,7 +103,7 @@ class ServerErrors:
 _SCRUBBED_HEADERS = {"authorization", "cookie", "x-api-key", "set-cookie"}
 
 
-def _before_send(event: dict, hint: dict) -> dict:
+def _before_send(event: Event, hint: Hint) -> Event | None:
     """Tag the event with the request or job it came from, and take out the
     headers that carry credentials whatever the SDK's own defaults are."""
     tags = event.setdefault("tags", {})
@@ -211,9 +217,14 @@ def purge_audit(keep_days: int) -> int:
     """Drop audit rows older than `keep_days` (housekeeping). The trail is
     for "who changed this, recently" — a year of it is plenty, and an
     append-only table with no end is a disk that fills one day."""
+    from sqlalchemy import delete
+
     from app.db import session_scope
     from app.dbmodels import AuditLog
 
     cutoff = time.time() - keep_days * 86400
     with session_scope() as db:
-        return db.execute(AuditLog.__table__.delete().where(AuditLog.at < cutoff)).rowcount or 0
+        result = db.execute(
+            delete(AuditLog).where(AuditLog.at < cutoff).execution_options(synchronize_session=False)
+        )
+        return result.rowcount or 0

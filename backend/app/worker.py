@@ -343,6 +343,9 @@ async def handle_suggest(handle: JobHandle) -> dict:
         raise RuntimeError("This project has no video")
     if project.transcript is None or not project.transcript.segments:
         raise RuntimeError("Transcribe the video before asking for suggestions")
+    # What goes INTO the prompt, held for the result below: the project is
+    # read again before saving, and its transcript is not this one's concern.
+    transcript = project.transcript
 
     shorts, youtube = _suggest_counts(handle.payload, project.video.duration_sec)
 
@@ -350,7 +353,7 @@ async def handle_suggest(handle: JobHandle) -> dict:
     client = build_llm_client(settings)
     try:
         suggestions: Suggestions = await generate_suggestions(
-            client, project.transcript, project.video.duration_sec,
+            client, transcript, project.video.duration_sec,
             shorts=shorts, youtube=youtube,
         )
         # Before anyone reads them: the cards in Mongolian, whatever the
@@ -366,7 +369,7 @@ async def handle_suggest(handle: JobHandle) -> dict:
         project.suggestions = suggestions
         save(db, project)
 
-    result = {
+    result: dict[str, Any] = {
         "shorts": len(suggestions.shorts),
         "youtube": len(suggestions.youtube),
         # What was asked for, beside what came back. The bill follows the ask
@@ -377,7 +380,7 @@ async def handle_suggest(handle: JobHandle) -> dict:
         # What went INTO the prompt, recorded beside what came out of it. The
         # bill scales with this, so a cost without it can be reported but not
         # projected onto the next run (see app.spend.suggest_rate).
-        "characters": len(project.transcript.full_text),
+        "characters": len(transcript.full_text),
     }
     if localized:
         result["localized"] = localized
@@ -712,10 +715,15 @@ def output_title(text: str) -> str:
     rendered and uploaded. Shortened at a word where one is near, with an
     ellipsis so it reads as shortened; the idea keeps its whole title.
     """
+    from sqlalchemy import String
+
     from app.dbmodels import Output
 
     # The column's own width, so the two cannot drift apart.
-    limit = Output.__table__.c.title.type.length
+    column = Output.__table__.c.title.type
+    if not isinstance(column, String) or column.length is None:
+        raise TypeError("outputs.title must be a String with a length")
+    limit = column.length
     if len(text) <= limit:
         return text
     cut = text[: limit - 1]
@@ -947,7 +955,7 @@ async def _run_job(job) -> None:
             await asyncio.to_thread(settle, state="canceled")
             return
 
-        output = dict(result or {})
+        output: dict[str, Any] = dict(result or {})
         output["elapsed_sec"] = _elapsed(started)
         # Only present when the job actually spent money — an absent field
         # says "no paid call", which a zero would not.
@@ -956,7 +964,7 @@ async def _run_job(job) -> None:
         await asyncio.to_thread(settle, state="done", output=output)
 
     except JobCancelled as e:
-        output: dict = {"elapsed_sec": _elapsed(started)}
+        output = {"elapsed_sec": _elapsed(started)}
         # How far it got before it stopped, when the stage knows: "7 of 40
         # chunks done, kept" decides whether to run it again.
         if e.detail:
@@ -1060,7 +1068,7 @@ async def _housekeeping(settings) -> None:
             elapsed = time.time() - started
             if elapsed > SLOW_CHORE_SEC:
                 logger.warning("Housekeeping: %s took %.0fs", label, elapsed)
-            if label == "reaping stale jobs" and count:
+            if isinstance(count, queue.Reaped):
                 # Two numbers, never one total. A requeued job runs again by
                 # itself; a failed one needs a person, and reporting both
                 # under "requeued" leaves that person waiting for a run that

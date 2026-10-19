@@ -12,10 +12,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only for every job. Nothing here pushes, comments or publishes, so the
+# token a step (or a compromised action) can reach is no use beyond reading
+# this repository. A job that ever needs more asks for it by name.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to a commit, with the release in a comment:
+# a tag can be moved to different code after this file was reviewed, a commit
+# cannot. Dependabot (.github/dependabot.yml) bumps both together.
+
 jobs:
   backend:
     name: Backend
     runs-on: ubuntu-latest
+    # A hung test or a stuck service container fails here, not after the
+    # platform's six-hour default. A normal run is about four minutes.
+    timeout-minutes: 20
 
     # A REAL Postgres, not SQLite. The project document is JSONB and the
     # queue claims rows with FOR UPDATE SKIP LOCKED — neither exists in
@@ -46,9 +59,9 @@ jobs:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: pip
@@ -65,6 +78,12 @@ jobs:
 
       - name: Lint
         run: ruff check app tests
+
+      # The types are documentation the code is checked against. Off CI they
+      # drifted to sixty errors — among them a provider contract that did not
+      # name two of the three methods every caller used.
+      - name: Type check
+        run: mypy app
 
       - name: Apply migrations
         run: alembic upgrade head
@@ -102,21 +121,39 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     defaults:
       run:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - run: npm ci
+
+      # Blocking at CRITICAL: there is none today, and a new one should stop
+      # the merge that brings it in.
+      - name: No critical advisory in the dependencies
+        run: npm audit --audit-level=critical
+
+      # High and below are reported, not blocking, until the upgrade PR (audit
+      # DEP-1): in October 2026 that was sharp, source-map-js and brace-expansion
+      # (high), Next.js (moderate) and braces through eslint-config-next (high,
+      # dev only — its fix is a breaking downgrade). DEP-1 lowers the bar above.
+      - name: Known advisories (report only until DEP-1)
+        continue-on-error: true
+        run: |
+          status=0
+          npm audit --audit-level=high > /tmp/npm-audit.txt || status=$?
+          { echo "### npm audit"; echo '```'; cat /tmp/npm-audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
       - run: npm run typecheck
 
@@ -164,22 +201,23 @@ jobs:
   image:
     name: Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # A runner's DEFAULT buildx builder uses the `docker` driver, which
       # cannot export a cache — `cache-to: type=gha` fails the build outright
       # with "Cache export is not supported for the docker driver". This
       # switches to the `docker-container` driver, which supports both the
       # GHA cache and `load: true`.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # Both Railway services run this one image, so a Dockerfile that no
       # longer builds breaks the API and the worker together — and would
       # otherwise only be discovered at deploy time. `load: true` hands the
       # built image to the local daemon so the next step can run it, instead
       # of building it a second time.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: backend
           push: false
@@ -209,13 +247,31 @@ jobs:
             python -c "import app.main, app.worker"
           '
 
+      # What the image actually runs — every installed package, the
+      # transitive ones included — checked against the advisory databases.
+      # NOT blocking yet: the pins audited in October 2026 (PyJWT 2.10.1,
+      # Starlette under FastAPI 0.115.6, python-multipart 0.0.20, torch 2.5.1)
+      # have advisories the upgrade PR (audit DEP-1) removes; that PR makes
+      # this step blocking. Until then the findings are in the job summary.
+      - name: Known advisories in the image (report only until DEP-1)
+        continue-on-error: true
+        run: |
+          docker run --rm monireels-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
+          status=0
+          pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
+            --progress-spinner off -f markdown -o /tmp/audit.md || status=$?
+          { echo "### pip-audit: monireels-ci:latest"; cat /tmp/audit.md 2>/dev/null || echo "pip-audit did not run"; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
   dub-image:
     name: Worker image with the clean dub
     runs-on: ubuntu-latest
+    # A cold build downloads torch and the model's weights.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # The worker service is built with INSTALL_DUB=1 (docs/DEPLOY.md):
       # torch, Demucs and the model's weights, baked in. The image above
@@ -226,7 +282,7 @@ jobs:
       # Its own cache scope: sharing the default one with the image above
       # would have each build evict the other's layers, and these are the
       # expensive ones.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: backend
           push: false
@@ -247,3 +303,19 @@ jobs:
             python -c "import app.main, app.worker"
             python -m app.audio.dub_bed --smoke
           '
+
+      # What the image actually runs — every installed package, the
+      # transitive ones included — checked against the advisory databases.
+      # NOT blocking yet: the pins audited in October 2026 (PyJWT 2.10.1,
+      # Starlette under FastAPI 0.115.6, python-multipart 0.0.20, torch 2.5.1)
+      # have advisories the upgrade PR (audit DEP-1) removes; that PR makes
+      # this step blocking. Until then the findings are in the job summary.
+      - name: Known advisories in the image (report only until DEP-1)
+        continue-on-error: true
+        run: |
+          docker run --rm monireels-dub-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
+          status=0
+          pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
+            --progress-spinner off -f markdown -o /tmp/audit.md || status=$?
+          { echo "### pip-audit: monireels-dub-ci:latest"; cat /tmp/audit.md 2>/dev/null || echo "pip-audit did not run"; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

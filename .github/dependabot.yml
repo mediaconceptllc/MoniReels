@@ -1,0 +1,51 @@
+# Weekly dependency updates (audit CI-2 / DEP-1). Grouped so a week of minor
+# and patch releases is one PR per ecosystem, not twenty; majors arrive one
+# by one, because each can change behaviour and needs reading on its own.
+# Every PR runs the full CI, including mypy and the dependency audits.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    # torch and torchaudio carry a local "+cpu" build tag and must move
+    # together with Demucs's support for them: upgraded by hand (audit DEP-1),
+    # checked by the dub-image job.
+    ignore:
+      - dependency-name: torch
+      - dependency-name: torchaudio
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The actions in .github/workflows are pinned to commits; Dependabot moves
+  # the commit and the version comment beside it together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    # Security patches of the same Python only: a move to another Python
+    # minor changes the runtime of every dependency and is planned, not bumped.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

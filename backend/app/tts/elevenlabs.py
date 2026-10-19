@@ -212,7 +212,8 @@ class ElevenLabsTts:
         for v in rows if isinstance(rows, list) else []:
             if not isinstance(v, dict) or not isinstance(v.get("voice_id"), str):
                 continue
-            labels = v.get("labels") if isinstance(v.get("labels"), dict) else {}
+            raw_labels = v.get("labels")
+            labels = raw_labels if isinstance(raw_labels, dict) else {}
             out.append({
                 "id": v["voice_id"],
                 "name": str(v.get("name") or v["voice_id"]),
@@ -237,7 +238,8 @@ class ElevenLabsTts:
         for m in rows if isinstance(rows, list) else []:
             if not isinstance(m, dict) or (m.get("model_id") or m.get("id")) != model_id:
                 continue
-            languages = m.get("languages") if isinstance(m.get("languages"), list) else []
+            raw_languages = m.get("languages")
+            languages = raw_languages if isinstance(raw_languages, list) else []
             ids = []
             for lang in languages:
                 code = lang.get("language_id") if isinstance(lang, dict) else lang

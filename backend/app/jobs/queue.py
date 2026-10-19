@@ -20,9 +20,9 @@ import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -212,9 +212,9 @@ def queue_overview(db: Session | None = None) -> dict:
     from app import worker_report
 
     with _use(db) as session:
-        counts = dict(
-            session.execute(select(Job.state, func.count()).group_by(Job.state)).all()  # type: ignore[arg-type]
-        )
+        counts: dict[str, int] = {
+            state: n for state, n in session.execute(select(Job.state, func.count()).group_by(Job.state))
+        }
         now = time.time()
         stale_cutoff = now - _stale_sec()
         live = session.scalar(
@@ -393,7 +393,7 @@ def claim(worker_id: str, lanes: Collection[str] | None = None) -> Job | None:
         return job
 
 
-def _ours(job: Job | None, attempt: int | None) -> bool:
+def _ours(job: Job | None, attempt: int | None) -> TypeGuard[Job]:
     """Whether a write from the attempt that claimed `job` may land.
 
     `attempts` moves on every claim, so it is a fencing token: once the
@@ -401,7 +401,8 @@ def _ours(job: Job | None, attempt: int | None) -> bool:
     database error used to end the heartbeat for good) and another worker has
     claimed it, the first worker's heartbeats and its final verdict must not
     overwrite the row the second one now owns. None = unfenced (a caller that
-    holds no claim, such as a test handle).
+    holds no claim, such as a test handle). A TypeGuard: past a true answer
+    the row exists.
     """
     if job is None:
         return False
@@ -624,9 +625,12 @@ def purge_old(keep_days: int) -> int:
     cutoff = time.time() - keep_days * 86400
     with session_scope() as db:
         result = db.execute(
-            Job.__table__.delete().where(
+            delete(Job)
+            .where(
                 and_(Job.state.notin_(ACTIVE_STATES), Job.finished_at.is_not(None), Job.finished_at < cutoff)
             )
+            # A plain bulk DELETE: no rows are loaded in this session to keep in sync.
+            .execution_options(synchronize_session=False)
         )
         return result.rowcount or 0
 
