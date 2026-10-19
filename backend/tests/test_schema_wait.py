@@ -47,7 +47,7 @@ async def test_no_claim_and_no_housekeeping_before_the_schema_is_migrated(monkey
     seen = _states(monkeypatch, worker, BEHIND, BEHIND, BEHIND, HEAD)
     first_touch: list[list[str]] = []
 
-    def claim(_worker_id):
+    def claim(_worker_id, _lanes=None):
         first_touch.append(list(seen))
         worker._shutdown.set()
         return None
