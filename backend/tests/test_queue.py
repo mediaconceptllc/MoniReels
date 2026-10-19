@@ -15,10 +15,13 @@ from app.dbmodels import Job, Project, User
 from app.jobs import queue
 from app.jobs.kinds import (
     LANE_HEAVY,
-    LANE_METERED,
+    LANE_LIMITS,
+    LANE_LLM,
     LANES,
+    METERED_LANES,
     lane_of,
     no_retry,
+    open_lanes,
     priority_of,
     validate_registry,
 )
@@ -67,12 +70,12 @@ def test_paid_kinds_are_not_retried():
     assert not no_retry("export")
 
 
-def test_every_kind_in_the_metered_lane_is_not_retried():
-    """The rule, not a list. The metered lane exists for services that bill
+def test_every_kind_in_a_metered_lane_is_not_retried():
+    """The rule, not a list. The metered lanes exist for services that bill
     per call, so a kind placed there and forgotten in NO_RETRY would retry —
     and charge — up to MAX_ATTEMPTS times. The list above was written by hand
     and did not grow when `translate` was added."""
-    metered = {kind for kind, lane in LANES.items() if lane == LANE_METERED}
+    metered = {kind for kind, lane in LANES.items() if lane in METERED_LANES}
     assert metered
     assert [kind for kind in sorted(metered) if not no_retry(kind)] == []
 
@@ -104,18 +107,24 @@ def test_claim_takes_the_cheapest_job_first(db, project):
     assert long_job != quick_job
 
 
-def test_claim_respects_lane_capacity(db, project):
+def test_claim_respects_the_workers_lane_capacity(db, project):
     """LANE_HEAVY is 1 because one ffmpeg render saturates the box. A second
     concurrent render does not go twice as fast; it makes both slower and
-    risks the health check."""
+    risks the health check.
+
+    The box is the WORKER's: it counts its own running jobs and asks only
+    for lanes with room (it used to be one render for the whole system — see
+    test_worker_lanes). With its heavy slot taken, it is not offered the
+    second export."""
     queue.enqueue("export", project_id=project.id)
     queue.enqueue("export_all", project_id=project.id)
 
     first = queue.claim("worker-1")
     assert first is not None and first.lane == LANE_HEAVY
 
-    # The lane is now full; nothing else heavy may start.
-    assert queue.claim("worker-2") is None
+    room = open_lanes(LANE_LIMITS, [first.lane])
+    assert LANE_HEAVY not in room
+    assert queue.claim("worker-1", room) is None
 
 
 def test_different_lanes_run_concurrently(db, project):
@@ -127,13 +136,14 @@ def test_different_lanes_run_concurrently(db, project):
         job = queue.claim("worker-1")
         assert job is not None
         lanes.add(job.lane)
-    assert lanes == {LANE_HEAVY, LANE_METERED}
+    assert lanes == {LANE_HEAVY, LANE_LLM}
 
 
 def test_a_dead_workers_corpse_does_not_block_its_lane(db, project):
     """A row sitting in `running` is not evidence of life. A worker killed by
     OOM or a redeploy leaves one behind, and counting it as live would hold
-    that lane shut forever."""
+    that lane shut forever. (Nothing counts rows any more — each worker
+    counts its own jobs — but the property stays pinned.)"""
     queue.enqueue("export", project_id=project.id)
     claimed = queue.claim("worker-dead")
     assert claimed is not None

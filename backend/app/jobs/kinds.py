@@ -25,16 +25,33 @@ VERY_LONG = 80
 
 # ---------------------------------------------------------------------------
 # Lanes — the real concurrency bound. The number comes from "which finite
-# resource does this exhaust", not from taste.
+# resource does this exhaust", not from taste, and it is counted where that
+# resource is: by each WORKER, for the jobs it is running itself (see
+# open_lanes and app.worker.main).
+#
+# It used to be counted across every worker (heavy=1, metered=1 for the whole
+# system): a second worker box sat idle beside a render it could have run
+# itself, and all paid work shared one slot, so a 30-second suggestion
+# waited out another producer's 8-minute transcription (audit ARCH-2).
 # ---------------------------------------------------------------------------
-LANE_HEAVY = "heavy"      # CPU/RAM in full: ffmpeg, Demucs. Always 1.
-LANE_METERED = "metered"  # a paid external service with its own rate limit.
-LANE_NET = "net"          # HTTP wait only; cheap to overlap.
+LANE_HEAVY = "heavy"  # this box's CPU/RAM/disk in full: ffmpeg, Demucs.
+LANE_STT = "stt"      # a speech-to-text provider (duudlaga, ElevenLabs Scribe).
+LANE_LLM = "llm"      # the language model (OpenRouter).
 
+# Billed per call by an outside service with its own rate limit. Two lanes,
+# not one, because they are two providers: a transcription holding the STT
+# provider's concurrency is no reason for a suggestion to wait.
+METERED_LANES = frozenset({LANE_STT, LANE_LLM})
+
+# Per worker, when WORKER_LANES does not say otherwise (see parse_lanes).
+# heavy is 1: one render saturates the box, and a second makes both slower
+# and risks the health check. stt is 1: a transcription is 4 requests in
+# flight at once (DUUDLAGA_CONCURRENCY) and a 6 GB scratch budget, the same
+# per box as before. llm is 2: a few short calls, no disk.
 LANE_LIMITS = {
     LANE_HEAVY: 1,
-    LANE_METERED: 1,
-    LANE_NET: 3,
+    LANE_STT: 1,
+    LANE_LLM: 2,
 }
 
 KINDS = (
@@ -58,9 +75,9 @@ PRIORITY = {
 
 LANES = {
     "import_video": LANE_HEAVY,
-    "transcribe": LANE_METERED,
-    "suggest": LANE_METERED,
-    "translate": LANE_METERED,
+    "transcribe": LANE_STT,
+    "suggest": LANE_LLM,
+    "translate": LANE_LLM,
     "export": LANE_HEAVY,
     "export_all": LANE_HEAVY,
 }
@@ -87,6 +104,57 @@ def lane_of(kind: str) -> str:
 
 def no_retry(kind: str) -> bool:
     return kind in NO_RETRY
+
+
+def kinds_in(lanes) -> list[str]:
+    """The kinds a worker with room in `lanes` may claim.
+
+    Only kinds this code KNOWS: a row of a kind added by newer code (a
+    rollback, or the old worker still draining through a deploy) waits for a
+    worker that has its handler, instead of being claimed and failed here.
+    """
+    return [kind for kind in KINDS if lane_of(kind) in lanes]
+
+
+def parse_lanes(spec: str) -> dict[str, int]:
+    """WORKER_LANES — how many jobs of each lane this worker runs at once.
+
+    "" means LANE_LIMITS. Otherwise `lane=N` pairs, comma-separated, and a
+    lane left out is one this worker does not run at all: that is how one
+    service becomes a render pool (`heavy=1`) and another an I/O pool
+    (`stt=2,llm=4`). Anything unreadable raises — a typo such as `hevy=1`
+    must stop the worker at startup, not quietly turn renders off.
+    """
+    if not spec.strip():
+        return dict(LANE_LIMITS)
+    caps: dict[str, int] = {}
+    for item in spec.split(","):
+        name, sep, number = item.strip().partition("=")
+        name = name.strip()
+        if not sep or name not in LANE_LIMITS:
+            raise ValueError(
+                f"WORKER_LANES: {item.strip()!r} is not lane=N with a lane among "
+                f"{', '.join(LANE_LIMITS)} (got {spec!r})"
+            )
+        if name in caps:
+            raise ValueError(f"WORKER_LANES: {name} is given twice (got {spec!r})")
+        try:
+            caps[name] = int(number.strip())
+        except ValueError:
+            raise ValueError(f"WORKER_LANES: {name}={number.strip()!r} is not a whole number") from None
+        if caps[name] < 0:
+            raise ValueError(f"WORKER_LANES: {name} cannot be negative")
+    if not any(caps.values()):
+        raise ValueError(f"WORKER_LANES: {spec!r} runs no lane at all; this worker would never take a job")
+    return {name: caps.get(name, 0) for name in LANE_LIMITS}
+
+
+def open_lanes(caps: dict[str, int], busy: list[str], ceiling: int = 0) -> list[str]:
+    """The lanes in which a worker running jobs of lanes `busy` may start one
+    more. `ceiling` > 0 also bounds the total (WORKER_CONCURRENCY)."""
+    if ceiling and len(busy) >= ceiling:
+        return []
+    return [lane for lane, cap in caps.items() if busy.count(lane) < cap]
 
 
 def validate_registry(handlers: dict) -> None:
