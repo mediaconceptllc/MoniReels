@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     # refusing to start. It used to wait forever, which on a stuck lock is a
     # deployment that hangs with nothing in the log.
     migration_lock_wait_s: int = Field(default=600, ge=1)
+    # How long an API instance keeps trying to REACH the database at startup
+    # (app.migrate.wait_for_database) before it gives up and exits. It used
+    # to fail on the first refused connection, so a database restarting at
+    # the same moment as a deploy cost the platform's few restarts in
+    # seconds. Kept well under the API's healthcheck timeout (120 s on the
+    # dashboard) so a database that never answers ends in OUR error, with
+    # its reason, not in a healthcheck timeout with none.
+    db_startup_wait_s: int = Field(default=60, ge=0)
+    # One connection attempt's limit. Without it a host that drops packets
+    # held a connect for the kernel's TCP timeout (~2 min), past every bound
+    # above.
+    db_connect_timeout_s: int = Field(default=10, ge=1)
 
     # Comma-separated exact origins. "*" is refused at startup by main.py:
     # with credentials allowed, Starlette answers a wildcard by echoing back
@@ -208,7 +220,7 @@ class Settings(BaseSettings):
     elevenlabs_tts_usd_per_1k_chars: float | None = Field(default=None, ge=0)
 
     # ---- What one account may put on the shared queue (app.quotas) -----
-    # The lanes are system-wide — one render, one paid call at a time — so
+    # A worker runs one render and a few paid calls at a time (its lanes), so
     # without these one account, or one stolen password, could queue
     # twenty-five exports and hold every other producer behind them, or run
     # an unbounded provider bill (the audit measured both). Generous on
@@ -264,10 +276,14 @@ class Settings(BaseSettings):
     vad_speech_pad_ms: int = 100
 
     # ---- worker ------------------------------------------------------
-    # Jobs run concurrently, but an ffmpeg render or a Demucs pass saturates
-    # the box on its own — see jobs.LANES for the per-resource caps that
-    # actually bound this.
-    worker_concurrency: int = 2
+    # How many jobs of each lane THIS worker runs at once — "heavy=1,stt=1,
+    # llm=2" by default (app.jobs.kinds.LANE_LIMITS). A lane left out is not
+    # run here at all: `heavy=1` makes a render pool, `stt=2,llm=4` an I/O
+    # pool. Counted per worker, so N replicas run N times as much.
+    worker_lanes: str = ""
+    # Optional ceiling on the total across lanes; 0 = the lanes alone. It
+    # used to be the only bound (2), beside caps counted system-wide.
+    worker_concurrency: int = Field(default=0, ge=0)
     # A job whose worker stopped heartbeating for this long is presumed
     # dead and returned to the queue. Must exceed the heartbeat interval by
     # a wide margin or a merely busy worker loses its own job.
