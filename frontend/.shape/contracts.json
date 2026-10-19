@@ -965,7 +965,8 @@
       "measured_at": 0.0,
       "min_free_bytes": 0,
       "total_bytes": 0
-    }
+    },
+    "worker_seen_at": 0.0
   },
   "ranges_selected": {
     "clips": 0

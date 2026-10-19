@@ -174,27 +174,46 @@ def list_for_project(project_id: str, limit: int = 50, db: Session | None = None
         return [to_dict(j) for j in rows]
 
 
+# A worker publishes its report every minute (app.worker._housekeeping);
+# three missed rounds is a worker that is gone, not one that is busy.
+WORKER_REPORT_STALE_SEC = 180
+
+
 def queue_overview(db: Session | None = None) -> dict:
     """What the queue page shows. A queue with waiting work and no genuinely
     live worker means the worker service is down — the single most common
-    cause of "my job never starts"."""
+    cause of "my job never starts".
+
+    "Live" used to mean "running a job with a fresh heartbeat", so an IDLE
+    worker counted as dead: any waiting job it was not allowed to take yet
+    (a lane already busy, a retry still backing off) read as "the worker is
+    down". The worker's own report is the second sign of life — published
+    on a timer whether or not it has work.
+    """
+    from app import worker_report
+
     with _use(db) as session:
         counts = dict(
             session.execute(select(Job.state, func.count()).group_by(Job.state)).all()  # type: ignore[arg-type]
         )
-        stale_cutoff = time.time() - _stale_sec()
+        now = time.time()
+        stale_cutoff = now - _stale_sec()
         live = session.scalar(
             select(func.count())
             .select_from(Job)
             .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
         )
+        report = worker_report.read(session)
+        reported = report is not None and now - report.at < WORKER_REPORT_STALE_SEC
         waiting = counts.get("queued", 0)
         return {
             "counts": counts,
             "waiting": waiting,
             "live_workers": live or 0,
+            # When a worker last said it was alive, whatever it was doing.
+            "worker_seen_at": report.at if report is not None else None,
             # Waiting work with nothing actually alive to do it.
-            "stalled": bool(waiting and not live),
+            "stalled": bool(waiting and not live and not reported),
         }
 
 

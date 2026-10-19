@@ -13,6 +13,7 @@ process.** Every route either reads the database or queues a job.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
@@ -24,13 +25,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
+from app import observability
 from app.api import routes_admin, routes_auth, routes_jobs, routes_projects, routes_usage
 from app.bodylimit import BodyLimit
 from app.config import Settings, get_settings
 from app.db import session_scope
 from app.dbmodels import User
 from app.security import client_ip, hash_password
-from app.utils.logging import get_logger, setup_logging
+from app.utils.logging import get_logger, request_id, setup_logging
 from app.video.capabilities import Capabilities, build_capabilities
 from app.video.ffmpeg import discover_ffmpeg
 
@@ -102,6 +104,8 @@ async def lifespan(app: FastAPI):
             logger.error("Refusing to start: %s", problem)
         raise RuntimeError("Unsafe configuration: " + " | ".join(problems))
 
+    observability.init_error_reports("api")
+
     binaries = discover_ffmpeg()
     app.state.ffmpeg = binaries
     # Probed once: the xfade list costs an ffmpeg invocation, which is far
@@ -154,10 +158,15 @@ def _configure_cors(application: FastAPI) -> None:
         allow_origins=origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", observability.REQUEST_ID_HEADER],
+        # Readable by the page, so a failed request can be quoted back.
+        expose_headers=[observability.REQUEST_ID_HEADER],
     )
 
 
+# Innermost of the three, inside CORS for the same reason as BodyLimit: a
+# 500 that names its request id is no use if the browser cannot read it.
+app.add_middleware(observability.ServerErrors)
 # Added before CORS so CORS wraps it: a 413 still carries the CORS headers,
 # and the browser shows the reason instead of an opaque network error.
 app.add_middleware(
@@ -195,14 +204,32 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 @app.middleware("http")
 async def audit(request: Request, call_next):
     started = time.perf_counter()
-    response = await call_next(request)
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    if request.url.path not in ("/health", "/"):
-        logger.info(
-            "%s %s -> %d (%.0fms) ip=%s",
-            request.method, request.url.path, response.status_code, elapsed_ms, client_ip(request),
-        )
-    return response
+    rid = observability.new_request_id(request.headers.get(observability.REQUEST_ID_HEADER))
+    token = request_id.set(rid)
+    try:
+        response = await call_next(request)
+        response.headers[observability.REQUEST_ID_HEADER] = rid
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        ip = client_ip(request)
+        if request.url.path not in ("/health", "/"):
+            logger.info(
+                "%s %s -> %d (%.0fms) ip=%s",
+                request.method, request.url.path, response.status_code, elapsed_ms, ip,
+            )
+        if observability.audited(request.method, request.url.path):
+            # After the response exists, so the row has the status it got.
+            # Off the event loop: it is a database write.
+            await asyncio.to_thread(
+                observability.record_audit,
+                user=observability.actor_of(request.headers.get("authorization")),
+                ip=ip,
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+            )
+        return response
+    finally:
+        request_id.reset(token)
 
 
 app.include_router(routes_auth.router)
