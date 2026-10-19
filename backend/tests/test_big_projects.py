@@ -222,7 +222,7 @@ def test_the_project_read_is_the_document_and_the_page_extras(client, db):  # no
 
 
 def test_an_extra_key_may_not_repeat_a_document_field():
-    from app.api.routes_projects import _json_object
+    from app.api.projects.documents import _json_object
 
     with pytest.raises(ValueError):
         _json_object('{"name":"a"}', {"name": "b"})
