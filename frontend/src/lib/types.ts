@@ -278,6 +278,24 @@ export interface Job {
   created_at: number;
   updated_at: number;
   finished_at: number | null;
+  /** How many waiting jobs a worker takes before this one, in its lane; null
+   *  once it is not waiting. Sent with a job followed on its own — GET
+   *  /jobs/{id} and the stream — and absent from the project's job list. */
+  queue_ahead?: number | null;
+}
+
+/** A project's newest job, as the list card shows it (`GET /jobs/latest`). */
+export interface LatestJob {
+  project_id: string;
+  job_id: string;
+  kind: string;
+  state: JobState;
+  progress: number;
+  finished_at: number | null;
+}
+
+export interface LatestJobs {
+  jobs: LatestJob[];
 }
 
 /**
@@ -694,8 +712,18 @@ export interface Capability {
   implemented?: boolean;
 }
 
+/** Whether each brand file has been uploaded — never where it is. */
+export interface BrandAvailability {
+  logo: boolean;
+  intro: boolean;
+  outro: boolean;
+}
+
 export interface ProviderReadiness {
   capabilities: Capability[];
+  /** The export panel's logo/intro/outro choices read this: a choice with
+   *  no file behind it is one the render silently skips. */
+  brand?: BrandAvailability;
 }
 
 export interface SubtitleFonts {

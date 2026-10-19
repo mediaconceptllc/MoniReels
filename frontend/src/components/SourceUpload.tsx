@@ -133,7 +133,7 @@ export function SourceUpload({
               {Math.round((progress ?? 0) * 100)}%
             </span>
           </div>
-          <ProgressBar value={progress ?? 0} />
+          <ProgressBar value={progress ?? 0} label="Видео хуулж байна" />
           <Button tone="quiet" className="self-start" onClick={() => transfer.current?.pause()}>
             Зогсоох
           </Button>

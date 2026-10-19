@@ -6,6 +6,7 @@ import { errorMessage } from "@/lib/auth";
 import { uploadToStorage } from "@/lib/upload";
 import type { BrandAsset, BrandSettings } from "@/lib/types";
 import { Alert, Button, Card, Loading, Skeleton } from "@/components/ui";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 /** What ffmpeg in this image can actually read.
  *
@@ -157,6 +158,9 @@ function BrandRow({
   onClear: () => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  // One studio-wide file, used by every project that ticked it: removing it
+  // is asked, with what it changes (audit UX-9).
+  const [asking, setAsking] = useState(false);
 
   return (
     <div className="flex flex-wrap items-center gap-4 py-4 first:pt-0 last:pb-0">
@@ -186,11 +190,28 @@ function BrandRow({
           {current ? "Солих" : "Оруулах"}
         </Button>
         {current && (
-          <Button tone="quiet" onClick={onClear} disabled={disabled}>
+          <Button tone="quiet" onClick={() => setAsking(true)} disabled={disabled}>
             Устгах
           </Button>
         )}
       </div>
+
+      {asking && (
+        <ConfirmDialog
+          title={`«${title}» устгах уу?`}
+          lose={[`${title} — бүх төсөлд нийтлэг файл`]}
+          confirmLabel="Устгах"
+          onConfirm={() => {
+            setAsking(false);
+            onClear();
+          }}
+          onCancel={() => setAsking(false)}
+        >
+          <p className="text-sm text-ink-2">
+            Үүнийг сонгосон төслүүдийн дараагийн экспортод орохгүй. Өмнө гаргасан видео хэвээр.
+          </p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }

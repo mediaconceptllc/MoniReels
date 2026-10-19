@@ -17,6 +17,7 @@ import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, LANGUAGE_LABELS, usd } from "@/lib/format";
 import { explainJobError } from "@/lib/job-errors";
+import { usePageTitle } from "@/lib/title";
 import { useLeaveGuard } from "@/lib/unsaved";
 import type { Job, Output, Project } from "@/lib/types";
 import { Alert, Badge, Button, Card, Empty, Skeleton } from "@/components/ui";
@@ -70,6 +71,11 @@ export default function ProjectPage() {
   const [confirmRedo, setConfirmRedo] = useState(false);
   const [confirmTranscribe, setConfirmTranscribe] = useState(false);
   const [confirmSuggest, setConfirmSuggest] = useState(false);
+  // An export of ideas that already have videos makes a SECOND file of each
+  // — asked first, with the count (audit UX-9). Null pick: all of them.
+  const [confirmExport, setConfirmExport] = useState<
+    { pick?: { shorts: string[]; youtube: number[] } } | null
+  >(null);
   const [unsaved, setUnsaved] = useState<Unsaved>(CLEAN);
   const [savingEdits, setSavingEdits] = useState(false);
   const textEditor = useRef<EditorHandle>(null);
@@ -83,6 +89,8 @@ export default function ProjectPage() {
   // every settled job triggers — a count chosen and then silently reset to
   // three by the page reloading itself would be a choice that did not stick.
   const [chosen, setChosen] = useState<Counts | null>(null);
+
+  usePageTitle(project?.name);
 
   const refresh = useCallback(async () => {
     try {
@@ -214,12 +222,9 @@ export default function ProjectPage() {
         {/* One `role="status"` for the page — the rail's. Three regions all
             named "Ачаалж байна" would be announced three times for one wait. */}
         <div className="flex flex-col gap-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex flex-col gap-2">
-              <Skeleton className="h-8 w-64" />
-              <Skeleton className="h-4 w-40" />
-            </div>
-            <Skeleton className="h-11 w-32 rounded-md" />
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-4 w-40" />
           </div>
           <PipelineRailSkeleton />
           <div className="flex flex-col gap-4">
@@ -308,7 +313,7 @@ export default function ProjectPage() {
             unsaved.export || unsaved.style ? " · хадгалаагүй" : ""
           }`
         : source === "queued" || source === "running"
-          ? "Боловсруулагдаж байна"
+          ? "Бэлтгэж байна"
           : source === "failed"
             ? "Боловсруулж чадсангүй"
             : source === "canceled"
@@ -557,14 +562,16 @@ export default function ProjectPage() {
       }
       case "outputs":
         return {
-          label: "Бүгдийг экспортлох",
+          label: outputs.length ? "Бүгдийг дахин экспортлох…" : "Бүгдийг экспортлох",
           note: !hasSuggestions
             ? "Санал боловсруулсны дараа экспортлоно."
             : (exportBlocked ??
               (voiceOn
                 ? "Монгол дуутай: шинэ мөр бүр ElevenLabs-т тэмдэгтээр төлбөртэй, өмнө нь үүсгэсэн мөр дахин төлөгдөхгүй. Санал таб дээрээс тус тусад нь ч экспортлож болно."
                 : "Санал таб дээрээс тус тусад нь ч экспортлож болно.")),
-          onRun: () => void run(() => api.exportAll(projectId)),
+          onRun: outputs.length
+            ? () => setConfirmExport({})
+            : () => void run(() => api.exportAll(projectId)),
           disabled: !hasSuggestions || !!exportBlocked || running,
           loading: busy,
         };
@@ -663,9 +670,6 @@ export default function ProjectPage() {
               {translation.needed ? ` · ${LANGUAGE_LABELS[project.language]} яриа` : ""}
             </p>
           </div>
-          <Button tone="danger" onClick={() => setConfirmDelete(true)}>
-            Төсөл устгах
-          </Button>
         </header>
 
         {/* Before the button, not after the failed job. */}
@@ -719,7 +723,7 @@ export default function ProjectPage() {
               />
             )}
             <Card className="p-5">
-              <h3 className="font-display text-base font-semibold">Экспортын тохиргоо</h3>
+              <h2 className="font-display text-base font-semibold">Экспортын тохиргоо</h2>
               <p className="mt-1 mb-4 text-sm text-ink-3">
                 Экспортлохоос өмнө тохируулна. Дараагийн экспорт бүрд хэрэглэгдэнэ.
               </p>
@@ -734,7 +738,7 @@ export default function ProjectPage() {
               />
             </Card>
             <Card className="p-5">
-              <h3 className="font-display text-base font-semibold">Видеоны хэл</h3>
+              <h2 className="font-display text-base font-semibold">Видеоны хэл</h2>
               <p className="mt-1 mb-4 text-sm text-ink-3">
                 Яриаг аль хэлээр танихыг шийднэ. Монголоос бусад хэлтэй видеог монгол руу
                 орчуулж, хадмалыг монголоор гаргана.
@@ -747,7 +751,7 @@ export default function ProjectPage() {
               />
             </Card>
             <Card className="p-5">
-              <h3 className="font-display text-base font-semibold">Хадмалын загвар</h3>
+              <h2 className="font-display text-base font-semibold">Хадмалын загвар</h2>
               <p className="mt-1 mb-4 text-sm text-ink-3">
                 Шатаасан хадмал болон .srt файлд хэрэглэгдэнэ.
               </p>
@@ -816,7 +820,11 @@ export default function ProjectPage() {
               sourceUrl={project.media.source_url}
               busy={busy || !!activeJob}
               blocked={exportBlocked}
-              onExport={(pick) => void run(() => api.exportAll(projectId, pick))}
+              onExport={(pick) =>
+                outputs.length
+                  ? setConfirmExport({ pick })
+                  : void run(() => api.exportAll(projectId, pick))
+              }
             />
           ) : (
             <Empty
@@ -842,6 +850,23 @@ export default function ProjectPage() {
           spend={project.spend}
           limit={project.job_history_limit}
         />
+
+        {/* Last on the page, not first. It was the first button on every
+            project page, beside the title — the first thing a keyboard
+            reached and the one a thumb found when it reached for the
+            header (audit UX-9). It still asks, with everything it takes
+            counted; it just no longer leads. */}
+        <section aria-labelledby="danger-zone" className="flex flex-col gap-3 border-t border-rule pt-6">
+          <h2 id="danger-zone" className="font-display text-base font-semibold">
+            Төслийг устгах
+          </h2>
+          <p className="text-sm text-ink-3">
+            Текст, санал, бэлэн видео, эх видео бүгд хамт устана. Буцаах боломжгүй.
+          </p>
+          <Button tone="danger" className="self-start" onClick={() => setConfirmDelete(true)}>
+            Төсөл устгах
+          </Button>
+        </section>
 
         {/* Counted, not implied: a project is hours of work and real money,
             and `window.confirm` could say neither. */}
@@ -923,11 +948,35 @@ export default function ProjectPage() {
           />
         )}
 
+        {confirmExport && (
+          <ConfirmDialog
+            title={
+              confirmExport.pick
+                ? "Сонгосон саналыг дахин экспортлох уу?"
+                : "Бүх саналыг дахин экспортлох уу?"
+            }
+            confirmLabel="Дахин экспортлох"
+            undo="Илүү гарсан файлыг «Бэлэн видео» табаас устгаж болно."
+            onConfirm={() => {
+              const pick = confirmExport.pick;
+              setConfirmExport(null);
+              void run(() => api.exportAll(projectId, pick));
+            }}
+            onCancel={() => setConfirmExport(null)}
+          >
+            <p className="text-sm text-ink-2">
+              Одоо байгаа {outputs.length} бэлэн видео хэвээр үлдэж, шинэ файлууд нэмэгдэнэ — нэг
+              санал хоёр файлтай болно.
+              {voiceOn ? " Монгол дууны шинээр үүсгэх мөр бүр дахин төлбөртэй." : ""}
+            </p>
+          </ConfirmDialog>
+        )}
+
         {confirmDelete && (
           <ConfirmDialog
             title={`«${project.name}» төслийг бүхэлд нь устгах уу?`}
             lose={[
-              hasTranscript ? `${segments} мөр хадмал текст` : "",
+              hasTranscript ? `${segments} мөр текст` : "",
               hasSuggestions ? `${shorts} богино · ${plans} хураангуйн санал` : "",
               outputs.length ? `${outputs.length} бэлэн видео` : "",
               "Эх видео",

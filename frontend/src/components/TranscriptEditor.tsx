@@ -99,6 +99,10 @@ export function TranscriptEditor({
   const [cleared, setCleared] = useState(0);
   const [playing, setPlaying] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  // The line the producer last worked on, so "next untranslated" means next
+  // after HERE rather than always the first hole from the top.
+  const lastIndex = useRef(-1);
 
   const translating = field === "translation";
   const focus = useMemo(() => new Set(focusIds ?? []), [focusIds]);
@@ -141,6 +145,33 @@ export function TranscriptEditor({
 
   useImperativeHandle(ref, () => ({ save }));
 
+  /** The holes, in the order shown. A line counts when its translation box is
+   *  empty right now — typed-in text counts as filled, saved or not — and,
+   *  once there are ideas, only the lines an export of them shows. */
+  const holeIndexes = translating
+    ? shown.flatMap((segment, index) => {
+        const value = edits[segment.id] ?? current(segment, field);
+        const empty = !value.trim() && !!segment.text.trim();
+        return empty && (!focusing || focus.has(segment.id)) ? [index] : [];
+      })
+    : [];
+
+  /** Two tab stops a line — the timecode and the box — put 900 between the
+   *  top of a long transcript and its first untranslated line, with nothing
+   *  to jump them (audit A11Y-3). This goes straight to the next hole after
+   *  the line last worked on, wrapping to the top. */
+  function jumpToNextHole() {
+    if (holeIndexes.length === 0) return;
+    const next = holeIndexes.find((i) => i > lastIndex.current) ?? holeIndexes[0];
+    const box = listRef.current?.querySelector<HTMLTextAreaElement>(
+      `textarea[data-line="${shown[next].id}"]`,
+    );
+    if (!box) return;
+    lastIndex.current = next;
+    box.scrollIntoView({ block: "center" });
+    box.focus();
+  }
+
   async function save() {
     // Two buttons reach this — the editor's own and the rail's pinned copy —
     // and a second press mid-save would send the same lines twice.
@@ -167,8 +198,8 @@ export function TranscriptEditor({
 
   const lines = (
     <div className="overflow-hidden rounded-lg border border-rule">
-      <ul className="max-h-[34rem] divide-y divide-rule-soft overflow-y-auto">
-        {shown.map((segment) => {
+      <ul ref={listRef} className="max-h-[34rem] divide-y divide-rule-soft overflow-y-auto">
+        {shown.map((segment, index) => {
           const value = edits[segment.id] ?? current(segment, field);
           const isChanged = value !== current(segment, field);
           const isPlaying = playing === segment.id;
@@ -209,6 +240,10 @@ export function TranscriptEditor({
                     it always was, with the drag handle. */}
                 <textarea
                   value={value}
+                  data-line={segment.id}
+                  onFocus={() => {
+                    lastIndex.current = index;
+                  }}
                   rows={1}
                   lang={translating ? "mn" : language}
                   placeholder={
@@ -242,9 +277,9 @@ export function TranscriptEditor({
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <h3 className="font-display text-base font-semibold">
-            {translating ? "Монгол орчуулга" : "Хадмал текст"}
-          </h3>
+          <h2 className="font-display text-base font-semibold">
+            {translating ? "Монгол орчуулга" : "Текст"}
+          </h2>
           <span className="tabular text-xs text-ink-3">
             {translating && holes ? `${holes} мөр орчуулагдаагүй` : `${shown.length} мөр`}
           </span>
@@ -253,6 +288,9 @@ export function TranscriptEditor({
           {changed.length > 0 && <Badge tone="warn">{changed.length} мөр өөрчлөгдсөн</Badge>}
           {willClear > 0 && <Badge tone="warn">{willClear} мөрийн орчуулга арилна</Badge>}
           {saved && changed.length === 0 && <Badge tone="fit">✓ Хадгалагдсан</Badge>}
+          {translating && holeIndexes.length > 0 && (
+            <Button onClick={jumpToNextHole}>Дараагийн орчуулаагүй мөр</Button>
+          )}
           <Button
             tone="primary"
             onClick={save}
@@ -293,7 +331,12 @@ export function TranscriptEditor({
 
       {sourceUrl ? (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
-          <div className="flex flex-col gap-2 lg:sticky lg:top-4 lg:self-start">
+          {/* Sticky on a phone too. It was sticky only beside the list (lg):
+              on a phone the player sits ABOVE the lines, so by the line one
+              taps a timecode on, the player has scrolled away and plays where
+              nobody can see it (MEASURED at 390px: its top at −100). Held at
+              the top here, bounded so the lines keep most of the screen. */}
+          <div className="sticky top-0 z-10 flex flex-col gap-2 bg-paper pb-2 lg:top-4 lg:self-start lg:bg-transparent lg:pb-0">
             <video
               ref={videoRef}
               src={sourceUrl}
@@ -301,9 +344,9 @@ export function TranscriptEditor({
               preload="metadata"
               playsInline
               onTimeUpdate={onTime}
-              className="w-full rounded-lg bg-black"
+              className="max-h-[30dvh] w-full rounded-lg bg-black object-contain lg:max-h-none"
             />
-            <p className="text-xs text-ink-3">
+            <p className="text-xs text-ink-3 max-lg:hidden">
               Цагийн тэмдэг дээр дарахад тэр мөрөөс тоглуулна. Тоглож буй мөр тодрон харагдана.
             </p>
           </div>

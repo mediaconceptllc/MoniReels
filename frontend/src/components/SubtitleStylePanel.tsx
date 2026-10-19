@@ -6,6 +6,7 @@ import { errorMessage } from "@/lib/auth";
 import type { SubtitleStyle, SubtitleTemplate } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
 import { Alert, Badge, Button, Field, Select, TAP, TextInput } from "@/components/ui";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 const POSITIONS: [SubtitleStyle["position"], string][] = [
   ["bottom", "Доор"],
@@ -286,6 +287,9 @@ function Templates({
   onDelete: (id: string) => void;
   busy: boolean;
 }) {
+  // Asked first: a house style is studio-wide, and the «×» sat right beside
+  // the name that applies it (audit UX-9).
+  const [asking, setAsking] = useState<SubtitleTemplate | null>(null);
   if (templates.length === 0 && !canManage) return null;
 
   return (
@@ -313,7 +317,7 @@ function Templates({
                   type="button"
                   aria-label={`${t.name} загварыг устгах`}
                   className={`${TAP} w-11 rounded-full text-ink-3 hover:text-tally`}
-                  onClick={() => onDelete(t.id)}
+                  onClick={() => setAsking(t)}
                 >
                   ×
                 </button>
@@ -334,9 +338,26 @@ function Templates({
             maxLength={80}
           />
           <Button tone="quiet" onClick={onSave} disabled={busy || !name.trim()}>
-            Одоогийн тохиргоог хадгалах
+            Загвар болгон нэмэх
           </Button>
         </div>
+      )}
+
+      {asking && (
+        <ConfirmDialog
+          title={`«${asking.name}» загварыг устгах уу?`}
+          confirmLabel="Устгах"
+          onConfirm={() => {
+            onDelete(asking.id);
+            setAsking(null);
+          }}
+          onCancel={() => setAsking(null)}
+        >
+          <p className="text-sm text-ink-2">
+            Бүх төсөлд нийтлэг загвар. Аль хэдийн хэрэглэсэн төслүүдийн хадмал хэвээр үлдэнэ —
+            зөвхөн цаашид сонгох боломжгүй болно.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

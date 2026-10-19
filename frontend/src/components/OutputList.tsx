@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 import { errorMessage } from "@/lib/auth";
 import { OUTPUT_KIND_LABELS, duration, fileSize } from "@/lib/format";
 import type { Output } from "@/lib/types";
-import { Alert, Badge, Button, Card, Empty, TAP } from "@/components/ui";
+import { Alert, Badge, Button, Card, Empty, buttonClass } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 export function OutputList({
@@ -67,7 +67,7 @@ export function OutputList({
             />
             <div className="flex flex-col gap-1">
               <p className="text-sm font-medium leading-snug text-ink">
-                {output.title || "Гарц"}
+                {output.title || "Бэлэн видео"}
               </p>
               <div className="flex items-center gap-2">
                 <Badge tone="accent">{OUTPUT_KIND_LABELS[output.kind] ?? output.kind}</Badge>
@@ -81,12 +81,15 @@ export function OutputList({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <a href={output.download_url} className={`${TAP} inline-flex`}>
-                <Button>Татах</Button>
+              {/* Links that look like buttons — not buttons inside links,
+                  which were two tab stops each and nested interactive
+                  elements (audit A11Y-3). */}
+              <a href={output.download_url} className={buttonClass()}>
+                Татах
               </a>
               {output.srt_url && (
-                <a href={output.srt_url} className={`${TAP} inline-flex`}>
-                  <Button tone="quiet">Хадмал</Button>
+                <a href={output.srt_url} className={buttonClass("quiet")}>
+                  Хадмал
                 </a>
               )}
               <Button
@@ -106,7 +109,7 @@ export function OutputList({
           so the size goes in the question rather than being left to guess. */}
       {asking && (
         <ConfirmDialog
-          title={`«${asking.title || "Гарц"}» устгах уу?`}
+          title={`«${asking.title || "Бэлэн видео"}» устгах уу?`}
           lose={[`${fileSize(asking.size_bytes)} видео`, ...(asking.srt_url ? ["Хадмал файл"] : [])]}
           confirmLabel="Устгах"
           busy={deleting === asking.id}

@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { errorMessage, useAuth } from "@/lib/auth";
+import { usePageTitle } from "@/lib/title";
 import { Alert, Button, Card, Field, TextInput } from "@/components/ui";
 
 /** The same four stages the project page walks down, named the same way. A
@@ -44,6 +45,7 @@ const STEPS: { title: string; detail: string }[] = [
 export default function LoginPage() {
   const { user, loading, signIn } = useAuth();
   const router = useRouter();
+  usePageTitle("Нэвтрэх");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
