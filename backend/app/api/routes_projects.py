@@ -170,7 +170,7 @@ def upload_complete(
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     size = r2.object_size(row.video_key) if row.video_key else None
-    if size is None:
+    if size is None or row.video_key is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Хуулсан файл хадгалах санд хараахан ирээгүй байна.",

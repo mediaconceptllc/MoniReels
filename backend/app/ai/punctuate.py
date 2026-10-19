@@ -154,7 +154,7 @@ def is_punctuated(segments: list[Segment]) -> bool:
     return words <= marks * WORDS_PER_SENTENCE_MAX
 
 
-def answer_tokens(segments: list[Segment], indices: list[int]) -> int:
+def answer_tokens(segments: list[Segment], indices: list[int]) -> float:
     """How big the answer to this chunk would be."""
     return sum(PER_LINE_TOKENS + len(segments[i].text or "") / CHARS_PER_TOKEN for i in indices)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from app.ai.llm_client import LLMClient
 from app.models import Suggestions
@@ -37,7 +38,7 @@ Rules:
 
 Return JSON: {"texts": [{"i": <text index>, "text": "<Mongolian>"}]}"""
 
-SCHEMA = {
+SCHEMA: dict[str, Any] = {
     "name": "translated_texts",
     "strict": True,
     "schema": {
