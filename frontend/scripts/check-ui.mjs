@@ -31,6 +31,19 @@
  *      The tokens are read from globals.css, so darkening one fails here
  *      rather than in an accessibility report months later.
  *
+ *   5. DIALOGS. Every `role="dialog"` calls `useDialogFocus` (lib/dialog):
+ *      focus in on open, held inside, back to the opener on close. Three
+ *      dialogs each wrote an Escape handler and none did the rest — Tab left
+ *      the delete confirmation on the first press (audit A11Y-2).
+ *
+ *   6. NESTING. No button inside a link. `<a><Button/></a>` was two tab
+ *      stops for one download and a nested interactive element announced
+ *      twice (audit A11Y-3); a link that looks like a button takes
+ *      `buttonClass()` instead.
+ *
+ *   7. TITLES. Every page calls `usePageTitle` (lib/title). Every tab read
+ *      "MoniReels", whatever it showed (audit A11Y-3).
+ *
  * Run: npm run check-ui
  */
 
@@ -201,8 +214,9 @@ function heightPx(token) {
 }
 
 function hasFloor(classes) {
-  // `${TAP}` is the floor by definition — the constant is checked separately.
-  if (/\$\{TAP\}|\bTAP\b/.test(classes)) return true;
+  // `${TAP}` is the floor by definition — the constant is checked separately,
+  // and so is `buttonClass()`, which carries it.
+  if (/\$\{TAP\}|\bTAP\b|\bbuttonClass\(/.test(classes)) return true;
   return classes
     .split(/[\s`]+/)
     .some((token) => (heightPx(token) ?? 0) >= FLOOR_PX);
@@ -261,7 +275,7 @@ function checkPrimitives(source) {
       `src/components/ui.tsx  TAP is \`${declared[1]}\` (${px ?? "?"}px), below the ${FLOOR_PX}px floor.`,
     );
   }
-  for (const name of ["Button", "TextInput", "Select"]) {
+  for (const name of ["Button", "TextInput", "Select", "buttonClass"]) {
     const body = new RegExp(`(?:function|const)\\s+${name}\\b[\\s\\S]*?\\n\\}`).exec(source);
     if (!body) {
       problems.push(`src/components/ui.tsx  primitive \`${name}\` is missing.`);
@@ -384,6 +398,38 @@ function checkContrast() {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Rules 5–7 — dialogs, nesting, titles
+ * ------------------------------------------------------------------ */
+
+function checkDialogs(file, source) {
+  const match = /role="dialog"/.exec(source);
+  if (match && !/\buseDialogFocus\(/.test(source)) {
+    fail(file, match.index, source, 'role="dialog" without useDialogFocus — focus must move in, stay inside and return to the opener (lib/dialog).');
+  }
+}
+
+function checkNesting(file, source) {
+  for (const { tag, text, index } of openingTags(source)) {
+    if (tag !== "a" && tag !== "Link") continue;
+    if (text.endsWith("/>")) continue;
+    const close = source.indexOf(`</${tag}>`, index + text.length);
+    if (close < 0) continue;
+    const inner = source.slice(index + text.length, close);
+    const nested = /<(Button|button)(?=[\s/>])/.exec(inner);
+    if (nested) {
+      fail(file, index + text.length + nested.index, source, `<${nested[1]}> inside <${tag}> — one action, two tab stops. Give the link \`buttonClass()\` instead.`);
+    }
+  }
+}
+
+function checkTitle(file, source) {
+  if (!/[\\/]page\.tsx$/.test(file)) return;
+  if (!/\busePageTitle\(/.test(source)) {
+    fail(file, 0, source, "page without usePageTitle — every tab would read just “MoniReels” (lib/title).");
+  }
+}
+
 /* ------------------------------------------------------------------ */
 
 const files = tsxFiles(SRC);
@@ -393,6 +439,9 @@ for (const file of files) {
   const source = withoutComments(readFileSync(file, "utf8"));
   checkTargets(file, source, file === UI);
   checkCards(file, source);
+  checkDialogs(file, source);
+  checkNesting(file, source);
+  checkTitle(file, source);
   if (file !== UI) checkSpinner(file, source);
 }
 
@@ -404,5 +453,6 @@ if (problems.length) {
 }
 console.log(
   `check-ui: ${files.length} files, every target at least ${FLOOR_PX}px, ` +
-    `no stray Spinner, every Card padded, text tokens at ${AA}:1 or better.`,
+    `no stray Spinner, every Card padded, text tokens at ${AA}:1 or better, ` +
+    `every dialog holds focus, no button inside a link, every page titled.`,
 );

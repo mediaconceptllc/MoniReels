@@ -44,6 +44,7 @@ import type {
   CreateProjectResponse,
   Job,
   JobStats,
+  LatestJobs,
   Me,
   MultipartSigned,
   MultipartStart,
@@ -77,6 +78,8 @@ const outputs = contracts.outputs as Output[];
 const job = contracts.job as Job;
 const jobFailed = contracts.job_failed as Job;
 const jobVoiced = contracts.job_voiced as Job;
+const jobQueued = contracts.job_queued as Job;
+const latestJobs = contracts.latest_jobs as LatestJobs;
 const ttsVoices = contracts.tts_voices as TtsVoices;
 const projectVoices = contracts.project_voices as ProjectVoices;
 const queue = contracts.queue as QueueStatus;
@@ -314,6 +317,10 @@ const present: unknown[] = [
 
   // what can and cannot run
   raw.readiness.capabilities.map((c) => [c.name, c.label, c.ready, c.blocked]),
+  raw.readiness.brand.logo, raw.readiness.brand.intro, raw.readiness.brand.outro,
+  // the waiting job's place in line, and the list cards' newest job
+  raw.job_queued.queue_ahead,
+  raw.latest_jobs.jobs.map((j) => [j.project_id, j.job_id, j.kind, j.state, j.progress, j.finished_at]),
   raw.providers.capabilities.map((c) => [
     c.name, c.label, c.ready, c.blocked, c.provider, c.powers, c.configured,
     c.implemented,
@@ -433,7 +440,7 @@ console.log(
 // Keeps the compiler from pruning the two lists above as unused. They exist
 // to be checked, not to be read.
 void [
-  token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, ttsVoices,
+  token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, jobQueued, latestJobs, ttsVoices,
   projectVoices, queue,
   providerSettings, readiness, brand, brandEmpty, fonts, templateSaved, usage,
   providers, adminUsers, adminJobs, jobStats, writes, present,

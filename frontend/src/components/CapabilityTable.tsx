@@ -1,6 +1,6 @@
 "use client";
 
-import type { Capability } from "@/lib/types";
+import type { Capability, SttStatus } from "@/lib/types";
 import { Badge, Card, Select } from "@/components/ui";
 
 /**
@@ -18,11 +18,14 @@ const STT_LABEL: Record<string, string> = {
 
 export function CapabilityTable({
   capabilities,
+  stt,
   sttProvider,
   sttProviders,
   onSttProvider,
 }: {
   capabilities: Capability[];
+  /** The recogniser's own answer to this visit's balance check, when asked. */
+  stt?: SttStatus | null;
   sttProvider?: string;
   sttProviders?: string[];
   onSttProvider?: (name: string) => void;
@@ -43,7 +46,7 @@ export function CapabilityTable({
               <div className="min-w-40 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-ink">{c.label}</span>
-                  <StatusBadge capability={c} />
+                  <StatusBadge capability={c} stt={c.name === "stt" ? stt : null} />
                 </div>
                 <p className="mt-0.5 text-xs text-ink-3">{c.provider}</p>
                 {c.powers && <p className="mt-1 text-xs text-ink-3">{c.powers}</p>}
@@ -73,8 +76,17 @@ export function CapabilityTable({
   );
 }
 
-function StatusBadge({ capability }: { capability: Capability }) {
-  if (capability.ready) return <Badge tone="fit">Ажиллаж байна</Badge>;
+function StatusBadge({ capability, stt }: { capability: Capability; stt?: SttStatus | null }) {
+  if (capability.ready) {
+    // Ready means CONFIGURED. The recogniser is the one service this page
+    // actually calls, and when that call fails the row must not say it
+    // works (audit UX-8: "Ажиллаж байна" beside "All connection attempts
+    // failed"). The others are not called here, so they claim no more than
+    // what was checked.
+    if (stt?.ok === false) return <Badge tone="danger">Холбогдохгүй байна</Badge>;
+    if (stt?.ok === true) return <Badge tone="fit">Ажиллаж байна</Badge>;
+    return <Badge>Тохируулсан</Badge>;
+  }
   // Three states, not two: "no key" is something the operator fixes here,
   // "not built" is not, and telling them apart is the whole point.
   if (capability.implemented === false) return <Badge>Хэрэгжээгүй</Badge>;

@@ -236,6 +236,7 @@
     "message": "",
     "progress": 0.0,
     "project_id": "",
+    "queue_ahead": null,
     "result": {
       "elapsed_sec": 0.0,
       "llm": {
@@ -266,11 +267,28 @@
     "message": "",
     "progress": 0.0,
     "project_id": "",
+    "queue_ahead": null,
     "result": {
       "elapsed_sec": 0.0
     },
     "stage": "",
     "state": "failed",
+    "updated_at": 0.0
+  },
+  "job_queued": {
+    "attempts": 0,
+    "created_at": 0.0,
+    "error": null,
+    "finished_at": null,
+    "job_id": "",
+    "kind": "translate",
+    "message": "",
+    "progress": 0.0,
+    "project_id": "",
+    "queue_ahead": 0,
+    "result": null,
+    "stage": "",
+    "state": "queued",
     "updated_at": 0.0
   },
   "job_voiced": {
@@ -283,6 +301,7 @@
     "message": "",
     "progress": 0.0,
     "project_id": "",
+    "queue_ahead": null,
     "result": {
       "elapsed_sec": 0.0,
       "voice": {
@@ -301,6 +320,18 @@
     "stage": "",
     "state": "done",
     "updated_at": 0.0
+  },
+  "latest_jobs": {
+    "jobs": [
+      {
+        "finished_at": null,
+        "job_id": "",
+        "kind": "translate",
+        "progress": 0.0,
+        "project_id": "",
+        "state": "queued"
+      }
+    ]
   },
   "me": {
     "id": "",
@@ -911,6 +942,11 @@
     "clips": 0
   },
   "readiness": {
+    "brand": {
+      "intro": false,
+      "logo": false,
+      "outro": false
+    },
     "capabilities": [
       {
         "blocked": "",

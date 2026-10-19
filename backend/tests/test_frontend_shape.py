@@ -612,6 +612,11 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     # translate and is refused with a 400, which would capture the error.
     send("PATCH", f"/projects/{row.id}", json={"language": "en"})
     shape["translate_started"] = send("POST", f"/projects/{row.id}/translate")
+    # A job still WAITING, so `queue_ahead` is captured as the number it is
+    # rather than only as the null a finished job carries. And the list
+    # cards' one call, with live work in it.
+    shape["job_queued"] = get(f"/jobs/{shape['translate_started']['job_id']}")
+    shape["latest_jobs"] = get("/jobs/latest")
 
     # Account administration, last among the admin calls because it closes
     # an account (not the one signed in).

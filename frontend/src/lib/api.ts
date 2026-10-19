@@ -20,6 +20,7 @@ import type {
   CreateProjectResponse,
   Job,
   JobStats,
+  LatestJobs,
   Me,
   MultipartSigned,
   MultipartStart,
@@ -318,7 +319,10 @@ export const api = {
   getJob: (jobId: string) => request<Job>(`/jobs/${jobId}`),
 
   cancelJob: (jobId: string) =>
-    request<{ canceled: boolean }>(`/jobs/${jobId}/cancel`, { method: "POST" }),
+    request<{ canceled: boolean; reason?: string }>(`/jobs/${jobId}/cancel`, { method: "POST" }),
+
+  /** Each of the caller's projects' newest job, for the list cards. */
+  latestJobs: () => request<LatestJobs>("/jobs/latest"),
 
   queueStatus: () => request<QueueStatus>("/jobs/queue"),
 

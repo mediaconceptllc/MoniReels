@@ -14,8 +14,9 @@
  * and signing in as someone else is the sign-in page's job.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useDialogFocus } from "@/lib/dialog";
 import type { TokenResponse } from "@/lib/types";
 import { Alert, Button, Field, TextInput } from "@/components/ui";
 
@@ -31,6 +32,12 @@ export function SignInAgain({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const boxRef = useRef<HTMLFormElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  // No Escape: this has to be answered — the page behind it cannot save.
+  // Tab stays inside, so a keyboard user cannot wander onto the page's own
+  // controls, all of which would fail with the same expired session.
+  useDialogFocus(boxRef, { initial: passwordRef });
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -53,6 +60,7 @@ export function SignInAgain({
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-4"
     >
       <form
+        ref={boxRef}
         onSubmit={submit}
         className="flex w-full max-w-md flex-col gap-4 rounded-lg border border-rule bg-surface p-5"
       >
@@ -66,11 +74,11 @@ export function SignInAgain({
         </p>
         <Field label="Нууц үг">
           <TextInput
+            ref={passwordRef}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
-            autoFocus
             required
           />
         </Field>
