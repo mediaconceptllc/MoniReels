@@ -38,7 +38,10 @@ def get_engine():
             pool_size=5,
             max_overflow=5,
             future=True,
-            connect_args={"options": session_options(settings)},
+            connect_args={
+                "options": session_options(settings),
+                "connect_timeout": settings.db_connect_timeout_s,
+            },
         )
     return _engine
 

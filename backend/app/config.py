@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     # refusing to start. It used to wait forever, which on a stuck lock is a
     # deployment that hangs with nothing in the log.
     migration_lock_wait_s: int = Field(default=600, ge=1)
+    # How long an API instance keeps trying to REACH the database at startup
+    # (app.migrate.wait_for_database) before it gives up and exits. It used
+    # to fail on the first refused connection, so a database restarting at
+    # the same moment as a deploy cost the platform's few restarts in
+    # seconds. Kept well under the API's healthcheck timeout (120 s on the
+    # dashboard) so a database that never answers ends in OUR error, with
+    # its reason, not in a healthcheck timeout with none.
+    db_startup_wait_s: int = Field(default=60, ge=0)
+    # One connection attempt's limit. Without it a host that drops packets
+    # held a connect for the kernel's TCP timeout (~2 min), past every bound
+    # above.
+    db_connect_timeout_s: int = Field(default=10, ge=1)
 
     # Comma-separated exact origins. "*" is refused at startup by main.py:
     # with credentials allowed, Starlette answers a wildcard by echoing back

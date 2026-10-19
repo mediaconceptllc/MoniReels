@@ -63,6 +63,104 @@ to …», минут тутам нэг мөр). DB кодоос шинэ (rollba
 шууд ажиллана — миграцууд зөвхөн нэмдэг тул хуучин код шинэ схем дээр
 ажиллана.
 
+API ч мөн адил (OPS-2):
+
+- **DB кодоос шинэ** (өмнөх хувилбар руу rollback хийсэн) бол API миграц
+  хийхгүй, анхааруулга бичээд асна: «The database is at …, newer than this
+  code's …: not migrating (a rollback?)». Өмнө нь `alembic upgrade head` нь
+  мэдэхгүй revision дээр «Can't locate revision» гэж унаж, API огт асдаггүй
+  байв — ажилладаг хувилбар хамгийн их хэрэгтэй яг тэр мөчид.
+- **DB түр хүрэхгүй** байвал API `DB_STARTUP_WAIT_S` (60) секунд дахин
+  оролдоно (1, 2, 4, 8, 10 … секундын зайтай, оролдлого бүрийг логт
+  нэрлэнэ). Хугацаа дуусвал шалтгаанаа нэрлээд **гарна** — ингэснээр
+  Railway-ийн restart ба «deploy унасан» дохио хоёулаа ажиллана. Өмнө нь
+  эхний татгалзсан холболт л процессыг унагаадаг байсан тул DB deploy-той
+  зэрэг дахин асахад restart-ын цөөн оролдлого хэдхэн секундэд дуусдаг
+  байв. Холболтын нэг оролдлого `DB_CONNECT_TIMEOUT_S` (10) секундээр
+  хязгаарлагдана — эс бөгөөс пакет хаядаг хост TCP-ийн ~2 минут барина.
+  `DB_STARTUP_WAIT_S`-ийг API-ийн healthcheck timeout-оос (120) бага байлга.
+
+### Миграцын дүрэм: expand / contract
+
+Rollback аюулгүй байх цорын ганц нөхцөл нь: **өмнөх хувилбарын код шинэ
+схем дээр ажиллах ёстой.** Тиймээс миграц зөвхөн НЭМНЭ:
+
+- шинэ хүснэгт, шинэ индекс — болно;
+- шинэ багана — `nullable=True`, эсвэл `server_default`-той `NOT NULL`
+  (хуучин код тэр баганыг мэдэхгүй тул INSERT-дээ бөглөхгүй);
+- багана/хүснэгт **устгах, нэр солих, төрөл солих, `NOT NULL` болгох,
+  түүхий `op.execute`** — ХОРИОТОЙ, хэрэв өмнөх хувилбар түүнийг ашигладаг
+  бол.
+
+Ийм өөрчлөлт хэрэгтэй бол хоёр release болгож хуваа: эхлээд **expand**
+(шинийг нэмж, код шинийг ашиглана, хуучин нь хэвээр), дараагийн release-д
+**contract** (код хуучныг ашиглахаа больсны дараа устгана). Contract
+миграцад модулийн түвшинд `CONTRACT = "<яагаад аюулгүй>"` тавина.
+`tests/test_rollback.py::test_every_migration_only_adds` бүх миграцын
+`upgrade()`-ийг уншиж энэ дүрмийг барина — жагсаалт биш, дүрэм.
+
+Одоогийн 0001–0004 бүгд зөвхөн нэмдэг (шинэ хүснэгт, nullable багана).
+
+### Кодыг буцаах (rollback)
+
+Railway → сервис → **Deployments** → өмнөх deploy-ийн «⋯» → **Rollback**.
+Rollback нь тухайн deploy-ийн image ба хувьсагчдыг сэргээнэ
+([Roll Back a Bad Deploy](https://docs.railway.com/guides/roll-back-bad-deploy),
+[Deployment Actions](https://docs.railway.com/deployments/deployment-actions#rollback)).
+**API ба worker хоёуланг** буцаа — нэг image тул нэг commit-д байх ёстой.
+
+- **Аюулгүй:** миграц нь дээрх дүрмийг дагасан бол. API ба worker хоёулаа
+  шинэ схем дээр асна (логт «newer than this code» анхааруулга).
+- **Аюулгүй БИШ:** contract миграц (устгалт) орсон release-ээс өмнөх
+  хувилбар руу буцах. Тэр үед схемийг буцаах нь `alembic downgrade`
+  (өгөгдөл устах эрсдэлтэй) эсвэл доорх нөөцөөс сэргээх — хоёулаа
+  гараар, эхлээд нөөц ав.
+- **Өгөгдөл:** шинэ кодын бичсэн мөрийг хуучин код таних ёстой. Жишээ нь
+  #64-өөс хойш ажлын `lane` нь `stt`/`llm` — worker ажлыг kind-аар нь
+  авдаг тул хуучин нэр ч, шинэ нэр ч асуудалгүй.
+
+### Нөөц ба сэргээлт
+
+Railway-ийн Postgres нь volume дээр ажилладаг. Нөөцийн гурван давхарга бий
+([Back Up and Restore Postgres](https://docs.railway.com/guides/postgres-backups-restores),
+[Backups](https://docs.railway.com/volumes/backups),
+[Point-in-Time Recovery](https://docs.railway.com/volumes/point-in-time-recovery)):
+
+1. **Хуваарьт volume backup** — Postgres сервис → **Backups** таб →
+   schedule. Daily (6 хоног хадгална), Weekly (27 хоног), Monthly (89
+   хоног); хэд хэдийг зэрэг сонгож болно. **Daily + Weekly**-г асаа. Гараар
+   ч backup авч болно (volume-ийн хэмжээний 50% хүртэл). Volume-ийг wipe
+   хийвэл бүх backup устана.
+2. **Point-in-time recovery (PITR)** — WAL-ийг bucket руу архивлаж, ойролцоогоор
+   4 долоо хоногийн дотор дурын цэг рүү сэргээнэ (Railway-ийн storage bucket
+   ашиглана). Хэрэгтэй бол асаа.
+3. **`pg_dump`** — Railway-ээс гадна хадгалах логик хуулбар (доорх
+   туршилтад хэрэглэнэ).
+
+**Бодит сэргээлт (volume backup-аас):** Backups таб → огноогоор нь олж
+**Restore**. Railway өөрчлөлтийг шууд хэрэглэхгүй, **staged change**
+болгоно: backup-ийн огноогоор нэрлэсэн шинэ volume ижил зам дээр холбогдож,
+хуучин volume салгагдана, гэхдээ **устахгүй** (буцах зам үлдэнэ). Шалгаад
+**Deploy** дарвал сервис сэргээсэн өгөгдөл дээр дахин асна. Сэргээлт зөвхөн
+ижил project + environment-д. Сэргээсний дараа DB кодоос хуучин байж болно
+— API асахдаа өөрөө миграц хийнэ («behind»).
+
+**Сэргээлтийн туршилт — ХЭРЭГЛЭГЧИЙН АЛХАМ, ХАРААХАН ХИЙГДЭЭГҮЙ.** Хэзээ ч
+сэргээж үзээгүй нөөц бол баталгаагүй нөөц. Production-ийн volume-ийг
+дарахгүйн тулд туршилтыг **тусдаа** Postgres дээр хий:
+
+1. Production Postgres-ийн public URL-ээр `pg_dump -Fc -f monireels.dump "$URL"`.
+2. Түр Postgres үүсгэ (тусдаа project эсвэл environment, эсвэл локал).
+3. `pg_restore --no-owner -d "$TEMP_URL" monireels.dump`.
+4. Шалга: `SELECT version_num FROM alembic_version;` нь production-тай
+   ижил, `users`, `projects`, `jobs`, `usage_events`-ийн мөрийн тоо
+   ойролцоо.
+5. Түр DB-г устга, хийсэн огноо ба зарцуулсан хугацааг энд бич:
+
+| Огноо | Хэн | Нөөц | Сэргээх хугацаа | Үр дүн |
+|---|---|---|---|---|
+| — | — | — | — | хийгдээгүй |
+
 ---
 
 ## 3. Railway — API сервис
@@ -74,7 +172,11 @@ to …», минут тутам нэг мөр). DB кодоос шинэ (rollba
 - **Builder:** Dockerfile
 - **Start command:** `python -m app.main`
 - **Healthcheck path:** `/health`, timeout `120`
-- **Restart policy:** On failure, 3 удаа
+- **Restart policy:** **Always** (paid plan; Free/trial дээр On failure, 10).
+  Одоо dashboard дээр «On failure, 3» байгаа бол соль: DB 3 минутаас удаан
+  унтарвал API гурван оролдлогоо (тус бүр `DB_STARTUP_WAIT_S`) дуусгаад
+  бүрмөсөн зогсох байлаа
+  ([Restart Policy](https://docs.railway.com/deployments/restart-policy)).
 - **Draining seconds:** `30` — ажиллаж буй хүсэлт дуусах зай
 
 Хувьсагчид:
@@ -323,6 +425,8 @@ worker цэвэрлэнэ.
 (`DB_*_TIMEOUT_MS`, `0` = хязгааргүй). Миграц өөрийн холболтоор явах тул
 хамаарахгүй. Өөр instance миграцын түгжээг `MIGRATION_LOCK_WAIT_S` (600)-аас
 удаан барьвал API шалтгаанаа нэрлээд асахаас татгалзана — өмнө нь мөнхөд хүлээдэг байв.
+DB-д огт хүрэхгүй бол `DB_STARTUP_WAIT_S` (60) секундын дараа шалтгаанаа нэрлээд гарна
+(дээрх «2. Railway — Postgres»).
 
 ### Хэрэглэгч тутмын хязгаар (энэ системийн дотор)
 
