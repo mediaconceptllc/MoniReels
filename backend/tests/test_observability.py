@@ -4,12 +4,16 @@ every database connection starts with (OPS-3)."""
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import io
 import json
 import logging
+import os
+import subprocess
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -507,3 +511,37 @@ def test_a_missing_sdk_does_not_stop_the_service(monkeypatch):
         from app.config import get_settings
 
         get_settings.cache_clear()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("sentry_sdk") is None, reason="sentry-sdk is not installed")
+def test_error_reports_start_with_the_real_sdk_and_this_starlette():
+    """The fakes above prove what is asked for, not that the real SDK takes
+    it. Its integrations patch Starlette's internals, and sentry-sdk 2.19.2
+    did not start at all under Starlette 1.x: it imported
+    `starlette.templating`, which since 1.0 raises without jinja2 whenever
+    markupsafe is installed — and alembic's Mako installs it (audit DEP-1).
+    `init_error_reports` swallowed that, as it should, so the API ran on
+    without a single report and nothing said so but one log line.
+
+    In a child process: the SDK's patches are global and would outlive this
+    test. The DSN points at a closed local port; nothing is sent."""
+    script = (
+        "import json, sentry_sdk\n"
+        "from app.observability import init_error_reports\n"
+        "started = init_error_reports('api')\n"
+        "names = sorted(sentry_sdk.get_client().integrations) if started else []\n"
+        "print(json.dumps({'started': started, 'integrations': names}))\n"
+    )
+    env = {**os.environ, "SENTRY_DSN": "http://public@127.0.0.1:9/1"}
+    done = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    reply = json.loads(done.stdout.strip().splitlines()[-1])
+    assert reply["started"] is True, done.stderr
+    assert {"fastapi", "starlette"} <= set(reply["integrations"]), reply

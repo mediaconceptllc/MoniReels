@@ -13,10 +13,11 @@
     "check-sse": "tsx scripts/check-sse.ts",
     "check-auth": "tsx scripts/check-auth.ts",
     "check-copy": "tsx scripts/check-copy.ts",
-    "check-upload": "tsx scripts/check-upload.ts"
+    "check-upload": "tsx scripts/check-upload.ts",
+    "check-audit": "node scripts/check-audit.mjs"
   },
   "dependencies": {
-    "next": "^15.1.0",
+    "next": "^15.5.27",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -27,7 +28,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.17.0",
-    "eslint-config-next": "^15.1.0",
+    "eslint-config-next": "^15.5.27",
     "postcss": "^8.5.23",
     "tailwindcss": "^4.0.0",
     "tsx": "^4.23.13",
