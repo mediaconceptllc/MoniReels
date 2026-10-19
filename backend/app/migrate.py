@@ -26,6 +26,8 @@ migrated it.
 """
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from pathlib import Path
 
@@ -169,6 +171,38 @@ def upgrade_to_head() -> str:
             conn.commit()
 
 
+class _QuietRead(logging.Filter):
+    """Drops alembic's two INFO lines ("Context impl PostgresqlImpl.", "Will
+    assume transactional DDL.") while THIS thread only reads the revision.
+
+    MigrationContext writes them every time it is built. The worker builds
+    one every SCHEMA_POLL_SEC while it waits for the API's migration, so a
+    deploy put a pair of lines in its log every three seconds, burying the
+    one line that said what it was waiting for. Thread-local, and only
+    around the read: a real migration (`command.upgrade`, in this process or
+    any other thread) keeps every line.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reading = threading.local()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno > logging.INFO or not getattr(self.reading, "on", False)
+
+
+_QUIET = _QuietRead()
+logging.getLogger("alembic.runtime.migration").addFilter(_QUIET)
+
+
+def _current_heads(conn) -> set[str]:
+    _QUIET.reading.on = True
+    try:
+        return set(MigrationContext.configure(conn).get_current_heads())
+    finally:
+        _QUIET.reading.on = False
+
+
 def schema_state() -> tuple[str, set[str], set[str]]:
     """Where the database is against this code's migrations.
 
@@ -187,7 +221,7 @@ def schema_state() -> tuple[str, set[str], set[str]]:
     script = ScriptDirectory.from_config(_alembic_config())
     heads = set(script.get_heads())
     with get_engine().connect() as conn:
-        current = set(MigrationContext.configure(conn).get_current_heads())
+        current = _current_heads(conn)
     if current == heads:
         return "ready", current, heads
     for revision in current:

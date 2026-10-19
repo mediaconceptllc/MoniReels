@@ -1788,7 +1788,7 @@ def test_the_job_history_is_deeper_than_one_afternoon(client, db):
     """Ten rows is three exports and a retry. The question this answers —
     what ran, how long it took, what it cost — needs more than that, and the
     page is told the limit so a short list does not read as a quiet project."""
-    from app.api.routes_projects import JOB_HISTORY_LIMIT
+    from app.api.projects.documents import JOB_HISTORY_LIMIT
     from app.dbmodels import Job
 
     user = _user(db, "historyreader")

@@ -255,7 +255,7 @@ def test_an_editor_sees_their_own_queue_and_no_machine(client, db):
     carol = _user(db, "carol")
     assert carol
     quiet = client.get("/jobs/queue", headers=_auth(client, "carol")).json()
-    assert quiet == {"scope": "own", "counts": {}, "waiting": 0, "stalled": False}
+    assert quiet == {"scope": "own", "counts": {}, "waiting": 0, "stalled": False, "unserved_lanes": []}
 
 
 @requires_db

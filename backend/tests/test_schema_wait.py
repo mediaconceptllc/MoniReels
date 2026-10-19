@@ -145,3 +145,28 @@ def test_schema_state_against_a_real_database():
     finally:
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+
+@requires_db
+def test_reading_the_revision_is_quiet_and_a_real_migration_is_not(caplog):
+    """A worker waiting out a deploy built a MigrationContext every poll, and
+    each one logged "Context impl PostgresqlImpl." and "Will assume
+    transactional DDL." — two lines every three seconds over the one that
+    said what it was waiting for. A real migration keeps them."""
+    from alembic.runtime.migration import MigrationContext
+
+    from app import migrate
+    from app.db import get_engine
+
+    def alembic_lines() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "alembic.runtime.migration"]
+
+    with caplog.at_level(logging.INFO, logger="alembic.runtime.migration"):
+        for _ in range(3):
+            migrate.schema_state()
+        assert alembic_lines() == []
+
+        # What `command.upgrade` builds, in the same thread, after the reads.
+        with get_engine().connect() as conn:
+            MigrationContext.configure(conn)
+        assert any(line.startswith("Context impl") for line in alembic_lines())

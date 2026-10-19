@@ -19,7 +19,7 @@ from app.migrate import _alembic_config
 from app.utils.logging import setup_logging
 from tests.conftest import requires_db
 
-LOGGERS = ("app.main", "app.api.routes_projects", "app.jobs.queue", "uvicorn.error", "uvicorn.access")
+LOGGERS = ("app.main", "app.api.projects.documents", "app.jobs.queue", "uvicorn.error", "uvicorn.access")
 
 
 @pytest.fixture

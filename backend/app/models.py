@@ -1,4 +1,7 @@
-"""Single source of truth for cross-cutting domain models (mirrored by hand in Flutter).
+"""Single source of truth for cross-cutting domain models.
+
+Mirrored by hand in frontend/src/lib/types.ts, and checked against the real
+JSON by `npm run verify-shape` (backend/tests/test_frontend_shape.py).
 
 Timestamps are always float seconds — never a formatted string (see app.utils.timecode
 for the only place conversion to HH:MM:SS.mmm / SRT / ASS is allowed to happen).

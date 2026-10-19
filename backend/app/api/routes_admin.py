@@ -285,30 +285,14 @@ async def tts_voices(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     from app.tts import elevenlabs
 
     settings = provider_settings.effective(db)
-    out: dict = {
+    found = await elevenlabs.read_voices(settings, languages_of=settings.elevenlabs_tts_model)
+    return {
         "model": settings.elevenlabs_tts_model,
         "voice_id": settings.elevenlabs_tts_voice_id or None,
-        "voices": [],
-        "mongolian": None,
-        "error": None,
+        "voices": found["voices"],
+        "mongolian": found["mongolian"],
+        "error": found["error"],
     }
-    if not settings.elevenlabs_api_key:
-        out["error"] = "ElevenLabs-ийн API түлхүүр тавигдаагүй байна."
-        return out
-
-    client = elevenlabs.build_client(settings)
-    try:
-        out["voices"] = await client.voices()
-        try:
-            languages = await client.model_languages(settings.elevenlabs_tts_model)
-            out["mongolian"] = elevenlabs.is_mongolian(languages)
-        except Exception as e:  # noqa: BLE001 - the voices are still worth showing
-            logger.warning("Could not read ElevenLabs' model list: %s", e)
-    except Exception as e:  # noqa: BLE001 - reachability is part of the answer
-        out["error"] = str(e) or type(e).__name__
-    finally:
-        await client.aclose()
-    return out
 
 
 @router.get("/settings")
@@ -575,6 +559,7 @@ def job_stats(
       attempt count: for the rest, the gap also holds an earlier failed run
       and the stale-heartbeat timeout, which is not time spent in a queue.
     """
+    from app import worker_report
     from app.config import get_settings
     from app.jobs import queue
     from app.jobs.kinds import KINDS
@@ -624,6 +609,26 @@ def job_stats(
             "live_workers": overview["live_workers"],
             "stalled": overview["stalled"],
             "oldest_waiting_sec": round(max(0.0, now - oldest), 1) if oldest is not None else None,
+            "lanes": overview["lanes"],
+            "unserved_lanes": overview["unserved_lanes"],
+            # Each worker by name, for the admin only: which box serves what,
+            # which commit it runs and when it last spoke. A dead one stays
+            # listed until it is purged, so "which worker stopped" has an
+            # answer here and not only in the platform's logs.
+            "workers": [
+                {
+                    "id": b.id,
+                    "lanes": b.lanes,
+                    "started_at": b.started_at,
+                    "seen_at": b.seen_at,
+                    "live": b.live(now),
+                    "separation": b.separation,
+                    "model": b.model,
+                    "commit": b.commit,
+                    "disk": b.disk,
+                }
+                for b in worker_report.heartbeats(db)
+            ],
         },
     }
 

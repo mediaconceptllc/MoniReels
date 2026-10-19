@@ -13,7 +13,8 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { explainJobError } from "../src/lib/job-errors";
+import { explainJob, explainJobError } from "../src/lib/job-errors";
+import type { JobErrorCode } from "../src/lib/types";
 import { relativeTime } from "../src/lib/format";
 import { describeValidation } from "../src/lib/messages";
 
@@ -75,6 +76,34 @@ for (const [error, retry] of WORKER_ERRORS) {
 }
 if (!explainJobError("something nobody has seen").retry) problems.push("unknown errors should allow a retry");
 
+// The disk messages, as app/utils/paths and app/worker write them today: in
+// Mongolian, shown as they are, and whether a retry can help decided by the
+// job's `error_code` — never by matching these words, which may be reworded.
+const CODED: [string, string, boolean][] = [
+  [
+    "Энэ ажилд 30.5 GB түр зай хэрэгтэй, ажил гүйцэтгэх серверийн диск нийтдээ 20.0 GB. " +
+      "Видеог хэсэглэж хуулах эсвэл админаар серверийн дискийг томруулна уу.",
+    "disk_never_fits",
+    false,
+  ],
+  [
+    "Серверийн түр зай хүрэлцэхгүй байна: 1.8 GB сул, 4.2 GB хэрэгтэй. " +
+      "3 удаа хүлээсэн ч зай гарсангүй — админд хандана уу.",
+    "disk_full",
+    true,
+  ],
+];
+for (const [error, code, retry] of CODED) {
+  const explained = explainJob({ error, result: { error_code: code as JobErrorCode } });
+  if (explained.message !== error) problems.push(`Mongolian disk message changed on the way: ${explained.message}`);
+  if (LATIN.test(explained.message)) problems.push(`disk message has Latin text: ${explained.message}`);
+  if (explained.retry !== retry) problems.push(`${code}: retry=${explained.retry}, want ${retry}`);
+}
+// The code decides even against a rule that would say otherwise.
+if (explainJobError("OutOfSpace: Not enough scratch space: 1 GB free, need 90 GB", "disk_never_fits").retry) {
+  problems.push("disk_never_fits must never offer a retry, whatever the words say");
+}
+
 // Relative times, across every unit, in both directions.
 const now = Date.UTC(2026, 9, 18, 12, 0, 0);
 for (const minutes of [0, 1, 5, 59, 60, 61, 300, 1439, 1440, 2880, 10080, 43200, 100000]) {
@@ -101,6 +130,11 @@ function sources(dir: string): string[] {
 for (const path of sources(join(__dirname, "..", "src"))) {
   // Comments are dropped first: format.ts says, in one, what it replaced.
   const code = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+  // A page that explains a job from its text alone never sees the job's
+  // error_code, and offers a retry for a disk too small for the video.
+  if (!path.endsWith(join("lib", "job-errors.ts")) && /explainJobError\(/.test(code)) {
+    problems.push(`${path}: explain a job with explainJob(job) — it reads the job's error_code`);
+  }
   if (
     /Intl\.(RelativeTimeFormat|DateTimeFormat|NumberFormat|ListFormat|PluralRules)\(\s*["']mn/.test(code) ||
     /\.toLocale(?:Date|Time)?String\(\s*["']mn/.test(code)

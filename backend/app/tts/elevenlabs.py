@@ -278,3 +278,34 @@ def build_client(settings) -> ElevenLabsTts:
             base_url=settings.elevenlabs_base_url,
         )
     )
+
+
+async def read_voices(settings, *, languages_of: str | None = None) -> dict:
+    """The account's voices — and, given a model id, whether that model lists
+    Mongolian. For the two voice pickers (the admin's, and the speaker's on
+    the project page), which differ only in what they put around this.
+
+    Free — nothing is synthesised — and never raises: no key, or a provider
+    that cannot be reached, is the answer (`error`), not a 500.
+
+    `mongolian` is ASKED, not assumed. It is True or False when ElevenLabs'
+    model list says so, and None when that list could not be read, does not
+    mention the model, or was not asked about: unknown is not the same as no.
+    """
+    out: dict = {"voices": [], "mongolian": None, "error": None}
+    if not settings.elevenlabs_api_key:
+        out["error"] = "ElevenLabs-ийн API түлхүүр тавигдаагүй байна."
+        return out
+    client = build_client(settings)
+    try:
+        out["voices"] = await client.voices()
+        if languages_of is not None:
+            try:
+                out["mongolian"] = is_mongolian(await client.model_languages(languages_of))
+            except Exception as e:  # noqa: BLE001 - the voices are still worth showing
+                logger.warning("Could not read ElevenLabs' model list: %s", e)
+    except Exception as e:  # noqa: BLE001 - reachability is part of the answer
+        out["error"] = str(e) or type(e).__name__
+    finally:
+        await client.aclose()
+    return out

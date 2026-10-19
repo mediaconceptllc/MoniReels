@@ -27,9 +27,17 @@ class OutOfSpace(RuntimeError):
     """Not enough room on the work disk now; there may be later, when
     another job's scratch is cleared."""
 
+    #: The failed job's `result.error_code`: a stable name the page reads to
+    #: decide whether to offer a retry. The message is Mongolian, written
+    #: for a person, and may be reworded at any time — matching on it is how
+    #: a page ends up offering «Дахин оролдох» for a failure no retry fixes.
+    code = "disk_full"
+
 
 class NeverFits(OutOfSpace):
     """More than the work disk holds in all: waiting cannot help."""
+
+    code = "disk_never_fits"
 
 
 def _gb(n: int) -> str:
@@ -159,8 +167,8 @@ def ensure_free(need_bytes: int = 0) -> None:
     want = floor + need_bytes
     if want > usage.total:
         raise NeverFits(
-            f"Энэ ажилд {_gb(want)} түр зай хэрэгтэй, worker-ийн диск нийтдээ {_gb(usage.total)}. "
-            "Видеог хэсэглэж хуулах эсвэл админаар worker-ийн дискийг томруулна уу."
+            f"Энэ ажилд {_gb(want)} түр зай хэрэгтэй, ажил гүйцэтгэх серверийн диск нийтдээ "
+            f"{_gb(usage.total)}. Видеог хэсэглэж хуулах эсвэл админаар серверийн дискийг томруулна уу."
         )
     if usage.free < want:
         raise OutOfSpace(

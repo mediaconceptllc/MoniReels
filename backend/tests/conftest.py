@@ -17,7 +17,8 @@ import os
 import tempfile
 
 os.environ.setdefault("WORK_DIR", tempfile.mkdtemp(prefix="monireels_test_"))
-os.environ.setdefault("JWT_SECRET", "test-secret-not-a-real-key")
+# 32+ bytes: PyJWT warns on every call with a shorter HS256 key (RFC 7518 3.2).
+os.environ.setdefault("JWT_SECRET", "test-secret-not-a-real-key-32-bytes-long")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
 # Off unless a test opts in: the R2 client would otherwise try to sign real
@@ -152,3 +153,61 @@ def _no_model_catalog_calls():
         yield
     finally:
         openrouter_client.check_model = original
+
+
+# ---------------------------------------------------------------------------
+# Failures as GitHub annotations
+# ---------------------------------------------------------------------------
+
+
+def _workflow_escape(value: str, *, prop: bool = False) -> str:
+    """GitHub's workflow-command escaping: a raw newline would end the
+    command, and in a property `:` and `,` would end the property."""
+    value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if prop:
+        value = value.replace(":", "%3A").replace(",", "%2C")
+    return value
+
+
+def github_annotations(reports, rootpath, workspace) -> list[str]:
+    """One `::error` line per failed test: where it failed and its first line.
+
+    A job's log is a separate download with its own permission; a check run's
+    annotations come with the check itself. A failure named here can be read
+    by anything that can read the checks, even where the log cannot be had.
+
+    The place is where the exception was raised when that file is in the
+    workspace (usually the assert in the test), else the test itself.
+    """
+    inside = os.path.realpath(workspace) + os.sep
+    lines = []
+    for report in reports:
+        crash = getattr(getattr(report, "longrepr", None), "reprcrash", None)
+        if crash is not None:
+            first = (crash.message.strip().splitlines() or ["failed"])[0]
+        else:
+            # A collection error is plain text whose LAST line is the error.
+            text = [ln.lstrip("E").strip() for ln in str(report.longrepr).splitlines() if ln.strip()]
+            first = text[-1] if text else "failed"
+        # A collection error has no test location, only its file.
+        path, lineno, _ = getattr(report, "location", None) or (report.nodeid.split("::")[0], None, "")
+        where, line = os.path.join(rootpath, path), (lineno or 0) + 1
+        if crash is not None and os.path.realpath(crash.path).startswith(inside):
+            where, line = crash.path, crash.lineno
+        when = getattr(report, "when", "collect")
+        name = report.nodeid if when == "call" else f"{report.nodeid} ({when})"
+        file = os.path.relpath(os.path.realpath(where), os.path.realpath(workspace))
+        lines.append(
+            f"::error file={_workflow_escape(file, prop=True)},line={line}"
+            f"::{_workflow_escape(f'{name}: {first}')}"
+        )
+    return lines
+
+
+def pytest_terminal_summary(terminalreporter):
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    failed = terminalreporter.stats.get("failed", []) + terminalreporter.stats.get("error", [])
+    workspace = os.environ.get("GITHUB_WORKSPACE") or str(terminalreporter.config.rootpath)
+    for line in github_annotations(failed, str(terminalreporter.config.rootpath), workspace):
+        terminalreporter.write_line(line)

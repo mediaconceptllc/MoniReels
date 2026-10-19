@@ -40,18 +40,17 @@ class SeparationError(Exception):
 
 
 def _get_model_silently(model_name: str):
-    """This app runs as a headless subprocess spawned by the Flutter
-    desktop shell (see frontend/lib/application/backend_launcher.dart)
-    with no attached console - stdout/stderr aren't normal writable
-    streams there. `demucs.pretrained.get_model` (via `torch.hub.
-    load_state_dict_from_url`, used to download htdemucs' weights on first
-    use) both prints a "Downloading..." line straight to `sys.stderr` *and*
-    drives a tqdm progress bar - either crashes with `OSError: [Errno 22]
-    Invalid argument` the instant it writes. Neither is configurable from
-    demucs' own call site, so stdout/stderr are redirected to in-memory
-    buffers for the duration of the call instead - the only way to
-    guarantee nothing anywhere in this call tries to touch the real,
-    broken streams.
+    """`demucs.pretrained.get_model` (via `torch.hub.
+    load_state_dict_from_url`, when the weights are not cached yet) prints a
+    "Downloading..." line straight to `sys.stderr` *and* drives a tqdm
+    progress bar. Neither is configurable from demucs' own call site, so
+    stdout/stderr are redirected to in-memory buffers for the duration of
+    the call.
+
+    Written for the desktop build, which ran with no console attached and
+    crashed with `OSError: [Errno 22]` on the first such write. In the worker
+    container the streams work; the redirect stays because those raw lines
+    would otherwise land in a log where every line is one JSON object.
     """
     from demucs.pretrained import get_model
 

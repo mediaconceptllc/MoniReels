@@ -5,7 +5,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, relativeTime } from "@/lib/format";
-import { JOB_LABELS } from "@/lib/jobs";
+import { JOB_LABELS, laneNames } from "@/lib/jobs";
 import { usePageTitle } from "@/lib/title";
 import type { LatestJob, ProjectSummary, QueueStatus } from "@/lib/types";
 import { Alert, Badge, Card, Empty, Loading, Skeleton, TAP } from "@/components/ui";
@@ -110,6 +110,23 @@ export default function ProjectsPage() {
               Таны {queue.waiting} ажил дараалалд хүлээж байгаа ч ажил гүйцэтгэх сервис одоогоор
               ажиллахгүй байна. Ажлууд хадгалагдсан — сервис сэргэмэгц өөрөө эхэлнэ. Удаан
               үргэлжилбэл админд хэлнэ үү.
+            </Alert>
+          ))}
+        {/* One pool down beside a healthy one: not "stalled", and those jobs
+            still wait for nobody. */}
+        {queue &&
+          !queue.stalled &&
+          queue.unserved_lanes.length > 0 &&
+          (queue.scope === "all" ? (
+            <Alert tone="warn">
+              {laneNames(queue.unserved_lanes)} ажил хүлээж байгаа ч түүнийг гүйцэтгэх сервис
+              ажиллахгүй байна. Админ Railway дээрх worker сервисүүдийг шалгана уу.
+            </Alert>
+          ) : (
+            <Alert tone="warn">
+              Таны {laneNames(queue.unserved_lanes)} ажил хүлээж байгаа ч түүнийг гүйцэтгэх сервис
+              одоогоор ажиллахгүй байна. Ажлууд хадгалагдсан — сервис сэргэмэгц өөрөө эхэлнэ.
+              Удаан үргэлжилбэл админд хэлнэ үү.
             </Alert>
           ))}
 

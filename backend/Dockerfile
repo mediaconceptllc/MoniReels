@@ -1,6 +1,7 @@
-# One image, two entrypoints: the API (default) and the worker
-# (`python -m app.worker`). Deploying the same image twice on Railway keeps
-# the two services on identical code without a second build.
+# One Dockerfile, two entrypoints: the API (default) and the worker
+# (`python -m app.worker`). Both services build it from the same commit, so
+# they run identical code; the worker's image differs only when it sets
+# INSTALL_DUB=1 (below), which adds the clean-dub stack and nothing else.
 #
 # By tag, not by digest: this environment cannot reach Docker Hub to resolve
 # one, and a digest pinned by hand without the tooling to move it is a base
@@ -51,7 +52,16 @@ ARG INSTALL_DUB=0
 ARG DEMUCS_MODEL=htdemucs
 
 COPY requirements.txt requirements-dub.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+# The base image's own pip (24.0) and setuptools (79.0.1) carry advisories,
+# and CI's pip-audit reads every package in the image, those included.
+# Pinned like the rest, and first: this pip installs everything below.
+# setuptools 82 removed pkg_resources; nothing here imports it, and the
+# worker image's Demucs smoke in CI (dora, openunmix and all) would fail if
+# something did. In the worker, torch 2.11 asks for setuptools<82 and pip
+# takes it back to 81 — the worker's audit step in CI names why that is let
+# through.
+RUN pip install --no-cache-dir pip==26.2.1 setuptools==84.0.0 \
+    && pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_DUB" = "1" ]; then pip install --no-cache-dir -r requirements-dub.txt; fi
 
 # The weights are baked in, not fetched on the first dub: a download in the
