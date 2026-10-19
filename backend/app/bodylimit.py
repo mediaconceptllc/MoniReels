@@ -63,7 +63,7 @@ class BodyLimit:
                     # Raised inside the route's read, where the app's own
                     # exception handling turns it into a 413 like any other.
                     raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=TOO_LARGE
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=TOO_LARGE
                     )
             return message
 
@@ -75,7 +75,7 @@ async def _refuse(send) -> None:
     await send(
         {
             "type": "http.response.start",
-            "status": status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "status": status.HTTP_413_CONTENT_TOO_LARGE,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),

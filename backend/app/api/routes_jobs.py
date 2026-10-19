@@ -28,8 +28,8 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 POLL_SEC = 1.0
 # A stream is closed after this long even if the job never settles, so a
-# forgotten browser tab cannot hold a connection (and a database session)
-# open indefinitely. The client reconnects if it still cares.
+# forgotten browser tab cannot hold a connection open indefinitely. The
+# client reconnects if it still cares.
 MAX_STREAM_SEC = 3600.0
 TERMINAL = ("done", "failed", "canceled")
 
@@ -193,6 +193,13 @@ async def job_events(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> EventSourceResponse:
     _owned_job(db, job_id, principal)
+    # Give the connection back before the stream starts. FastAPI 0.118+ runs
+    # a yield dependency's exit code after the response is SENT — here, when
+    # the stream ends, up to MAX_STREAM_SEC later — so the request's session
+    # (`current_user` shares it) would otherwise pin one pooled connection per
+    # open job panel for an hour, and ten panels would empty the pool for
+    # every other request. The stream reads through its own short sessions.
+    db.close()
 
     async def generator():
         last: str | None = None

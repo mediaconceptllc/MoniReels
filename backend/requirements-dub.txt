@@ -12,8 +12,14 @@
 # dub_bed.separate_sync sets it again (app.config.heavy_threads).
 # ---------------------------------------------------------------------------
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.1+cpu
-torchaudio==2.5.1+cpu
+# torchaudio's last release is 2.11.0 and it requires the torch of the same
+# number; Demucs needs torchaudio importable (openunmix imports it), so torch
+# stays on 2.11 until Demucs or torchaudio moves. Demucs fetches its weights
+# through torch.hub, which still passes weights_only=False explicitly — the
+# 2.6 default does not apply, and the weights are baked in at build time from
+# Demucs's own URL with its hash checked.
+torch==2.11.0+cpu
+torchaudio==2.11.0+cpu
 demucs==4.0.1
 # Demucs hands its sources back as tensors; the bed leaves as numpy bytes.
 numpy==1.26.4
