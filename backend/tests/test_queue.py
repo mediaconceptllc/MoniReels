@@ -300,6 +300,12 @@ def _taken_over(db, project) -> tuple[str, int, int]:
     job.heartbeat_at = time.time() - 10_000
     db.commit()
     assert queue.reap_stale().requeued == 1
+    # The reaped job waits out its backoff before anyone may claim it.
+    db.expire_all()
+    job = db.get(Job, job_id)
+    assert job.available_at is not None and job.available_at > time.time()
+    job.available_at = time.time() - 1
+    db.commit()
     second = queue.claim("worker-2").attempts
     assert second != first
     return job_id, first, second

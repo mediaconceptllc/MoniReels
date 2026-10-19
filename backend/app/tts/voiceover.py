@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.export.presets import AUDIO_SAMPLE_RATE
+from app.jobs.cancel import JobCancelled
 from app.models import Segment
 from app.tts.elevenlabs import ElevenLabsTts
 from app.utils.logging import get_logger
@@ -260,7 +261,15 @@ async def prepare(
             await asyncio.to_thread(r2.download_file, key, local)
             report.cached += 1
         else:
-            audio = await client.synthesize(text, voice)
+            try:
+                audio = await client.synthesize(text, voice)
+            except JobCancelled as e:
+                # The clips before this one are in storage already; the next
+                # export reads them instead of buying them again.
+                raise JobCancelled({
+                    "voice_clips_done": report.synthesized + report.cached,
+                    "voice_clips_total": len(by_clip),
+                }) from e
             local.write_bytes(audio)
             await asyncio.to_thread(r2.upload_file, local, key, "audio/mpeg")
             report.synthesized += 1

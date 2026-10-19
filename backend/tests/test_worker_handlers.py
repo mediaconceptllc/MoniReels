@@ -1957,3 +1957,95 @@ def test_a_report_nobody_can_read_is_unknown(db, value):
     db.add(worker_report.Setting(key=worker_report.KEY, value=value, updated_at=0.0))
     db.commit()
     assert worker_report.read(db) is None
+
+
+# ==========================================================================
+# A cancel keeps what was already paid for (REL-7)
+# ==========================================================================
+
+
+def test_a_finished_transcription_forgets_the_chunks_it_kept(world, project, db, monkeypatch):
+    """Chunks an unfinished run paid for are read back by the next one; once a
+    transcript holds their text they go, so a deliberate re-run hears the
+    audio afresh instead of being handed the old answers."""
+    from app import worker
+    from app.dbmodels import SttChunk
+    from app.stt.chunk_cache import ChunkCache
+
+    _with_video(db, project.id)
+    world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
+    ChunkCache(project.id, "duudlaga||mn").put("a" * 64, "kept")
+
+    class ChunkedClient:
+        variant = "duudlaga||mn"
+        chunk_cache = None
+
+        async def aclose(self) -> None:
+            pass
+
+    async def reads_back(client, audio_path, workdir, settings, ffmpeg, on_progress=None):
+        assert await asyncio.to_thread(client.chunk_cache.get, "a" * 64) == "kept"
+        return world.transcript
+
+    monkeypatch.setattr(worker, "build_stt_client", lambda s: ChunkedClient())
+    monkeypatch.setattr(worker, "transcribe_audio", reads_back)
+
+    result = asyncio.run(worker.handle_transcribe(_handle(db, project.id, "transcribe")))
+
+    assert result["chunks_reused"] == 1
+    db.expire_all()
+    assert db.query(SttChunk).filter_by(project_id=project.id).count() == 0
+    assert load(db, project.id).transcript is not None
+
+
+def test_a_canceled_translation_keeps_the_lines_it_already_bought(world, project, db, monkeypatch):
+    """The fold onto the transcript used to sit behind the cancel check, so a
+    translation canceled after nine of ten chunks threw nine paid chunks
+    away — and the re-run bought them again."""
+    from app import worker
+    from app.ai.translate import Report
+    from app.jobs.queue import JobCancelled
+
+    _with_video(db, project.id)
+    _spoken_in_english(db, project.id)
+
+    async def stopped_half_way(client, transcript, *, force, only, on_progress):
+        segments = [
+            s.model_copy(update={"translation": "Сайн уу."}) if s.id == "a" else s
+            for s in transcript.segments
+        ]
+        return (
+            transcript.model_copy(update={"segments": segments}),
+            Report(lines=3, asked=3, translated=1, over_budget=0, failed_chunks=0, stopped=True),
+        )
+
+    monkeypatch.setattr(worker, "translate_transcript", stopped_half_way)
+
+    with pytest.raises(JobCancelled) as stopped:
+        asyncio.run(worker.handle_translate(_handle(db, project.id, "translate")))
+
+    assert stopped.value.detail == {"lines_applied": 1, "lines_asked": 3}
+    db.expire_all()
+    lines = {s.id: s.translation for s in load(db, project.id).transcript.segments}
+    assert lines == {"a": "Сайн уу.", "b": None, "far": None}
+
+
+def test_a_cancel_during_the_card_translation_is_not_swallowed(world, project, db, monkeypatch):
+    """The card translation keeps the ideas whatever it does — except stop:
+    a cancel there is the job's, and the ideas the producer kept by canceling
+    must not be replaced."""
+    from app import worker
+    from app.jobs.queue import JobCancelled
+
+    _with_video(db, project.id)
+    _transcribed(db, project.id, world.transcript)
+
+    async def canceled(client, suggestions):
+        raise JobCancelled()
+
+    monkeypatch.setattr(worker, "localize_suggestions", canceled)
+    with pytest.raises(JobCancelled):
+        asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
+
+    db.expire_all()
+    assert load(db, project.id).suggestions is None

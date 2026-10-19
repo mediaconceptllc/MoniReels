@@ -482,6 +482,12 @@ def list_jobs(
             "claimed_by": job.claimed_by,
             "requeued_at": _number(payload.get("requeued_at")),
             "retryable": job.state in RETRYABLE,
+            # Every attempt that ended, oldest first (app.jobs.queue): `error`
+            # above is only the latest, and an earlier failure is often the
+            # one that explains it.
+            "started_at": job.started_at,
+            "available_at": job.available_at,
+            "history": job.history or [],
         })
     return {"jobs": jobs, "total": total, "limit": limit, "offset": offset}
 
@@ -634,6 +640,9 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> dict:  # noqa: B008
     job.claimed_by = None
     job.heartbeat_at = None
     job.finished_at = None
+    # A person asked for it now: no backoff left over from the failed run.
+    # Its history stays — the attempts before this one are why it is here.
+    job.available_at = None
     # A canceled job keeps its flag otherwise, and the handle of the very run
     # this starts reads it and stops on the first progress tick.
     job.cancel_requested = False

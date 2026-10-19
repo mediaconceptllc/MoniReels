@@ -54,10 +54,12 @@
     "jobs": [
       {
         "attempts": 0,
+        "available_at": null,
         "claimed_by": null,
         "created_at": 0.0,
         "error": "",
         "finished_at": null,
+        "history": [],
         "job_id": "",
         "kind": "export",
         "lane": "",
@@ -73,15 +75,18 @@
         },
         "retryable": false,
         "stage": "",
+        "started_at": null,
         "state": "failed",
         "updated_at": 0.0
       },
       {
         "attempts": 0,
+        "available_at": null,
         "claimed_by": null,
         "created_at": 0.0,
         "error": null,
         "finished_at": 0.0,
+        "history": [],
         "job_id": "",
         "kind": "export_all",
         "lane": "",
@@ -109,15 +114,18 @@
         },
         "retryable": false,
         "stage": "",
+        "started_at": null,
         "state": "done",
         "updated_at": 0.0
       },
       {
         "attempts": 0,
+        "available_at": null,
         "claimed_by": null,
         "created_at": 0.0,
         "error": null,
         "finished_at": 0.0,
+        "history": [],
         "job_id": "",
         "kind": "suggest",
         "lane": "",
@@ -142,6 +150,7 @@
         },
         "retryable": false,
         "stage": "",
+        "started_at": null,
         "state": "done",
         "updated_at": 0.0
       }

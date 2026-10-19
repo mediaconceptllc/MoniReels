@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.db import session_scope
 from app.dbmodels import Job
+from app.jobs.cancel import JobCancelled
 from app.jobs.kinds import LANE_LIMITS, MAX_ATTEMPTS, lane_of, no_retry, priority_of
 from app.utils.logging import get_logger
 
@@ -40,9 +41,21 @@ HEARTBEAT_SEC = 5.0
 
 ACTIVE_STATES = ("queued", "running")
 
+# JobCancelled lives in app.jobs.cancel, so the provider clients can raise it
+# without importing the queue; handlers and the export pipeline import it
+# from here, as they always have.
 
-class JobCancelled(Exception):
-    pass
+# How long a job handed back for another attempt waits before it may be
+# claimed: RETRY_BACKOFF_SEC after its first attempt, doubling, capped. With no
+# wait at all a render that fails on a transient (a full disk being swept, an
+# R2 blip) used to be claimed again in the same poll and fail the same way, all
+# its attempts gone inside a few seconds.
+RETRY_BACKOFF_SEC = 30.0
+RETRY_BACKOFF_MAX_SEC = 600.0
+# Attempts kept on a row (`Job.history`). A job has at most MAX_ATTEMPTS plus
+# whatever an admin retries; the cap only stops a row from growing forever.
+HISTORY_MAX = 20
+HISTORY_ERROR_CHARS = 500
 
 
 @contextmanager
@@ -189,12 +202,23 @@ def queue_overview(db: Session | None = None) -> dict:
             .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
         )
         waiting = counts.get("queued", 0)
+        # A retry waiting out its backoff is not work a live worker would have
+        # taken: counted as waiting, it reported a healthy idle worker as
+        # down for up to RETRY_BACKOFF_MAX_SEC after every failure.
+        runnable = session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.state == "queued",
+                or_(Job.available_at.is_(None), Job.available_at <= time.time()),
+            )
+        ) if waiting else 0
         return {
             "counts": counts,
             "waiting": waiting,
             "live_workers": live or 0,
-            # Waiting work with nothing actually alive to do it.
-            "stalled": bool(waiting and not live),
+            # Runnable work with nothing actually alive to do it.
+            "stalled": bool(runnable and not live),
         }
 
 
@@ -257,27 +281,38 @@ def reap_stale() -> Reaped:
         ).all()
         requeued = failed = 0
         for job in stale:
+            now = time.time()
+            # Recorded as the attempt that died, before the count moves on.
+            gives_up = job.no_retry or job.attempts + 1 >= MAX_ATTEMPTS
+            _close_attempt(
+                job, "failed" if gives_up else "requeued", "Worker stopped responding", now
+            )
             job.attempts += 1
-            if job.no_retry or job.attempts >= MAX_ATTEMPTS:
+            if gives_up:
                 failed += 1
-                job.state = "failed"
-                job.error = (
+                error = (
                     "Worker stopped responding. This job type is not retried automatically "
                     "because each attempt is billed separately."
                     if job.no_retry
                     else f"Worker stopped responding after {job.attempts} attempt(s)."
                 )
-                job.finished_at = time.time()
+                job.state = "failed"
+                job.error = error
+                job.finished_at = now
                 job.dedupe_key = None
+                job.updated_at = now
             else:
                 requeued += 1
-                job.state = "queued"
-                job.claimed_by = None
-                job.heartbeat_at = None
-                job.progress = 0.0
-                job.stage = ""
-                job.message = "Requeued after the previous worker stopped responding"
-            job.updated_at = time.time()
+                # Backed off like any other failed attempt: a job that takes
+                # its worker down with it (out of memory, say) must not be
+                # claimed again in the very next poll and take the next one.
+                _hand_back(
+                    job,
+                    error=job.error,
+                    delay=backoff_sec(job.attempts),
+                    now=now,
+                    message="Requeued after the previous worker stopped responding",
+                )
         return Reaped(requeued=requeued, failed=failed)
 
 
@@ -301,9 +336,15 @@ def claim(worker_id: str) -> Job | None:
         if not open_lanes:
             return None
 
+        now = time.time()
         job = db.scalars(
             select(Job)
-            .where(Job.state == "queued", Job.lane.in_(open_lanes))
+            .where(
+                Job.state == "queued",
+                Job.lane.in_(open_lanes),
+                # A retry waiting out its backoff is not runnable yet.
+                or_(Job.available_at.is_(None), Job.available_at <= now),
+            )
             .order_by(Job.priority.asc(), Job.created_at.asc())
             .limit(1)
             .with_for_update(skip_locked=True)
@@ -313,8 +354,10 @@ def claim(worker_id: str) -> Job | None:
 
         job.state = "running"
         job.claimed_by = worker_id
-        job.heartbeat_at = time.time()
-        job.updated_at = time.time()
+        job.heartbeat_at = now
+        job.updated_at = now
+        job.started_at = now
+        job.available_at = None
         job.stage = "starting"
         job.attempts += 1
         db.flush()
@@ -337,6 +380,95 @@ def _ours(job: Job | None, attempt: int | None) -> bool:
     if attempt is None:
         return True
     return job.state == "running" and job.attempts == attempt
+
+
+def backoff_sec(attempts: int) -> float:
+    """How long a job waits after its `attempts`-th try before the next."""
+    return min(RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC * 2 ** max(0, attempts - 1))
+
+
+def _close_attempt(job: Job, outcome: str, error: str | None, now: float) -> None:
+    """Record the attempt that just ended in the row's own history.
+
+    `error` and `finished_at` describe only the LATEST attempt, and the next
+    one overwrites them: a render that failed twice on a full disk and then
+    succeeded read as clean, its two failures recorded nowhere (ARCH-5).
+    """
+    entry: dict[str, Any] = {
+        "attempt": job.attempts,
+        "started_at": job.started_at,
+        "ended_at": now,
+        "outcome": outcome,
+        "worker": job.claimed_by,
+    }
+    if error:
+        entry["error"] = error[:HISTORY_ERROR_CHARS]
+    # Reassigned, never appended in place: SQLAlchemy only sees a JSONB
+    # column change when the attribute itself is set.
+    job.history = [*(job.history or []), entry][-HISTORY_MAX:]
+
+
+def _hand_back(job: Job, *, error: str | None, delay: float, now: float, message: str) -> None:
+    """Return a job to the queue as the SAME job.
+
+    Still active, so it keeps its dedupe key — a second click while it waits
+    finds it rather than starting a twin — and has no `finished_at`.
+    Released, so any worker may claim it once `delay` has passed.
+    """
+    job.state = "queued"
+    job.error = error
+    job.claimed_by = None
+    job.heartbeat_at = None
+    job.progress = 0.0
+    job.stage = ""
+    job.message = message
+    job.available_at = now + delay if delay > 0 else None
+    job.updated_at = now
+
+
+def _requeue_row(job: Job, *, error: str | None, output: Any, delay: float | None, now: float) -> None:
+    _close_attempt(job, "requeued", error, now)
+    wait = backoff_sec(job.attempts) if delay is None else delay
+    _hand_back(
+        job,
+        error=error,
+        delay=wait,
+        now=now,
+        message=f"Attempt {job.attempts} failed; trying again in {round(wait)}s" if wait else "",
+    )
+    job.result = {"payload": payload_of(job), "output": output}
+
+
+def requeue(
+    job_id: str,
+    *,
+    error: str | None,
+    attempt: int | None = None,
+    output: Any = None,
+    delay: float | None = None,
+) -> bool:
+    """Hand a failed attempt back for another, after a backoff.
+
+    The one way a job goes back to the queue from a worker. It keeps the
+    dedupe key and gets no `finished_at` (see `_hand_back`), waits
+    `backoff_sec` unless told otherwise (`delay=0` for an attempt that did
+    nothing wrong — the worker was stopped by a deploy), and keeps the
+    attempt in `history`, where the next attempt cannot overwrite it.
+
+    Returns False when nothing was written because the row is no longer this
+    attempt's (see `_ours`).
+    """
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        if not _ours(job, attempt):
+            if job is not None:
+                logger.warning(
+                    "Job %s: attempt %s asked for a retry after the job was taken over; not recorded",
+                    job_id, attempt,
+                )
+            return False
+        _requeue_row(job, error=error, output=output, delay=delay, now=time.time())
+        return True
 
 
 def heartbeat(
@@ -388,20 +520,16 @@ def finish(
                 )
             return False
         now = time.time()
+        if state == "queued":
+            # The same hand-back as `requeue`, so a retry means one thing
+            # however it was asked for.
+            _requeue_row(job, error=error, output=output, delay=None, now=now)
+            return True
+        _close_attempt(job, state, error, now)
         job.state = state
         job.updated_at = now
         job.error = error
-        payload = payload_of(job)
-        job.result = {"payload": payload, "output": output}
-        if state == "queued":
-            # A retry is the same job, still active: it keeps its dedupe key
-            # (dropping it let a second click create a duplicate) and has not
-            # finished. Released, so any worker may claim it.
-            job.claimed_by = None
-            job.heartbeat_at = None
-            job.progress = 0.0
-            job.stage = ""
-            return True
+        job.result = {"payload": payload_of(job), "output": output}
         job.finished_at = now
         if state == "done":
             job.progress = 1.0
@@ -427,17 +555,21 @@ def abandon(job_id: str, *, requeue: bool, reason: str, attempt: int | None = No
         job = db.get(Job, job_id)
         if job is None or job.state not in ACTIVE_STATES or not _ours(job, attempt):
             return False
-        job.state = "queued" if requeue else "failed"
-        job.error = reason
+        now = time.time()
         if requeue:
-            job.claimed_by = None
-            job.heartbeat_at = None
-        job.updated_at = time.time()
-        if not requeue:
-            job.finished_at = job.updated_at
-            # Same rule as `finish`: a settled job releases its dedupe key,
-            # without which the same action could never be started again.
-            job.dedupe_key = None
+            # No backoff: the attempt did nothing wrong, its worker was
+            # stopped, and the next worker should take it the moment it is up.
+            _close_attempt(job, "requeued", reason, now)
+            _hand_back(job, error=reason, delay=0, now=now, message=job.message)
+            return True
+        _close_attempt(job, "failed", reason, now)
+        job.state = "failed"
+        job.error = reason
+        job.updated_at = now
+        job.finished_at = now
+        # Same rule as `finish`: a settled job releases its dedupe key,
+        # without which the same action could never be started again.
+        job.dedupe_key = None
         return True
 
 
