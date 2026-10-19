@@ -551,6 +551,19 @@ export interface ProviderStatus {
   capabilities: Capability[];
   stt_providers: string[];
   stt: SttStatus;
+  secret_storage: SecretStorage;
+}
+
+/** How the keys entered on the admin page are kept in the database. Field
+ *  names only — never a value. `plaintext` are stored unencrypted;
+ *  `unreadable` are sealed with a key this server does not have; `error`
+ *  says the variable itself is malformed. */
+export interface SecretStorage {
+  encrypted: boolean;
+  variable: string;
+  plaintext: string[];
+  unreadable: string[];
+  error: string | null;
 }
 
 /** One provider value as the server is willing to describe it. The value
