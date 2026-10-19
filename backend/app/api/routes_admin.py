@@ -29,9 +29,9 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 @router.get("/users")
 def list_users(db: Session = Depends(get_db)) -> list[dict]:  # noqa: B008
     rows = db.scalars(select(User).order_by(User.created_at)).all()
-    counts = dict(
-        db.execute(select(Project.owner_id, func.count()).group_by(Project.owner_id)).all()  # type: ignore[arg-type]
-    )
+    counts: dict[str, int] = {
+        owner: n for owner, n in db.execute(select(Project.owner_id, func.count()).group_by(Project.owner_id))
+    }
     return [
         {
             "id": u.id,
@@ -369,9 +369,9 @@ async def _check_new_model(db: Session, fields: dict) -> dict | None:
         return {"verified": False, "reason": str(e)}
 
     if not check.known:
-        detail = f"OpenRouter does not serve a model called '{model}'."
+        detail = f"OpenRouter «{model}» нэртэй загвар үйлчилдэггүй."
         if check.suggestions:
-            detail += " Did you mean: " + ", ".join(check.suggestions) + "?"
+            detail += " Ойролцоо нэрс: " + ", ".join(check.suggestions) + "."
         raise HTTPException(status_code=400, detail=detail)
     return {"verified": True}
 

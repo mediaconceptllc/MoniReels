@@ -39,10 +39,13 @@ def _owned_job(db: Session, job_id: str, principal: Principal) -> Job:
     if job is None:
         raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     if job.project_id and not principal.is_admin:
-        project = db.get(Project, job.project_id)
+        # The owner and nothing else. Loading the row loaded its document —
+        # 4 MB for a 2-hour transcript, 141 ms against 5.6 ms (audit
+        # PERF-11) — on the route every open job card polls.
+        owner = db.scalar(select(Project.owner_id).where(Project.id == job.project_id))
         # 404 rather than 403: whether someone else's job exists is not
         # information this caller is entitled to.
-        if project is None or project.owner_id != principal.id:
+        if owner is None or owner != principal.id:
             raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     return job
 

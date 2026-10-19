@@ -43,6 +43,7 @@ from app.jobs.cancel import JobCancelled
 from app.models import Segment
 from app.tts.elevenlabs import ElevenLabsTts
 from app.utils.logging import get_logger
+from app.video.inputs import SPEECH_FORMATS, untrusted
 
 logger = get_logger(__name__)
 
@@ -302,7 +303,7 @@ async def decode(
         if fade and length > FADE_S:
             filters.append(f"afade=t=out:st={length - FADE_S:.3f}:d={FADE_S}")
     args = [
-        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-i", str(source),
+        str(ffmpeg), "-hide_banner", "-loglevel", "error", *untrusted(source, SPEECH_FORMATS),
         "-af", ",".join(filters) or "anull",
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
     ]

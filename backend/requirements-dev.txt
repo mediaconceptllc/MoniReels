@@ -3,4 +3,6 @@ pytest==8.3.4
 pytest-asyncio==0.25.2
 ruff==0.8.6
 mypy==1.14.1
-types-boto3
+# Stubs move with every boto3 release; pinned so a new one cannot change
+# what `mypy app` says on an unchanged commit (Dependabot bumps it).
+types-boto3==1.43.105

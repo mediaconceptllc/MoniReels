@@ -646,17 +646,6 @@
     "objects_removed": 0
   },
   "project_patched": {
-    "clips": [
-      {
-        "end": 0.0,
-        "id": "",
-        "order": 0,
-        "source_path": "",
-        "start": 0.0,
-        "transition_in": null
-      }
-    ],
-    "created_at": 0.0,
     "export": {
       "burn_subtitles": false,
       "crf": 0,
@@ -684,7 +673,6 @@
     "id": "",
     "language": "",
     "name": "",
-    "schema_version": 0,
     "subtitle_style": {
       "enabled": false,
       "font_family": "",
@@ -696,113 +684,11 @@
       "primary_color": "",
       "shadow": 0.0
     },
-    "suggestions": {
-      "requested_shorts": 0,
-      "requested_youtube": 0,
-      "shorts": [
-        {
-          "b_roll": [
-            ""
-          ],
-          "caption": "",
-          "cuts": [
-            {
-              "end": 0.0,
-              "reason": "",
-              "role": "context",
-              "start": 0.0
-            },
-            {
-              "end": 0.0,
-              "reason": "",
-              "role": "hook",
-              "start": 0.0
-            },
-            {
-              "end": 0.0,
-              "reason": "",
-              "role": "payoff",
-              "start": 0.0
-            },
-            {
-              "end": 0.0,
-              "reason": "",
-              "role": "proof",
-              "start": 0.0
-            }
-          ],
-          "hashtags": [
-            ""
-          ],
-          "hook_quote": "",
-          "hook_text": "",
-          "id": "",
-          "on_screen_texts": [
-            ""
-          ],
-          "title": "",
-          "why_it_works": ""
-        }
-      ],
-      "youtube": [
-        {
-          "ranges": [
-            {
-              "end": 0.0,
-              "reason": "",
-              "start": 0.0
-            }
-          ],
-          "throughline": "",
-          "title": "",
-          "total_duration": 0.0
-        }
-      ]
-    },
-    "transcript": {
-      "full_text": "",
-      "language": "",
-      "pauses": [],
-      "segments": [
-        {
-          "end": 0.0,
-          "id": "",
-          "speaker": "",
-          "start": 0.0,
-          "text": "",
-          "translation": "",
-          "words": []
-        },
-        {
-          "end": 0.0,
-          "id": "",
-          "speaker": null,
-          "start": 0.0,
-          "text": "",
-          "translation": null,
-          "words": []
-        }
-      ],
-      "speakers": 0,
-      "timings_estimated": false
-    },
     "transition": {
       "duration": 0.0,
       "type": ""
     },
-    "updated_at": 0.0,
-    "upload_size_bytes": null,
-    "video": {
-      "audio_key": "",
-      "codec": "",
-      "duration_sec": 0.0,
-      "fps": 0.0,
-      "has_audio": false,
-      "height": 0,
-      "source_key": "",
-      "thumbnail_key": "",
-      "width": 0
-    }
+    "updated_at": 0.0
   },
   "project_voices": {
     "default_voice_id": "",

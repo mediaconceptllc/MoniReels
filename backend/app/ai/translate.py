@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
+from typing import Any
 
 from app.ai.llm_client import LLMClient
 from app.jobs.cancel import JobCancelled
@@ -58,7 +59,7 @@ Rules:
 
 Return JSON: {"lines": [{"i": <line index>, "text": "<Mongolian subtitle>"}]}"""
 
-SCHEMA = {
+SCHEMA: dict[str, Any] = {
     "name": "translated_lines",
     "strict": True,
     "schema": {

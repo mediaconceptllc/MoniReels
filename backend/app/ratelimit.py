@@ -28,6 +28,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict, deque
+from typing import Any
 
 IP_MAX_ATTEMPTS = 30
 IP_WINDOW_SEC = 60.0
@@ -61,11 +62,14 @@ def _sweep(now: float) -> None:
     if now - _last_sweep < SWEEP_EVERY_SEC:
         return
     _last_sweep = now
-    for hits_by_key, window in (
+    # Keyed by address, by (name, address) and by user: one loop, so the
+    # tables are typed by what they share — a deque of hit times per key.
+    tables: tuple[tuple[dict[Any, deque[float]], float], ...] = (
         (_ip_hits, IP_WINDOW_SEC),
         (_user_hits, USER_WINDOW_SEC),
         (_password_hits, PASSWORD_WINDOW_SEC),
-    ):
+    )
+    for hits_by_key, window in tables:
         for key in list(hits_by_key):
             _prune(hits_by_key[key], window, now)
             if not hits_by_key[key]:

@@ -343,18 +343,10 @@ export interface ProjectSummary {
 }
 
 /**
- * The stored document, and nothing else.
- *
- * A write path answers with exactly this: it confirms what was saved. It does
- * NOT carry `media` or `jobs`, because both are assembled per read — the URLs
- * are freshly signed and the job list is a query — and re-signing a URL the
- * client already holds on every settings save buys nothing.
- *
- * Separated from `Project` rather than left implied: `PATCH /projects/{id}`
- * was declared as returning a whole `Project`, so a caller reading
- * `.media.source_url` off the result would have got `undefined` at runtime
- * with nothing failing anywhere earlier. Found by `npm run verify-shape` on
- * its first run.
+ * The stored document, and nothing else — what the detail page's `Project`
+ * is built on. It does NOT carry `media` or `jobs`, because both are
+ * assembled per read: the URLs are freshly signed and the job list is a
+ * query.
  */
 export interface ProjectDocument {
   schema_version: number;
@@ -371,6 +363,20 @@ export interface ProjectDocument {
   subtitle_style: SubtitleStyle;
   export: ExportSettings;
 }
+
+/**
+ * What `PATCH /projects/{id}` answers with: every field it can change, as
+ * saved, and when. Not the document — a 2-hour transcript made that 4 MB,
+ * encoded for a caller that threw it away and read the project again.
+ *
+ * Its own type rather than `ProjectDocument` (or `Project`): a caller reading
+ * `.transcript` or `.media` off the result gets a compile error, not an
+ * `undefined` at runtime with nothing failing anywhere earlier.
+ */
+export type ProjectSettingsSaved = Pick<
+  ProjectDocument,
+  "id" | "name" | "language" | "updated_at" | "transition" | "subtitle_style" | "export"
+>;
 
 /** What the detail page reads: the document plus what only a read can give. */
 /** How far the translation has got, and whether the export guard will

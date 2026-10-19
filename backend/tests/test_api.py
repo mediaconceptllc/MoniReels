@@ -95,6 +95,37 @@ def test_unknown_user_and_wrong_password_are_indistinguishable(client, db):
     assert unknown.json()["detail"] == wrong.json()["detail"]
 
 
+def test_a_blocked_account_is_not_revealed_without_its_password(client, db, monkeypatch):
+    """A wrong password on a blocked account must read exactly like a wrong
+    password anywhere else (audit SEC-7). It used to answer 403 "blocked" at
+    once — the account confirmed by the answer, and by the ~7 ms it took
+    against ~160 ms for a name with no account.
+
+    The timing is asserted as the work done, not the clock: the password is
+    hashed for the blocked account just as for any other."""
+    from app.api import routes_auth
+
+    blocked = _user(db, "bob")
+    blocked.active = False
+    db.commit()
+
+    checked = []
+    real = routes_auth.verify_password
+    monkeypatch.setattr(
+        routes_auth, "verify_password", lambda *a: checked.append(a[0]) or real(*a)
+    )
+    unknown = client.post("/auth/login", json={"username": "nobody", "password": "whatever12345"})
+    wrong = client.post("/auth/login", json={"username": "bob", "password": "whatever12345"})
+    assert wrong.status_code == unknown.status_code == 401
+    assert wrong.json() == unknown.json()
+    assert checked == ["whatever12345"]
+
+    # Only the holder of the password learns the account is blocked.
+    right = client.post("/auth/login", json={"username": "bob", "password": "hunter2hunter2"})
+    assert right.status_code == 403
+    assert "хаагдсан" in right.json()["detail"]
+
+
 def test_repeated_failures_are_rate_limited(client, db):
     """PBKDF2 costs ~100ms of CPU per attempt. Unbounded, a few dozen
     concurrent guesses stall every worker — this is availability protection
@@ -1471,6 +1502,39 @@ def test_a_near_miss_is_answered_with_what_it_probably_meant(client, db):
 
     assert response.status_code == 400
     assert "deepseek/deepseek-v4-flash" in response.json()["detail"]
+
+
+def test_the_refusals_a_person_reads_are_in_mongolian(client, db):
+    """Every one of these was English in a Mongolian interface (audit
+    ARCH-8): the page shows a refusal's `detail` as it comes."""
+    import re
+
+    import pytest as _pytest
+
+    from app import brand, provider_settings
+
+    cyrillic = re.compile("[\u0400-\u04FF]")
+    _user(db, "plain")
+    _user(db, "root", role="admin")
+
+    forbidden = client.get("/admin/users", headers=_auth(client, "plain"))
+    assert forbidden.status_code == 403
+    assert cyrillic.search(forbidden.json()["detail"]), forbidden.json()
+
+    headers = _auth(client, "root")
+    client.put("/admin/settings", json={"openrouter_api_key": "sk-live"}, headers=headers)
+    refused = _set_model(client, headers, "deepseek/deepseek-v4-flash-latest", _rejects("deepseek/x"))
+    assert cyrillic.search(refused.json()["detail"]), refused.json()
+    assert "Did you mean" not in refused.json()["detail"]
+
+    for call in (
+        lambda: brand.new_key("banner", "image/png"),
+        lambda: brand.new_key("logo", "application/pdf"),
+        lambda: provider_settings.apply(db, {"jwt_secret": "x"}, actor="root", ip=""),
+    ):
+        with _pytest.raises(ValueError) as caught:
+            call()
+        assert cyrillic.search(str(caught.value)), str(caught.value)
 
 
 def test_an_unreadable_catalogue_does_not_stop_the_save(client, db):

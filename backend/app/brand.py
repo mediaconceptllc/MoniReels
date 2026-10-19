@@ -55,12 +55,15 @@ CLIP_CONTENT_TYPES = {
 
 
 def new_key(asset: str, content_type: str) -> str:
+    # Both messages reach the admin page as the 400's detail: Mongolian.
     if asset not in ASSETS:
-        raise ValueError(f"Unknown brand asset {asset!r}")
+        raise ValueError(f"Тодорхойгүй брэндийн файл: {asset!r}.")
     allowed = LOGO_CONTENT_TYPES if asset == "logo" else CLIP_CONTENT_TYPES
     ext = allowed.get(content_type)
     if ext is None:
-        raise ValueError(f"Unsupported {asset} type {content_type!r}")
+        raise ValueError(
+            f"Энэ файлын төрөл дэмжигдэхгүй: {content_type!r}. Зөвшөөрөгдөх төрөл: {', '.join(allowed)}."
+        )
     # Timestamped, not a fixed name: the admin page previews these through a
     # signed GET, and a replacement behind an unchanged URL is served from
     # cache — the operator uploads a new file, sees the old one, uploads again.

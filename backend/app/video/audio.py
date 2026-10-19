@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 
 from app.utils.logging import get_logger
+from app.video.inputs import untrusted
 
 logger = get_logger(__name__)
 
@@ -22,7 +23,7 @@ async def extract_audio_16k_mono_wav(ffmpeg_path: Path, video_path: Path, output
     args = [
         str(ffmpeg_path),
         "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(video_path),
+        *untrusted(video_path),
         "-vn",
         "-ac", "1",
         "-ar", "16000",
@@ -51,7 +52,7 @@ async def extract_audio_native_wav(ffmpeg_path: Path, video_path: Path, output_p
     args = [
         str(ffmpeg_path),
         "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(video_path),
+        *untrusted(video_path),
         "-vn",
         "-c:a", "pcm_s16le",
         str(output_path),

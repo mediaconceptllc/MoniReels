@@ -162,7 +162,7 @@ def require_role(*roles: str):
     def _check(principal: Principal = Depends(current_user)) -> Principal:  # noqa: B008
         if principal.role == "admin" or principal.role in roles:
             return principal
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Энэ үйлдлийг хийх эрх танд алга.")
 
     return _check
 

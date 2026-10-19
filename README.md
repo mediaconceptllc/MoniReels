@@ -96,6 +96,7 @@ export DATABASE_URL=postgresql://localhost/monireels JWT_SECRET=dev-secret-at-le
 
 DATABASE_URL=postgresql://localhost/monireels_test .venv/bin/python -m pytest tests -q
 .venv/bin/ruff check app tests
+.venv/bin/mypy app                     # CI ч мөн ажиллуулна
 
 # Frontend
 cd frontend
