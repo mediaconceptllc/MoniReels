@@ -216,6 +216,13 @@ DUUDLAGA_BASE_URL=https://api.duudlaga.dev/v1
 ELEVENLABS_API_KEY=...
 ```
 
+`ENVIRONMENT`-ийг production-д `development` болгож БОЛОХГҮЙ (анхдагч нь
+`production`; `/health` утгыг нь харуулна). `/docs`, `/redoc`,
+`/openapi.json` зөвхөн `development` (эсвэл `dev`, `local`) үед нээгдэнэ —
+бусад бүх утгад, буруу бичсэнд ч 404: схем нь админы бүх замыг нэрлэдэг
+(audit INFO-2). Админы ажил бүгд `/admin` хуудсанд; production-д юу ч
+`/openapi.json`-ийг уншдаггүй.
+
 `OPENROUTER_API_KEY`, `DUUDLAGA_API_KEY`, `ELEVENLABS_API_KEY`,
 `OPENROUTER_MODEL` ба монгол дууны загвар, хоолойг (`ELEVENLABS_TTS_MODEL`,
 `ELEVENLABS_TTS_VOICE_ID`) **Тохиргоо хуудсанаас** (админ, `/admin`) ч
@@ -464,6 +471,55 @@ Deploy хийсний дараа Vercel-ийн домэйныг Railway-гийн
 БУЦААЖ нэмэхээ мартаж болохгүй. Урьдчилсан (preview) домэйн бүр өөр тул
 production домэйныг л нэмэхэд хангалттай.
 
+### Аюулгүй байдлын толгой (CSP, HSTS, Permissions-Policy)
+
+`frontend/vercel.json` хуудас бүрт эдгээрийг илгээнэ (audit SEC-12). Vercel
+л уншдаг — `next start` уншдаггүй — тиймээс `npm run check-headers` (CI-д)
+доорх дүрмийг барина.
+
+**`Content-Security-Policy` ХЭРЭГЖИНЭ (report-only биш):** скрипт зөвхөн
+өөрийн домэйноос, `eval` хориотой; хүсэлт зөвхөн API ба R2 руу
+(`connect-src`); зураг ба видео зөвхөн R2-оос (`img-src`, `media-src`);
+`frame-ancestors 'none'`, `object-src 'none'`, `base-uri` ба `form-action`
+— `'self'`. Бодит `next build` + `next start` дээр (толгойг яг энэ файлаас
+тавьж) Chromium-оор хэмжсэн: нэвтрэх, жагсаалт, видео ба гаралттай төсөл,
+админы дөрвөн таб, нэг PUT ба олон хэсэгт (multipart) хуулалт — **зөрчил 0**.
+R2-г бодлогоос хасаж туршихад зураг, видео, хуулалт бүгд хаагдсан (зөрчил
+57) — хэмжилт мэдрэмжтэй.
+
+**Үлдсэн ганц зөвшөөрөл: `script-src 'unsafe-inline'`.** App Router нь
+хуудасны өгөгдлийг (RSC flight) inline `<script>` болгож хуудас бүрт 6–7
+ширхэг оруулдаг; түүнгүйгээр хэмжсэн build огт hydrate болоогүй (57 зөрчил,
+нэвтрэх маягт ажиллаагүй). Үүнийг хасах цорын ганц зам нь хүсэлт тутмын
+**nonce** (middleware) — тэр нь бүх хуудсыг статик биш, хүсэлт тутам
+серверт рендерлэхийг шаардана (Vercel дээр хуудас бүр функц дуудна).
+Энэ нь архитектурын шийдвэр тул хийгдээгүй. Inline style-д зөвшөөрөл
+ОГТ хэрэггүй (`style-src 'self'`) — нэмж болохгүй.
+
+**Токен `localStorage`-д хэвээр** (зориуд өөрчлөөгүй): CSP нь XSS-ийг
+хаахгүй, гэхдээ гадны скрипт ачаалах, токеныг өөр домэйн руу `fetch`/зураг
+/медиагаар илгээхийг хаана. Хуудас руу шилжүүлж илгээх (navigation) зам
+CSP-ээр хаагдахгүй.
+
+**Өөрчлөхдөө эвдэхгүйн тулд:**
+
+- **API-ийн хаяг ГУРВАН газар** ижил байна: Vercel-ийн project env
+  `NEXT_PUBLIC_API_URL`, `vercel.json`-ийн `build.env`, CSP-ийн
+  `connect-src`. Сүүлийн хоёрыг `check-headers` тулгадаг; эхнийхийг
+  солиод CSP-г мартвал апп БҮХ хүсэлтээ хаана.
+- **R2** нь `https://*.r2.cloudflarestorage.com`. `R2_ENDPOINT`-ийг өөр
+  домэйн (custom domain) болговол тэр origin-ийг `img-src`, `media-src`,
+  `connect-src` гурвуулаа руу нэмнэ.
+- **ElevenLabs-ийн хоолойн дээж** `https://storage.googleapis.com`-оос
+  тоглоно (`media-src`). Өөр хост болвол дээж л тоглохгүй, өөр юу ч
+  эвдрэхгүй.
+- **Preview deploy дээрх Vercel Toolbar** (`vercel.live`) энэ бодлогоор
+  хаагдана — production-д хамааралгүй.
+- `Strict-Transport-Security` нь Vercel-ийн анхдагчтай ижил
+  (`max-age=63072000; includeSubDomains; preload`), тодорхой бичсэн нь
+  өөр домэйн холбогдоход ч хамаарна. `Permissions-Policy` камер,
+  микрофон, байршил, төлбөр, USB, дэлгэц бичлэгийг хаана.
+
 ---
 
 ## Шалгах жагсаалт
@@ -473,6 +529,8 @@ curl https://<api>/health
 # {"status":"ok","ffmpeg":true,"storage":true,...}
 ```
 
+- `curl -o /dev/null -w '%{http_code}' https://<api>/openapi.json` → `404`
+  байх ёстой; `200` бол `ENVIRONMENT` нь `development` болжээ
 - `ffmpeg: false` → image буруу баригдсан
 - `storage: false` → `R2_*` дутуу. `GET /admin/providers` аль хувьсагч
   буруу болохыг нэрлэнэ; хуулалт 503 буцаавал шалтгаан нь хариунд гарна

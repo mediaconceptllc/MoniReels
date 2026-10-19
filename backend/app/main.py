@@ -146,7 +146,32 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="MoniReels API", version="2.0.0", lifespan=lifespan)
+#: Where the schema browser is served. Named rather than "everywhere but
+#: production", so a new or misspelt environment name is closed, not open.
+DOCS_ENVIRONMENTS = frozenset({"development", "dev", "local"})
+
+
+def schema_published(settings: Settings) -> bool:
+    """/docs, /redoc and /openapi.json — on a developer's machine only.
+
+    The schema lists every admin route and every parameter it takes to
+    anyone who asks (audit INFO-2). It was the admin's only screen once;
+    the admin screens are in the app now, and nothing in production reads
+    the schema — the frontend's types are checked against recorded
+    responses (tests/test_frontend_shape.py), not against /openapi.json.
+    """
+    return settings.environment.strip().lower() in DOCS_ENVIRONMENTS
+
+
+_SCHEMA = schema_published(get_settings())
+app = FastAPI(
+    title="MoniReels API",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _SCHEMA else None,
+    redoc_url="/redoc" if _SCHEMA else None,
+    openapi_url="/openapi.json" if _SCHEMA else None,
+)
 
 
 def _configure_cors(application: FastAPI) -> None:

@@ -75,8 +75,21 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def stamp_password_change(user: User) -> None:
+def revoke_sessions(user: User) -> None:
     """Invalidate every token issued under the current serial.
+
+    The one way a session is ended before it expires. A password change and
+    an account closed or reopened (routes_admin.set_active) all call it: the
+    inactive check in `current_user` stops a closed account's tokens only
+    while it STAYS closed, and reopening it used to bring every one of them
+    back — including one taken by whoever it was closed to stop (audit
+    INFO-1).
+    """
+    user.token_serial = (user.token_serial or 0) + 1
+
+
+def stamp_password_change(user: User) -> None:
+    """Invalidate every token issued before a password change.
 
     Uses a counter, not a timestamp. A JWT's `iat` has one-second resolution,
     so a time comparison leaves a window: a token issued in the same second
@@ -91,7 +104,7 @@ def stamp_password_change(user: User) -> None:
     meant to end alive.
     """
     user.pw_changed_at = time.time()
-    user.token_serial = (user.token_serial or 0) + 1
+    revoke_sessions(user)
 
 
 def make_token(user: User) -> str:

@@ -17,6 +17,7 @@ from app.security import (
     client_ip,
     hash_password,
     require_admin,
+    revoke_sessions,
     stamp_password_change,
 )
 from app.utils.logging import get_logger
@@ -45,11 +46,35 @@ def list_users(db: Session = Depends(get_db)) -> list[dict]:  # noqa: B008
     ]
 
 
+# A namespace of its own for the two-key advisory lock below, so it can never
+# be confused with a lock taken anywhere else (app.quotas.LOCK_CLASS).
+USERNAME_LOCK_CLASS = 0x55_4E  # "UN"
+
+
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 def create_user(body: CreateUserIn, db: Session = Depends(get_db)) -> dict:  # noqa: B008
-    if db.scalar(select(User).where(User.username == body.username)):
-        # Said on the form it was typed into, so in the language of the form.
-        raise HTTPException(status_code=409, detail=f"«{body.username}» нэртэй хэрэглэгч аль хэдийн бий.")
+    """A name is taken whatever its case (audit INFO-1).
+
+    "alice" and "Alice" are one person to anyone reading a list of names and
+    were two accounts to the database, whose unique index compares bytes.
+    Checked here, at creation, rather than by a unique index on
+    lower(username): building that index fails on any database that already
+    holds such a pair, and nothing here can see production's. Accounts that
+    already differ only in case are left as they are — login still matches
+    the exact name, so each keeps signing in with its own.
+
+    The lock makes the check and the insert one step: two admins creating
+    "alice" and "Alice" at the same moment could otherwise both pass the
+    check. Usernames are ASCII by schema, so SQL lower() and Python's agree.
+    """
+    db.execute(select(func.pg_advisory_xact_lock(USERNAME_LOCK_CLASS, 0)))
+    taken = db.scalar(
+        select(User.username).where(func.lower(User.username) == body.username.lower()).limit(1)
+    )
+    if taken is not None:
+        # Said on the form it was typed into, so in the language of the form —
+        # and with the name that is there, which may differ from the one typed.
+        raise HTTPException(status_code=409, detail=f"«{taken}» нэртэй хэрэглэгч аль хэдийн бий.")
     salt, digest = hash_password(body.password)
     user = User(username=body.username, pw_salt=salt, pw_hash=digest, role=body.role)
     db.add(user)
@@ -94,6 +119,12 @@ def set_active(
     # path changes a role or an account is closed some other way.
     if not active and user.role == "admin" and user.active and not _other_active_admins(db, user.id):
         raise HTTPException(status_code=400, detail="Сүүлчийн идэвхтэй админыг хаах боломжгүй.")
+    if user.active != active:
+        # Closing ends the account's sessions for good, and reopening starts
+        # from none: without this a reopened account's old tokens — any of
+        # them, from anyone — worked again (audit INFO-1). Setting the state
+        # it is already in signs nobody out.
+        revoke_sessions(user)
     user.active = active
     db.commit()
     return {"active": user.active}
@@ -448,6 +479,9 @@ JOB_STATES = ("queued", "running", "done", "failed", "canceled")
 # render or, for the metered kinds, a second bill for a result that exists.
 RETRYABLE = ("failed", "canceled")
 JOBS_PAGE_MAX = 200
+# Past this Postgres cannot take the OFFSET at all — a bigint overflow, which
+# came back as a 500 — and no jobs table this service keeps is near it.
+JOBS_OFFSET_MAX = 2**31 - 1
 
 
 @router.get("/jobs")
@@ -455,7 +489,7 @@ def list_jobs(
     state: str | None = None,
     kind: str | None = None,
     limit: int = Query(50, ge=1, le=JOBS_PAGE_MAX),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=JOBS_OFFSET_MAX),
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     """Every account's jobs, newest first, a page at a time.

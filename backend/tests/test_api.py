@@ -384,9 +384,9 @@ def test_job_of_another_account_is_not_found(client, db):
 
 def test_queue_status_reports_disk(client, db):
     """"Why did my export fail" is a full disk often enough that the number
-    belongs on the page, not only in the server log."""
-    _user(db, "alice")
-    response = client.get("/jobs/queue", headers=_auth(client, "alice"))
+    belongs on the admin's page, not only in the server log."""
+    _user(db, "root", role="admin")
+    response = client.get("/jobs/queue", headers=_auth(client, "root"))
     assert response.status_code == 200
     assert "free_bytes" in response.json()["api_disk"]
 
@@ -397,8 +397,8 @@ def test_queue_status_names_whose_disk_it_measured(client, db):
     figure comes from the worker, with when it was taken, or not at all."""
     from app import worker_report
 
-    _user(db, "alice")
-    headers = _auth(client, "alice")
+    _user(db, "root", role="admin")
+    headers = _auth(client, "root")
     # No worker has said anything: unknown, not the API's number relabelled.
     assert client.get("/jobs/queue", headers=headers).json()["worker_disk"] is None
 
@@ -636,8 +636,11 @@ def test_an_admin_manages_accounts_without_swagger(client, db):
     assert next(u for u in client.get("/admin/users", headers=admin).json()
                 if u["id"] == user_id)["active"] is False
 
+    # Reopening lets the account sign in again; it does not revive the
+    # tokens issued before it was closed (tests/test_input_guards.py).
     client.post(f"/admin/users/{user_id}/active?active=true", headers=admin)
-    assert client.get("/auth/me", headers=session).status_code == 200
+    assert client.get("/auth/me", headers=session).status_code == 401
+    assert client.get("/auth/me", headers=_auth(client, "newbie", "firstpass1")).status_code == 200
 
 
 def test_the_job_screens_are_admin_only(client, db):

@@ -22,12 +22,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
-from app.dbmodels import Job
+from app.dbmodels import Job, Project
 from app.jobs.cancel import JobCancelled
 from app.jobs.kinds import LANE_LIMITS, MAX_ATTEMPTS, kinds_in, lane_of, no_retry, priority_of
 from app.utils.logging import get_logger
@@ -198,10 +198,15 @@ def list_for_project(project_id: str, limit: int = 50, db: Session | None = None
 WORKER_REPORT_STALE_SEC = 180
 
 
-def queue_overview(db: Session | None = None) -> dict:
+def queue_overview(db: Session | None = None, *, owner_id: str | None = None) -> dict:
     """What the queue page shows. A queue with waiting work and no genuinely
     live worker means the worker service is down — the single most common
     cause of "my job never starts".
+
+    `owner_id` narrows the counts, and the stalled verdict, to the jobs of
+    that account's own projects (routes_jobs.queue_status for an editor).
+    Whether a worker is alive stays a system-wide fact: any live worker
+    would take the job.
 
     "Live" used to mean "running a job with a fresh heartbeat", so an IDLE
     worker counted as dead: any waiting job it was not allowed to take yet
@@ -211,9 +216,15 @@ def queue_overview(db: Session | None = None) -> dict:
     """
     from app import worker_report
 
+    def mine(query: Select[Any]) -> Select[Any]:
+        if owner_id is None:
+            return query
+        return query.join(Project, Project.id == Job.project_id).where(Project.owner_id == owner_id)
+
     with _use(db) as session:
         counts: dict[str, int] = {
-            state: n for state, n in session.execute(select(Job.state, func.count()).group_by(Job.state))
+            state: n
+            for state, n in session.execute(mine(select(Job.state, func.count())).group_by(Job.state))
         }
         now = time.time()
         stale_cutoff = now - _stale_sec()
@@ -229,9 +240,7 @@ def queue_overview(db: Session | None = None) -> dict:
         # taken: counted as waiting, it reported a healthy idle worker as
         # down for up to RETRY_BACKOFF_MAX_SEC after every failure.
         runnable = session.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(
+            mine(select(func.count()).select_from(Job)).where(
                 Job.state == "queued",
                 or_(Job.available_at.is_(None), Job.available_at <= now),
             )

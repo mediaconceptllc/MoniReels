@@ -184,6 +184,12 @@ jobs:
       # aborting the stored parts, small files and old servers on one PUT.
       - run: npm run check-upload
 
+      # The headers vercel.json sends. `next start` never reads that file, so
+      # nothing else here sees them: a CSP that no longer names the API the
+      # build calls would block every request, and the first to notice would
+      # be a user. Measured against a real build (docs/DEPLOY.md).
+      - run: npm run check-headers
+
       # The interface is Mongolian; the worker and the browser are not. Known
       # worker errors must map to Mongolian with the right "retry helps?" flag,
       # relative times must not fall back to Intl's English, and validation

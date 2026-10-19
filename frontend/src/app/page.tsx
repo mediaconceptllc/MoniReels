@@ -51,13 +51,22 @@ export default function ProjectsPage() {
       <div className="flex flex-col gap-6">
         {/* Waiting work with nothing alive to do it means the worker service
             is down. Without this, the only symptom is a job that sits at 0%
-            forever with no explanation anywhere in the interface. */}
-        {queue?.stalled && (
-          <Alert tone="warn">
-            Ажлын дараалалд {queue.waiting} ажил хүлээж байгаа ч ажил гүйцэтгэх сервис
-            ажиллахгүй байна. Админ Railway дээрх «worker» сервисийг шалгана уу.
-          </Alert>
-        )}
+            forever with no explanation anywhere in the interface. An editor
+            is told about their own work, and is not sent to Railway — only
+            the admin can act there. */}
+        {queue?.stalled &&
+          (queue.scope === "all" ? (
+            <Alert tone="warn">
+              Ажлын дараалалд {queue.waiting} ажил хүлээж байгаа ч ажил гүйцэтгэх сервис
+              ажиллахгүй байна. Админ Railway дээрх «worker» сервисийг шалгана уу.
+            </Alert>
+          ) : (
+            <Alert tone="warn">
+              Таны {queue.waiting} ажил дараалалд хүлээж байгаа ч ажил гүйцэтгэх сервис одоогоор
+              ажиллахгүй байна. Ажлууд хадгалагдсан — сервис сэргэмэгц өөрөө эхэлнэ. Удаан
+              үргэлжилбэл админд хэлнэ үү.
+            </Alert>
+          ))}
 
         <NewProject onCreated={() => void refresh()} />
 

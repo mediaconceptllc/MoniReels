@@ -58,10 +58,13 @@ function QueueNote() {
       </Alert>
     );
   }
+  // An admin's count is the whole queue's; an editor's is their own work
+  // only (audit INFO-1), so it is worded as theirs.
+  const others = queue.scope === "all" ? `нийт ${queue.waiting} ажил` : `таны ${queue.waiting} ажил`;
   return (
     <p className="text-sm text-ink-2">
       {queue.waiting > 1
-        ? `Таны видео дараалалд байна: нийт ${queue.waiting} ажил ээлжээ хүлээж байна. Ээлж ирэхэд өөрөө эхэлнэ.`
+        ? `Таны видео дараалалд байна: ${others} ээлжээ хүлээж байна. Ээлж ирэхэд өөрөө эхэлнэ.`
         : "Таны видео дараалалд байна. Ээлж ирэхэд өөрөө эхэлнэ."}
     </p>
   );

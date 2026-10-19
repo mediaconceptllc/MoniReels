@@ -169,7 +169,8 @@ function StatsCard({ stats, days, onDays }: { stats: JobStats | null; days: numb
 }
 
 function DiskCard({ queue }: { queue: QueueStatus | null }) {
-  if (!queue) return null;
+  // Only an admin's answer names the machines; this screen is the admin's.
+  if (!queue || queue.scope !== "all") return null;
   const worker = queue.worker_disk;
   const api = queue.api_disk;
   const low = worker !== null && worker.free_bytes < worker.min_free_bytes;

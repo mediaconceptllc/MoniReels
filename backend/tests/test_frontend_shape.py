@@ -620,6 +620,14 @@ def test_frontend_contract_shapes_are_captured(client, db, monkeypatch):
     shape["admin_password_reset"] = send(
         "POST", f"/admin/users/{made['id']}/password", json={"new_password": "secondpass2"}
     )
+    # The queue as an editor sees it — their own work, no machine — before
+    # the account is closed. The admin's view is `queue` above.
+    editor = client.post(
+        "/auth/login", json={"username": "shapeeditor", "password": "secondpass2"}
+    ).json()["token"]
+    own = client.get("/jobs/queue", headers={"Authorization": f"Bearer {editor}"})
+    assert own.status_code == 200, own.text
+    shape["queue_own"] = own.json()
     shape["admin_user_active"] = send("POST", f"/admin/users/{made['id']}/active?active=false")
 
     # A source in parts. The multipart calls are R2's — what ought to be
