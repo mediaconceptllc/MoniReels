@@ -115,7 +115,9 @@ async def lifespan(app: FastAPI):
 
     # Migrations run here, before the first request is served: a deployment
     # must never answer against a schema it has not been migrated to. The
-    # worker does not do this — one writer avoids a deploy-time race.
+    # worker does not do this — one writer avoids a deploy-time race. It
+    # waits out a database that is briefly down, and starts on one that is
+    # AHEAD of this code (a rollback) instead of refusing (app.migrate).
     from app.migrate import upgrade_to_head
 
     upgrade_to_head()
