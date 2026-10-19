@@ -54,9 +54,12 @@ def plan_transition(
         )
 
     if fps:
-        # Down, when reduced: the reduction is what keeps T under min(d) / 2.
-        snap = math.floor if reduced else round
-        duration = max(1, snap(duration * fps)) / fps
+        # Down when reduced, or when rounding up would reach min(d) / 2: the
+        # limit is what keeps a clip's two transitions from meeting.
+        frames = round(duration * fps)
+        if reduced or frames / fps >= max_allowed:
+            frames = math.floor(duration * fps)
+        duration = max(1, frames) / fps
 
     offsets = []
     running = 0.0
