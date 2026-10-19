@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import providers, worker_report
-from app.dbmodels import Job, User, WorkerHeartbeat
+from app.dbmodels import Job, Project, User, WorkerHeartbeat
 from app.jobs import queue
 from app.security import hash_password
 from tests.conftest import requires_db
@@ -227,10 +227,18 @@ def test_the_queue_says_which_lane_nobody_serves_and_only_admins_see_workers(db,
     _beat(db, "io-1", IO, separation=False)
     queue.enqueue("export", project_id=None)
 
+    # A job of nobody's project is not the editor's to be told about.
+    body = client.get("/jobs/queue", headers=editor).json()
+    assert body["unserved_lanes"] == []
+    alice = db.query(User).filter_by(username="alice").one()
+    mine = Project(owner_id=alice.id, name="a", doc={})
+    db.add(mine)
+    db.commit()
+    queue.enqueue("export", project_id=mine.id)
     body = client.get("/jobs/queue", headers=editor).json()
     assert body["unserved_lanes"] == ["heavy"]
     # Names of machines and commits are an operator's business.
-    assert "workers" not in body
+    assert "workers" not in body and "lanes" not in body
 
     stats = client.get("/admin/jobs/stats", headers=admin).json()["queue"]
     assert stats["unserved_lanes"] == ["heavy"]

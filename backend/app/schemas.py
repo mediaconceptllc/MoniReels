@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from app.ai.schema import MAX_SHORT_COUNT, MAX_YOUTUBE_COUNT
 
@@ -381,7 +381,16 @@ class UpdateTranscriptIn(BaseModel):
 
 
 class SelectRangesIn(BaseModel):
-    """Build a timeline from explicit ranges — the "cut it myself" path."""
+    """Build a timeline from explicit ranges — the "cut it myself" path.
+
+    Finite numbers only. The JSON reader accepts NaN and Infinity, and NaN
+    fails every comparison the route makes (empty, negative, past the end),
+    so it reached the document and Postgres refused to store it: a 500
+    (audit INFO-1). These are the only unbounded floats a request carries;
+    every other one has a `ge`/`le`, which NaN already fails.
+    """
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     ranges: list[tuple[float, float]] = Field(min_length=1, max_length=200)
 

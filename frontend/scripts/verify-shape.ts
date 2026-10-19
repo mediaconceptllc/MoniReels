@@ -57,7 +57,8 @@ import type {
   ProviderReadiness,
   ProviderSettings,
   ProviderStatus,
-  QueueStatus,
+  QueueStatusAll,
+  QueueStatusOwn,
   SubtitleFonts,
   SubtitleTemplate,
   TokenResponse,
@@ -82,7 +83,10 @@ const jobQueued = contracts.job_queued as Job;
 const latestJobs = contracts.latest_jobs as LatestJobs;
 const ttsVoices = contracts.tts_voices as TtsVoices;
 const projectVoices = contracts.project_voices as ProjectVoices;
-const queue = contracts.queue as QueueStatus;
+// Each answer against its own half of the union: asserted to the union, a
+// field changing type on one half would still match the other.
+const queue = contracts.queue as QueueStatusAll;
+const queueOwn = contracts.queue_own as QueueStatusOwn;
 const providerSettings = contracts.provider_settings as ProviderSettings;
 const readiness = contracts.readiness as ProviderReadiness;
 const brand = contracts.brand as BrandSettings;
@@ -283,12 +287,16 @@ const present: unknown[] = [
   // an export ran long.
   raw.job_voiced.result.voice.beds_separated, raw.job_voiced.result.voice.bed_seconds,
   raw.job_voiced.result.voice.beds_cached,
-  raw.queue.counts, raw.queue.waiting, raw.queue.live_workers, raw.queue.stalled,
-  raw.queue.worker_seen_at,
+  raw.queue.scope, raw.queue.counts, raw.queue.waiting, raw.queue.live_workers,
+  raw.queue.stalled, raw.queue.worker_seen_at,
   // Per lane: a render pool down beside a healthy I/O pool, which `stalled`
   // cannot see.
   raw.queue.lanes.map((l) => [l.lane, l.runnable, l.workers, l.served]),
   raw.queue.unserved_lanes,
+  // An editor's queue: their own work and nothing about the machines — but
+  // still whether a lane their work waits in has anybody to run it.
+  raw.queue_own.scope, raw.queue_own.counts, raw.queue_own.waiting, raw.queue_own.stalled,
+  raw.queue_own.unserved_lanes,
   // The disk block answers "will the next export fit" — the question that
   // used to require reading the worker's logs. Two machines, named: the
   // worker's disk is the one a render fills.
@@ -462,7 +470,7 @@ console.log(
 // to be checked, not to be read.
 void [
   token, me, projects, project, created, outputs, job, jobFailed, jobVoiced, jobQueued, latestJobs, ttsVoices,
-  projectVoices, queue,
+  projectVoices, queue, queueOwn,
   providerSettings, readiness, brand, brandEmpty, fonts, templateSaved, usage,
   providers, adminUsers, adminJobs, jobStats, writes, present,
 ];

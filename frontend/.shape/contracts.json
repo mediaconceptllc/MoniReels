@@ -1035,6 +1035,7 @@
       }
     ],
     "live_workers": 0,
+    "scope": "",
     "stalled": false,
     "unserved_lanes": [
       "heavy"
@@ -1047,6 +1048,13 @@
       "total_bytes": 0
     },
     "worker_seen_at": 0.0
+  },
+  "queue_own": {
+    "counts": {},
+    "scope": "",
+    "stalled": false,
+    "unserved_lanes": [],
+    "waiting": 0
   },
   "ranges_selected": {
     "clips": 0

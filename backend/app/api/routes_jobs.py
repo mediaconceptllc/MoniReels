@@ -102,11 +102,20 @@ def queue_status(
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
-    """Queue depth plus free scratch space.
+    """Queue depth plus free scratch space — for the admin; an editor's own
+    jobs for everyone else.
 
     Both answer questions that otherwise need a look at the server logs:
     "why has my job not started" is usually another project's long render,
     and "why did the export fail" is often a full disk.
+
+    Those are the operator's questions. Every editor used to read the whole
+    system's job counts, its live workers and both machines' disks — how
+    busy the service is and how full its disks are, which no editor can act
+    on (audit INFO-1). An editor's question is about their own work: is it
+    waiting, and is anything alive to do it. `scope` says which answer this
+    is; the machine-level keys are absent from an editor's, not null, so
+    nothing reads a missing disk as an empty one.
 
     The disk is named by MACHINE. This used to be one `disk`, measured here —
     on the API, which renders nothing and shares no filesystem with the
@@ -117,8 +126,21 @@ def queue_status(
     """
     from app import worker_report
 
+    if not principal.is_admin:
+        own = queue.queue_overview(db=db, owner_id=principal.id)
+        return {
+            "scope": "own",
+            "counts": own["counts"],
+            "waiting": own["waiting"],
+            "stalled": own["stalled"],
+            # Lanes the editor's own waiting work is in with nobody to run
+            # them: which kind of work is stuck, not which machine.
+            "unserved_lanes": own["unserved_lanes"],
+        }
+
     # The request's own session: `current_user` already holds its connection.
     overview = queue.queue_overview(db=db)
+    overview["scope"] = "all"
     overview["api_disk"] = disk_report()
     report = worker_report.read(db)
     overview["worker_disk"] = (

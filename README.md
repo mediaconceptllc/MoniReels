@@ -91,6 +91,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 createdb monireels && createdb monireels_test
 # JWT_SECRET нь 32 байтаас богино бол API асахгүй.
 export DATABASE_URL=postgresql://localhost/monireels JWT_SECRET=dev-secret-at-least-32-bytes-long
+# /docs, /redoc, /openapi.json зөвхөн ENVIRONMENT=development (dev, local)
+# үед нээгдэнэ; бусад бүх орчинд (production анхдагч) 404.
+export ENVIRONMENT=development
 .venv/bin/alembic upgrade head
 .venv/bin/python -m app.main            # API  → :8000/docs
 .venv/bin/python -m app.worker          # Worker (тусдаа терминал!)

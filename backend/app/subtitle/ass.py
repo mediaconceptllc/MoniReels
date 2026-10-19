@@ -31,6 +31,14 @@ def hex_to_ass_color(hex_color: str, alpha: int = 0) -> str:
 
 
 def _escape_ass_text(text: str) -> str:
+    r"""One Dialogue line's text, safe to write as one line.
+
+    Every line break becomes ASS's own \N — including \r\n and a lone \r,
+    which text pasted from Windows or an old Mac carries. Only \n used to be
+    converted, so a \r stayed raw inside the event, and a reader that ends
+    lines at \r cut the event there and dropped the rest (audit INFO-1).
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return text.replace("\\", r"\\").replace("\n", r"\N").replace("{", r"\{").replace("}", r"\}")
 
 

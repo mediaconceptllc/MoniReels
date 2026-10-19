@@ -533,20 +533,37 @@ export interface WorkerInfo {
   disk: { free_bytes: number; total_bytes: number; min_free_bytes: number } | null;
 }
 
-export interface QueueStatus {
+/** What both answers to /jobs/queue carry. Whose jobs they count is
+ *  `scope`: the whole system's for an admin, the caller's own projects'
+ *  for an editor. */
+interface QueueCounts {
   counts: Record<string, number>;
   waiting: number;
+  /** Runnable work waiting and nothing alive to do it — the worker service
+   *  is down. For an editor, only when the waiting work is theirs. */
+  stalled: boolean;
+  /** Lanes with runnable work and no live worker to run it — a render pool
+   *  down beside a healthy I/O pool, which `stalled` cannot see. For an
+   *  editor, only lanes their own waiting work is in. */
+  unserved_lanes: Lane[];
+}
+
+/** An editor's queue: their own work and nothing about the machines. How
+ *  busy the service is and how full its disks are is the operator's
+ *  business, and no editor can act on it (audit INFO-1). */
+export interface QueueStatusOwn extends QueueCounts {
+  scope: "own";
+}
+
+/** The admin's queue: every job, the live workers and both disks. */
+export interface QueueStatusAll extends QueueCounts {
+  scope: "all";
   live_workers: number;
   /** When a worker last reported itself alive, busy or not; null before any
    *  worker running this code has. */
   worker_seen_at: number | null;
-  /** Work is waiting and nothing alive is doing it — the worker service is
-   *  down. The single most common cause of "my job never starts". */
-  stalled: boolean;
+  /** Each lane: its runnable work and how many live workers run it. */
   lanes: QueueLane[];
-  /** Lanes with runnable work and no live worker to run it — a render pool
-   *  down beside a healthy I/O pool, which `stalled` cannot see. */
-  unserved_lanes: Lane[];
   /** The API container's own disk. It renders nothing, so this is NOT the
    *  disk an export fills — it used to be shown as if it were. */
   api_disk: {
@@ -564,6 +581,8 @@ export interface QueueStatus {
     measured_at: number;
   } | null;
 }
+
+export type QueueStatus = QueueStatusAll | QueueStatusOwn;
 
 /** One account as the admin's users screen lists it. */
 export interface AdminUser {
