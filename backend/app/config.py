@@ -169,10 +169,31 @@ class Settings(BaseSettings):
     elevenlabs_stt_usd_per_minute: float | None = Field(default=None, ge=0)
     elevenlabs_tts_usd_per_1k_chars: float | None = Field(default=None, ge=0)
 
+    # ---- What one account may put on the shared queue (app.quotas) -----
+    # The lanes are system-wide — one render, one paid call at a time — so
+    # without these one account, or one stolen password, could queue
+    # twenty-five exports and hold every other producer behind them, or run
+    # an unbounded provider bill (the audit measured both). Generous on
+    # purpose: an editor working normally never meets them. Admins are
+    # exempt. 0 turns a limit off.
+    #: Queued + running jobs per account (imports excluded: they follow an
+    #: upload, and the project limits below already bound uploads).
+    quota_active_jobs: int = Field(default=10, ge=0)
+    #: Of those, the PAID kinds (transcribe, suggest, translate).
+    quota_active_paid_jobs: int = Field(default=3, ge=0)
+    quota_projects_per_hour: int = Field(default=30, ge=0)
+    quota_projects_total: int = Field(default=500, ge=0)
+    #: Month-to-date KNOWN spend (USD, the usage ledger) at which an account's
+    #: next paid job is refused. Unset = no cap. Speech without a configured
+    #: rate above is recorded at an unknown price and cannot count toward it —
+    #: set those rates for the cap to see speech at all.
+    quota_monthly_usd: float | None = Field(default=None, ge=0)
+
     @field_validator(
         "duudlaga_usd_per_minute",
         "elevenlabs_stt_usd_per_minute",
         "elevenlabs_tts_usd_per_1k_chars",
+        "quota_monthly_usd",
         mode="before",
     )
     @classmethod
