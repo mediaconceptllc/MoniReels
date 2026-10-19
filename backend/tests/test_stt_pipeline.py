@@ -192,6 +192,36 @@ async def test_full_run_produces_absolute_timestamps(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_between_chunks_says_how_many_were_transcribed(tmp_path, monkeypatch):
+    """Same report as the pause-chunking path: the chunks before the cancel
+    are paid for and kept for the next run, and the job says how many."""
+    from app.audio.vad_chunking import group_vad_segments_into_chunks
+    from app.jobs.cancel import JobCancelled
+
+    speech = [(0.0, 10.0), (30.0, 40.0), (60.0, 70.0)]
+    _with_vad(monkeypatch, speech)
+
+    async def _extract(wav_path, segments, out_path):
+        out_path.write_bytes(b"chunk")
+
+    monkeypatch.setattr(pipeline_mod, "extract_voice_only_wav", _extract)
+
+    class CanceledOnTheSecond(_FakeSttClient):
+        async def transcribe_chunk_text(self, chunk_wav_path):
+            if self.chunk_calls:
+                raise JobCancelled()
+            return await super().transcribe_chunk_text(chunk_wav_path)
+
+    client = CanceledOnTheSecond(["эхний"])
+    client.max_audio_sec = 12.0  # one VAD segment per request chunk
+    total = len(group_vad_segments_into_chunks(speech, max_chunk_sec=client.max_audio_sec))
+    assert total == 3
+    with pytest.raises(JobCancelled) as stopped:
+        await _run(client, tmp_path)
+    assert stopped.value.detail == {"chunks_done": 1, "chunks_total": 3}
+
+
+@pytest.mark.asyncio
 async def test_source_audio_is_never_modified(tmp_path, monkeypatch):
     _with_vad(monkeypatch, [])
     audio = tmp_path / "audio.wav"

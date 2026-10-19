@@ -33,6 +33,7 @@ from pathlib import Path
 import httpx
 
 from app import metering
+from app.jobs import cancel
 from app.models import Segment, Transcript
 from app.stt.base import SttProvider
 from app.stt.chunking import text_to_transcript
@@ -103,6 +104,8 @@ class ElevenLabsSttClient(SttProvider):
         if self._config.language:
             data["language_code"] = self._config.language
 
+        # The billed request's gate (app.jobs.cancel).
+        cancel.check()
         with wav_path.open("rb") as fh:
             response = await self._client.post(
                 url,

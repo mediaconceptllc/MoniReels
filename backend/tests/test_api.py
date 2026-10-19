@@ -703,12 +703,21 @@ def test_only_a_job_that_stopped_short_is_retried(client, db):
     canceled = _settled(db, row.id, "export", "canceled", created=now - 9, finished=now - 1,
                         elapsed=4.0, payload={"pick": {"shorts": ["s1"]}})
     canceled.cancel_requested = True
+    history = [{"attempt": 1, "outcome": "requeued", "error": "disk full"},
+               {"attempt": 2, "outcome": "canceled"}]
+    canceled.history = history
+    # Left over from an automatic retry the job never reached.
+    canceled.available_at = now + 600
     db.commit()
+    listed = client.get("/admin/jobs?state=canceled", headers=headers).json()["jobs"]
+    assert [j["history"] for j in listed] == [history]
     assert client.post(f"/admin/jobs/{canceled.id}/retry", headers=headers).json() == {"requeued": True}
 
     db.expire_all()
     again = db.get(Job, canceled.id)
     assert again.state == "queued" and again.attempts == 0 and again.finished_at is None
+    # A person asked for it now; and the attempts before this one stay on it.
+    assert again.available_at is None and again.history == history
     # Left set, the run this starts would read it and stop on its first tick.
     assert again.cancel_requested is False
     # The handler's input survives; the cancelled run's output does not.

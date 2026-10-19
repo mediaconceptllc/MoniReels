@@ -178,6 +178,16 @@ class Job(Base):
     created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
     finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # When the current (or last) attempt was claimed. `created_at` is when it
+    # was asked for, which for a retried job can be an hour earlier.
+    started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # A retry waits out its backoff until then (app.jobs.queue.backoff_sec);
+    # NULL is "now". claim() skips a row whose time has not come.
+    available_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # One entry per attempt that ended — when it ran, how it ended, the error
+    # — because `error` and `finished_at` hold only the latest and the next
+    # attempt overwrites them (app.jobs.queue._close_attempt).
+    history: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
 Index("ix_jobs_claimable", Job.state, Job.priority, Job.created_at)
@@ -222,6 +232,33 @@ class SubtitleTemplate(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     style: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
+
+
+class SttChunk(Base):
+    """One chunk of speech already transcribed — and paid for — by a
+    transcription that has not finished (app.stt.chunk_cache).
+
+    A transcription bills per chunk and is not retried, so one that stopped
+    at chunk 31 of 40 (canceled, a deploy, chunk 32 refused) used to throw 31
+    paid answers away, and the next run bought them again. Keyed by the
+    chunk's own bytes: the same audio cut the same way is the same request.
+
+    Deleted when the transcription completes — the transcript then holds the
+    text, and a deliberate re-run must hear the audio afresh — and with the
+    project.
+    """
+
+    __tablename__ = "stt_chunks"
+
+    project_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    # provider|model|language: another recogniser's answer is not this one's.
+    variant: Mapped[str] = mapped_column(String(200), primary_key=True)
+    # sha256 of the chunk file as it was cut, before any upload encoding.
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     created_at: Mapped[float] = mapped_column(Float, nullable=False, default=time.time)
 
 

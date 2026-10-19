@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import httpx
 
 from app import metering
+from app.jobs import cancel
 from app.utils import provider_errors
 from app.utils.logging import get_logger
 
@@ -174,6 +175,9 @@ class ElevenLabsTts:
         }
         attempt = 0
         while True:
+            # Every billed request passes here, a busy-retry too
+            # (app.jobs.cancel): a canceled export buys no more lines.
+            cancel.check()
             response = await self._client.post(
                 url,
                 params={"output_format": OUTPUT_FORMAT},

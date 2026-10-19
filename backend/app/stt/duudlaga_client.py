@@ -35,8 +35,11 @@ from typing import TypeVar
 import httpx
 
 from app import metering
+from app.jobs import cancel
+from app.jobs.cancel import JobCancelled
 from app.models import Transcript
 from app.stt.base import SttProvider
+from app.stt.chunk_cache import ChunkCache, digest_of
 from app.stt.chunking import (
     TARGET_CHUNK_MIN_SEC,
     ChunkingError,
@@ -225,6 +228,16 @@ class DuudlagaClient(SttProvider):
         # upload there is no reason to spend an encode and a round trip on
         # every remaining chunk to be told the same thing 54 more times.
         self._send_compressed = bool(config.upload_bitrate)
+        # Set by the worker for a project's transcription (app.stt.chunk_cache):
+        # chunks an earlier, unfinished run already paid for are read back
+        # instead of bought again. None outside a job.
+        self.chunk_cache: ChunkCache | None = None
+
+    @property
+    def variant(self) -> str:
+        """Which recogniser answers — the part of a cached chunk's key that is
+        not the audio: another model's or language's text is not this one's."""
+        return f"duudlaga|{self._config.model}|{self._config.language}"
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -242,9 +255,22 @@ class DuudlagaClient(SttProvider):
         Returns "" when the API reports `no_speech`. This is the single
         network primitive both this class's own pause chunking and the VAD
         pipeline in app.stt.pipeline build on, so neither has to know the
-        wire format or the error contract.
+        wire format or the error contract — and the one place a chunk an
+        unfinished run already bought is read back rather than bought again.
         """
-        return await self._with_retry(self._post_chunk, chunk_wav_path)
+        cache = self.chunk_cache
+        if cache is None:
+            return await self._with_retry(self._post_chunk, chunk_wav_path)
+        digest = digest_of(chunk_wav_path)
+        kept = await asyncio.to_thread(cache.get, digest)
+        if kept is not None:
+            return kept
+        text = await self._with_retry(self._post_chunk, chunk_wav_path)
+        # The moment it is paid for, before the next chunk: what stops this run
+        # after it — a cancel, a deploy, a later chunk refused — must not cost
+        # this one a second time.
+        await asyncio.to_thread(cache.put, digest, text)
+        return text
 
     async def transcribe(self, wav_path: Path) -> Transcript:
         """Whole file in, Transcript out.
@@ -285,6 +311,9 @@ class DuudlagaClient(SttProvider):
                     # about.
                     if fatal is not None:
                         raise _RunAborted
+                    # And before the cut: a canceled job's waiting chunks
+                    # stop here, not one ffmpeg run later at the upload.
+                    cancel.check()
                     logger.info(
                         "Sending chunk %d/%d (%.1f-%.1fs)", i + 1, len(boundaries), start, end
                     )
@@ -325,6 +354,14 @@ class DuudlagaClient(SttProvider):
                     status=fatal.status,
                     code=fatal.code,
                 ) from fatal
+
+            if any(isinstance(o, JobCancelled) for o in settled):
+                # Named with how far it got: the chunks that came back are paid
+                # for, and kept (see transcribe_chunk_text) for the next run.
+                raise JobCancelled({
+                    "chunks_done": sum(1 for o in settled if not isinstance(o, BaseException)),
+                    "chunks_total": len(boundaries),
+                })
 
             results: list[tuple[float, Transcript]] = []
             silent = 0
@@ -475,6 +512,9 @@ class DuudlagaClient(SttProvider):
     async def _post_file(
         self, path: Path, content_type: str, *, seconds: float = 0.0, skip_no_speech: bool = True
     ) -> str:
+        # The gate every billed upload passes, retries and fallbacks included
+        # (app.jobs.cancel): a canceled job sends nothing more.
+        cancel.check()
         url = f"{self._config.base_url.rstrip('/')}{TRANSCRIBE_PATH}"
         files = {"file": (path.name, path.read_bytes(), content_type)}
         # The documented request carries only the file. `model` is sent only

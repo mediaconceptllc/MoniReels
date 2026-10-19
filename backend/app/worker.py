@@ -34,7 +34,7 @@ from app.ai.translate import translate_transcript
 from app.audio import dub_bed
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
-from app.jobs import queue
+from app.jobs import cancel, queue
 from app.jobs.kinds import MAX_ATTEMPTS, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
 from app.languages import (
@@ -48,6 +48,7 @@ from app.languages import (
 )
 from app.models import Suggestions, Transcript, VideoMeta
 from app.store import ProjectNotFound, get_row, load, save
+from app.stt import chunk_cache
 from app.stt.factory import build_client as build_stt_client
 from app.stt.factory import for_language as stt_for_language
 from app.stt.pipeline import separation_available, transcribe_audio
@@ -206,6 +207,14 @@ async def handle_transcribe(handle: JobHandle) -> dict:
     # Heard in the language it is spoken in — see stt.factory.for_language.
     settings = stt_for_language(settings, project.language)
     client = build_stt_client(settings)
+    # A client that sends chunk by chunk reads back what an unfinished run of
+    # this project already paid for (app.stt.chunk_cache), and keeps each new
+    # answer the moment it arrives.
+    cache = None
+    variant = getattr(client, "variant", None)
+    if variant is not None:
+        cache = chunk_cache.ChunkCache(_project_id(handle), variant)
+        client.chunk_cache = cache
     try:
         async def on_progress(p: float) -> None:
             await handle.set_progress(0.1 + p * 0.85, stage="transcribing", message="Transcribing speech")
@@ -229,13 +238,20 @@ async def handle_transcribe(handle: JobHandle) -> dict:
         project = load(db, _project_id(handle), for_update=True)
         project.transcript = transcript
         save(db, project)
+        # The transcript holds their text now, and a deliberate re-run must
+        # hear the audio afresh rather than be handed this run's answers.
+        chunk_cache.clear(db, project.id)
 
-    return {
+    out = {
         "segments": len(transcript.segments),
         "characters": len(transcript.full_text),
         "timings_estimated": transcript.timings_estimated,
         "srt_key": srt_key,
     }
+    # Chunks an earlier, unfinished run had paid for and this one read back.
+    if cache is not None and cache.hits:
+        out["chunks_reused"] = cache.hits
+    return out
 
 
 def _suggest_counts(payload: dict | None, duration_sec: float) -> tuple[int, int]:
@@ -325,6 +341,8 @@ async def _localize(client, suggestions: Suggestions) -> tuple[Suggestions, int]
     """
     try:
         return await localize_suggestions(client, suggestions)
+    except JobCancelled:
+        raise
     except Exception:  # noqa: BLE001 - the ideas are paid for; keep them whatever this does
         logger.exception("Could not translate the suggestion texts; they stay as the model wrote them")
         return suggestions, 0
@@ -397,7 +415,9 @@ async def handle_translate(handle: JobHandle) -> dict:
     finally:
         await client.aclose()
 
-    handle.raise_if_cancelled()
+    # A cancel is honoured AFTER the fold, not before it: the lines that came
+    # back are paid for, and a re-run without them would buy them again. The
+    # job still ends canceled, saying how many it kept.
 
     # Folded onto the transcript as it is NOW, not as it was read. A run takes
     # minutes, and in that time the producer may correct an English line
@@ -423,6 +443,8 @@ async def handle_translate(handle: JobHandle) -> dict:
             applied += 1
         save(db, project)
 
+    if report.stopped or handle.cancel_requested:
+        raise JobCancelled({"lines_applied": applied, "lines_asked": report.asked})
     return {**report.to_dict(), "applied": applied, "kept_edits": kept, "scope": scope}
 
 
@@ -802,6 +824,9 @@ async def _run_job(job) -> None:
     settle = functools.partial(queue.finish, job.id, attempt=job.attempts)
     usage = llm_usage.start()
     meter = metering.start()
+    # Every paid request of this job checks this first (app.jobs.cancel). Set
+    # here, in the job's own task, so a cancel reaches only its own job.
+    cancel.watch(handle.raise_if_cancelled)
     beat = asyncio.create_task(_heartbeat_loop(handle))
     started = time.time()
     try:
@@ -823,8 +848,13 @@ async def _run_job(job) -> None:
             output["llm"] = usage.to_dict()
         await asyncio.to_thread(settle, state="done", output=output)
 
-    except JobCancelled:
-        await asyncio.to_thread(settle, state="canceled", output={"elapsed_sec": _elapsed(started)})
+    except JobCancelled as e:
+        output: dict = {"elapsed_sec": _elapsed(started)}
+        # How far it got before it stopped, when the stage knows: "7 of 40
+        # chunks done, kept" decides whether to run it again.
+        if e.detail:
+            output["stopped"] = e.detail
+        await asyncio.to_thread(settle, state="canceled", output=output)
     except OutOfSpace as e:
         logger.warning("Job %s (%s) deferred: %s", job.id, job.kind, e)
         await asyncio.to_thread(
@@ -843,16 +873,20 @@ async def _run_job(job) -> None:
     except Exception as e:  # noqa: BLE001 - a failing job must be recorded, not crash the loop
         logger.exception("Job %s (%s) failed", job.id, job.kind)
         last_attempt = job.no_retry or job.attempts >= MAX_ATTEMPTS or _retry_cannot_help(e)
-        await asyncio.to_thread(
-            settle,
-            state="failed" if last_attempt else "queued",
-            error=f"{type(e).__name__}: {e}",
-            # How long it ran before it broke. Recorded for every settlement,
-            # not just the successful one: "it failed after four minutes" and
-            # "it failed instantly" point at completely different causes, and
-            # the history could tell them apart only for jobs that worked.
-            output={"elapsed_sec": _elapsed(started)},
-        )
+        error = f"{type(e).__name__}: {e}"
+        # How long it ran before it broke. Recorded for every settlement, not
+        # just the successful one: "it failed after four minutes" and "it
+        # failed instantly" point at completely different causes, and the
+        # history could tell them apart only for jobs that worked.
+        output = {"elapsed_sec": _elapsed(started)}
+        if last_attempt:
+            await asyncio.to_thread(settle, state="failed", error=error, output=output)
+        else:
+            # The same job, back after a backoff, with this attempt kept in
+            # its history (queue.requeue).
+            await asyncio.to_thread(
+                queue.requeue, job.id, error=error, attempt=job.attempts, output=output
+            )
     finally:
         beat.cancel()
         # Before anything else here that could raise: this is the one record
