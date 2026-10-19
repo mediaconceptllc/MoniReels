@@ -158,7 +158,12 @@ def test_the_audio_map_tolerates_a_clip_with_no_sound():
 
 def test_the_logo_is_the_second_input_the_graph_refers_to():
     args = _args()
-    assert args[:4] == ["-i", "joined.mp4", "-i", "logo.png"]
+    inputs = [i for i, a in enumerate(args) if a == "-i"]
+    assert [args[i + 1] for i in inputs] == ["joined.mp4", "logo.png"]
+    # The logo is the admin's upload: opened as an image and nothing else.
+    from app.video.inputs import IMAGE_FORMATS, guard
+
+    assert args[inputs[1] - 4:inputs[1]] == guard(IMAGE_FORMATS)
     assert "[1:v]" in args[args.index("-filter_complex") + 1]
 
 

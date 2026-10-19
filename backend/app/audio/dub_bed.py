@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from app.utils.logging import get_logger
+from app.video.inputs import untrusted
 
 logger = get_logger(__name__)
 
@@ -126,7 +127,7 @@ async def read_range(ffmpeg: Path, source: Path, w: Window) -> bytes:
     """The window's sound as raw float32 stereo at the model's rate."""
     proc = await asyncio.create_subprocess_exec(
         str(ffmpeg), "-hide_banner", "-loglevel", "error",
-        "-ss", f"{w.start:.3f}", "-to", f"{w.end:.3f}", "-i", str(source),
+        "-ss", f"{w.start:.3f}", "-to", f"{w.end:.3f}", *untrusted(source),
         "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE), "-f", "f32le", "-",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
