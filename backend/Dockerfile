@@ -51,10 +51,13 @@ ARG INSTALL_DUB=0
 ARG DEMUCS_MODEL=htdemucs
 
 COPY requirements.txt requirements-dub.txt ./
-# The base image's own pip (24.0) carries advisories, and CI's pip-audit
-# reads every package in the image, pip included. Pinned like the rest, and
-# first: it is also the pip that installs everything below.
-RUN pip install --no-cache-dir pip==26.2.1 \
+# The base image's own pip (24.0) and setuptools (79.0.1) carry advisories,
+# and CI's pip-audit reads every package in the image, those included.
+# Pinned like the rest, and first: this pip installs everything below.
+# setuptools 82 removed pkg_resources; nothing here imports it, and the
+# worker image's Demucs smoke in CI (dora, openunmix and all) would fail if
+# something did.
+RUN pip install --no-cache-dir pip==26.2.1 setuptools==84.0.0 \
     && pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_DUB" = "1" ]; then pip install --no-cache-dir -r requirements-dub.txt; fi
 

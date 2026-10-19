@@ -303,13 +303,22 @@ jobs:
       # transitive ones included — checked against the advisory databases.
       # Blocking since the upgrade (audit DEP-1). An advisory that cannot be
       # fixed yet is let through BY NAME — `--ignore-vuln <ID>` on the line
-      # below, with a comment saying why and when to look again; none is
-      # today. The findings go to the job summary and to annotations.
+      # below, with a comment saying why and when to look again. The findings
+      # go to the job summary and to annotations.
+      #
+      # Let through today, one:
+      # - PYSEC-2025-194 (GHSA-rrmf-rvhw-rf47, CVE-2025-3000): memory
+      #   corruption in torch.jit.script, local only. Fixed in torch 2.13,
+      #   but torchaudio's last release (2.11.0) requires torch 2.11 exactly
+      #   and Demucs imports torchaudio. Neither app/ nor Demucs calls
+      #   torch.jit (checked 2026-10-19). Look again when torchaudio or
+      #   Demucs releases, or Demucs no longer needs torchaudio.
       - name: No known advisory in the worker image
         run: |
           docker run --rm monireels-dub-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
           status=0
           pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
+            --ignore-vuln PYSEC-2025-194 --ignore-vuln GHSA-rrmf-rvhw-rf47 \
             --progress-spinner off -f json -o /tmp/audit.json || status=$?
           python3 .github/scripts/pip_audit_report.py /tmp/audit.json monireels-dub-ci:latest || status=$?
           exit $status
