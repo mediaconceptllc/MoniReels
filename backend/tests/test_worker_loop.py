@@ -97,7 +97,7 @@ async def test_the_loop_keeps_claiming_while_housekeeping_is_stuck(monkeypatch):
 
     claims = 0
 
-    def claim(_worker_id):
+    def claim(_worker_id, _lanes=None):
         nonlocal claims
         claims += 1
         if claims >= 3:
