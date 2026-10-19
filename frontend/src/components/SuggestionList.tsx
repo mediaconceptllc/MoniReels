@@ -106,9 +106,13 @@ export function SuggestionList({
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* aria-pressed on every toggle here: drawn as ticks, they were
+            announced as plain buttons, so "selected" or not was visible
+            and nothing else (audit A11Y-2). */}
         <button
           type="button"
           onClick={toggleAll}
+          aria-pressed={allPicked}
           className={`${TAP} flex items-center gap-2.5 text-sm text-ink-2 hover:text-ink`}
         >
           <Tick on={allPicked} />
@@ -130,9 +134,9 @@ export function SuggestionList({
 
       <section className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">
-          <h3 className="font-display text-base font-semibold">
+          <h2 className="font-display text-base font-semibold">
             Богино видео <span className="text-ink-3">({suggestions.shorts.length})</span>
-          </h3>
+          </h2>
           <Shortfall requested={suggestions.requested_shorts} got={suggestions.shorts.length} />
         </div>
         <div className="grid gap-3 lg:grid-cols-3">
@@ -148,6 +152,7 @@ export function SuggestionList({
                 <button
                   type="button"
                   onClick={() => toggleShort(short.id)}
+                  aria-pressed={on}
                   className={`${TAP} flex items-start gap-2.5 py-1 text-left`}
                 >
                   <span className="mt-0.5">
@@ -210,9 +215,9 @@ export function SuggestionList({
       {(suggestions.youtube.length > 0 || (suggestions.requested_youtube ?? 0) > 0) && (
         <section className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
-            <h3 className="font-display text-base font-semibold">
+            <h2 className="font-display text-base font-semibold">
               YouTube хураангуй <span className="text-ink-3">({suggestions.youtube.length})</span>
-            </h3>
+            </h2>
             <Shortfall requested={suggestions.requested_youtube} got={suggestions.youtube.length} />
           </div>
           <div className="grid gap-3 lg:grid-cols-3">
@@ -226,6 +231,7 @@ export function SuggestionList({
                   <button
                     type="button"
                     onClick={() => togglePlan(index)}
+                    aria-pressed={on}
                     className={`${TAP} flex items-start gap-2.5 py-1 text-left`}
                   >
                     <span className="mt-0.5">

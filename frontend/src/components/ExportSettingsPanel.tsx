@@ -11,7 +11,8 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { errorMessage } from "@/lib/auth";
+import { errorMessage, useAuth } from "@/lib/auth";
+import { brandMissing, useBrandAvailability } from "@/lib/brand";
 import { LANGUAGE_LABELS } from "@/lib/format";
 import type { ExportSettings, LogoPosition, SourceLanguage, SpeakerSummary } from "@/lib/types";
 import { SpeakerVoices } from "@/components/SpeakerVoices";
@@ -79,6 +80,8 @@ export function ExportSettingsPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const brand = useBrandAvailability();
+  const isAdmin = useAuth().user?.role === "admin";
 
   const dirty = JSON.stringify(canonical(draft)) !== JSON.stringify(canonical(settings));
 
@@ -171,19 +174,39 @@ export function ExportSettingsPanel({
         <Checkbox checked={draft.write_srt} onChange={(on) => update("write_srt", on)}>
           .srt файл тусад нь гаргах
         </Checkbox>
+        {/* A choice with no file behind it cannot be turned ON — but one
+            already on stays switchable OFF, or it could never be undone. */}
         <Checkbox
           checked={draft.logo.enabled}
+          disabled={!!brandMissing(brand?.logo, "Лого", isAdmin) && !draft.logo.enabled}
           onChange={(on) => update("logo", { ...draft.logo, enabled: on })}
         >
           Лого тавих
         </Checkbox>
-        <Checkbox checked={draft.use_intro} onChange={(on) => update("use_intro", on)}>
+        <Checkbox
+          checked={draft.use_intro}
+          disabled={!!brandMissing(brand?.intro, "Эхлэлийн видео", isAdmin) && !draft.use_intro}
+          onChange={(on) => update("use_intro", on)}
+        >
           Эхлэлийн видео залгах
         </Checkbox>
-        <Checkbox checked={draft.use_outro} onChange={(on) => update("use_outro", on)}>
+        <Checkbox
+          checked={draft.use_outro}
+          disabled={!!brandMissing(brand?.outro, "Төгсгөлийн видео", isAdmin) && !draft.use_outro}
+          onChange={(on) => update("use_outro", on)}
+        >
           Төгсгөлийн видео залгах
         </Checkbox>
       </div>
+
+      <BrandNotice
+        missing={{
+          logo: brandMissing(brand?.logo, "Лого", isAdmin),
+          intro: brandMissing(brand?.intro, "Эхлэлийн видео", isAdmin),
+          outro: brandMissing(brand?.outro, "Төгсгөлийн видео", isAdmin),
+        }}
+        on={{ logo: draft.logo.enabled, intro: draft.use_intro, outro: draft.use_outro }}
+      />
 
       {sourceLanguage && (draft.burn_subtitles || draft.write_srt) && (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -278,8 +301,8 @@ export function ExportSettingsPanel({
 
       {(draft.use_intro || draft.use_outro) && (
         <p className="text-xs text-ink-3">
-          Эхлэл/төгсгөлийн видеог админ ⚙️ Тохиргооноос оруулна. Нягтралт, кадрын давтамжийг нь
-          систем экспортод тааруулж, шилжилтийг өөрөө тавина. Хадмал тэдгээр дээр гарахгүй.
+          Нягтралт, кадрын давтамжийг нь систем экспортод тааруулж, шилжилтийг өөрөө тавина.
+          Хадмал тэдгээр дээр гарахгүй.
         </p>
       )}
 
@@ -336,10 +359,29 @@ export function ExportSettingsPanel({
 
       <div className="flex items-center gap-3">
         <Button tone="primary" onClick={save} loading={saving} disabled={!dirty}>
-          Тохиргоо хадгалах
+          Экспортын тохиргоо хадгалах
         </Button>
         {saved && !dirty && <Badge tone="fit">✓ Хадгалагдсан</Badge>}
       </div>
     </div>
   );
+}
+
+/** What a brand choice lacks. Louder where a choice is ON with nothing
+ *  behind it: that export would come out without it, and nothing else on
+ *  the page would say so. */
+function BrandNotice({
+  missing,
+  on,
+}: {
+  missing: Record<"logo" | "intro" | "outro", string | null>;
+  on: Record<"logo" | "intro" | "outro", boolean>;
+}) {
+  const keys = ["logo", "intro", "outro"] as const;
+  const onButMissing = keys.filter((k) => on[k] && missing[k]).map((k) => missing[k]);
+  if (onButMissing.length) {
+    return <Alert tone="warn">{onButMissing.join(" ")} Тэр хүртэл экспортод орохгүй.</Alert>;
+  }
+  const off = keys.map((k) => missing[k]).filter(Boolean);
+  return off.length ? <p className="text-xs text-ink-3">{off.join(" ")}</p> : null;
 }

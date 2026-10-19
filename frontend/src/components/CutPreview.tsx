@@ -14,7 +14,8 @@
  * video element the source tab uses, driven by a list.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useDialogFocus } from "@/lib/dialog";
 import { timecode } from "@/lib/format";
 import { Button } from "@/components/ui";
 
@@ -57,14 +58,12 @@ export function CutPreview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Esc closes, because this covers the page.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Esc closes, because this covers the page. Focus moves in on open — it
+  // stayed on the card underneath — and returns to «Урьдчилж үзэх» after.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  useDialogFocus(boxRef, { onClose, initial: closeRef });
 
   function onTime() {
     const video = videoRef.current;
@@ -90,33 +89,43 @@ export function CutPreview({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={title}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-4"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-2 sm:p-4"
       onClick={onClose}
     >
+      {/* Bounded by the screen, scrolling inside it. MEASURED at 844×390 (a
+          phone on its side): the box was 623px tall in a 390px viewport and
+          started at y = −116, so its title and «Хаах» were above the top
+          edge with no way to scroll to them. */}
       <div
-        className="flex w-full max-w-3xl flex-col gap-3 rounded-lg border border-rule bg-surface p-4"
+        ref={boxRef}
+        className="flex max-h-[calc(100dvh-1rem)] w-full max-w-3xl flex-col gap-3 overflow-y-auto rounded-lg border border-rule bg-surface p-4 sm:max-h-[calc(100dvh-2rem)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="font-display text-[15px] font-medium leading-snug text-ink">{title}</p>
+            <p id={titleId} className="font-display text-[15px] font-medium leading-snug text-ink">
+              {title}
+            </p>
             <p className="tabular mt-0.5 text-xs text-ink-3">
               {cuts.length} огтлол · нийт {Math.round(total)} сек
             </p>
           </div>
-          <Button tone="quiet" onClick={onClose}>
+          <Button ref={closeRef} tone="quiet" onClick={onClose}>
             Хаах
           </Button>
         </div>
 
+        {/* Height-bounded too: the cut list under it is what the producer
+            is judging, and a full-width 16:9 frame on a landscape phone is
+            taller than the screen on its own. */}
         <video
           ref={videoRef}
           src={sourceUrl}
           controls
           playsInline
           onTimeUpdate={onTime}
-          className="w-full rounded bg-black"
+          className="max-h-[55dvh] w-full rounded bg-black object-contain"
         />
 
         {/* Which cut is playing, and where it sits in the source. Both matter:

@@ -1,30 +1,50 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
 import { duration, relativeTime } from "@/lib/format";
-import { laneNames } from "@/lib/jobs";
-import type { ProjectSummary, QueueStatus } from "@/lib/types";
+import { JOB_LABELS, laneNames } from "@/lib/jobs";
+import { usePageTitle } from "@/lib/title";
+import type { LatestJob, ProjectSummary, QueueStatus } from "@/lib/types";
 import { Alert, Badge, Card, Empty, Loading, Skeleton, TAP } from "@/components/ui";
 import { NewProject } from "@/components/NewProject";
 import { Shell } from "@/components/Shell";
+
+/** How often the cards look again while something on them is running. */
+const LIVE_POLL_MS = 5000;
+
+const isActive = (job: LatestJob | undefined) =>
+  !!job && (job.state === "queued" || job.state === "running");
+
+function byProject(jobs: LatestJob[]): Record<string, LatestJob> {
+  return Object.fromEntries(jobs.map((job) => [job.project_id, job]));
+}
 
 export default function ProjectsPage() {
   const { user, loading: authLoading } = useRequireAuth();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [queue, setQueue] = useState<QueueStatus | null>(null);
+  const [latest, setLatest] = useState<Record<string, LatestJob>>({});
   const [error, setError] = useState<string | null>(null);
+  const latestRef = useRef(latest);
+  latestRef.current = latest;
+
+  usePageTitle("Төслүүд");
 
   const refresh = useCallback(async () => {
     try {
-      const [list, status] = await Promise.all([
+      const [list, status, jobs] = await Promise.all([
         api.listProjects(),
         api.queueStatus().catch(() => null),
+        // The cards' activity is extra: a failure here leaves them as they
+        // were, saying where each project got to.
+        api.latestJobs().catch(() => ({ jobs: [] })),
       ]);
       setProjects(list);
       setQueue(status);
+      setLatest(byProject(jobs.jobs));
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -34,6 +54,26 @@ export default function ProjectsPage() {
   useEffect(() => {
     if (user) void refresh();
   }, [user, refresh]);
+
+  // A card with live work follows it. When a job settles, the stage it
+  // moved the project to is news too, so the whole list is read again.
+  const anyActive = Object.values(latest).some(isActive);
+  useEffect(() => {
+    if (!anyActive) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = byProject((await api.latestJobs()).jobs);
+        const settled = Object.values(latestRef.current).some(
+          (job) => isActive(job) && !isActive(next[job.project_id]),
+        );
+        if (settled) void refresh();
+        else setLatest(next);
+      } catch {
+        /* the next tick tries again */
+      }
+    }, LIVE_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [anyActive, refresh]);
 
   if (authLoading || !user) {
     return (
@@ -50,6 +90,10 @@ export default function ProjectsPage() {
   return (
     <Shell>
       <div className="flex flex-col gap-6">
+        {/* The page had no h1: its first heading was the new-project card's
+            (axe `page-has-heading-one`; audit A11Y-3). */}
+        <h1 className="font-display text-2xl font-semibold tracking-tight">Төслүүд</h1>
+
         {/* Waiting work with nothing alive to do it means the worker service
             is down. Without this, the only symptom is a job that sits at 0%
             forever with no explanation anywhere in the interface. */}
@@ -71,7 +115,12 @@ export default function ProjectsPage() {
         <NewProject onCreated={() => void refresh()} />
 
         <section className="flex flex-col gap-3">
-          <h2 className="font-display text-base font-semibold">Төслүүд</h2>
+          <h2 className="font-display text-base font-semibold">
+            Бүх төсөл
+            {projects && projects.length > 0 && (
+              <span className="tabular text-ink-3"> ({projects.length})</span>
+            )}
+          </h2>
 
           {error && <Alert>{error}</Alert>}
 
@@ -136,8 +185,13 @@ export default function ProjectsPage() {
                         be read. The furthest stage reached is the answer to
                         "where is this project", which is the only question a
                         list card is asked. */}
-                    <div className="mt-auto flex items-center gap-2">
+                    <div className="mt-auto flex flex-wrap items-center gap-2">
                       <Badge tone={stateTone(project)}>{stateLabel(project)}</Badge>
+                      {/* What is happening to it, beside where it got to: a
+                          transcription running, or one that failed an hour
+                          ago, looked exactly like a project nobody had
+                          touched (audit UX-9). */}
+                      <JobBadge job={latest[project.id]} />
                       <span className="tabular text-xs text-ink-3">
                         {relativeTime(project.updated_at)}
                       </span>
@@ -204,4 +258,22 @@ function stateTone(p: ProjectSummary): "fit" | "accent" | "default" | "warn" | "
   if (p.import_failed) return "danger";
   if (p.has_video) return "default";
   return "warn";
+}
+
+/** The newest job, when it is worth a word: running, waiting, or the last
+ *  thing tried having failed. A finished or cancelled one says nothing the
+ *  stage badge does not. */
+function JobBadge({ job }: { job: LatestJob | undefined }) {
+  if (!job) return null;
+  const label = JOB_LABELS[job.kind] ?? job.kind;
+  if (job.state === "running") {
+    return (
+      <Badge tone="accent">
+        {label} · {Math.round(job.progress * 100)}%
+      </Badge>
+    );
+  }
+  if (job.state === "queued") return <Badge>{label} · дараалалд</Badge>;
+  if (job.state === "failed") return <Badge tone="danger">{label} амжилтгүй</Badge>;
+  return null;
 }

@@ -1079,14 +1079,20 @@ def provider_readiness(
     reachability probe. Someone who cannot change a setting still has to know
     why a button will not work, and that is all this says.
     """
-    from app import provider_settings, providers
+    from app import brand, provider_settings, providers
 
     settings = provider_settings.effective(db)
     return {
         "capabilities": [
             {"name": c.name, "label": c.label, "ready": c.ready, "blocked": c.blocked}
             for c in providers.describe(settings)
-        ]
+        ],
+        # Which brand files exist. The export panel offered the logo, the
+        # intro and the outro whether or not anything had been uploaded, and
+        # the worker skipped a missing one with a log line nobody reads — so
+        # "Лого тавих" could be ticked, saved, exported and silently absent.
+        # Whether, not what: the keys and URLs stay on the admin page.
+        "brand": {asset: bool(brand.get(db, asset)) for asset in brand.ASSETS},
     }
 
 

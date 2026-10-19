@@ -10,6 +10,9 @@ export default function GlobalError({ reset }: { error: Error; reset: () => void
   return (
     <html lang="mn">
       <body>
+        {/* Hoisted into <head> by React; a literal, like the rest of this
+            page — nothing here may depend on the app that just failed. */}
+        <title>Алдаа гарлаа · MoniReels</title>
         <main className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center gap-4 px-4 py-16">
           <h1 className="text-2xl font-semibold">Алдаа гарлаа</h1>
           <p className="text-sm text-ink-2">Програм ачаалах явцад алдаа гарлаа. Дахин оролдоно уу.</p>

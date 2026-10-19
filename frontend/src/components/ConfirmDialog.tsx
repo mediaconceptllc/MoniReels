@@ -16,8 +16,9 @@
  * afterwards.
  */
 
-import { useEffect, useRef } from "react";
+import { useId, useRef } from "react";
 import type { ReactNode } from "react";
+import { useDialogFocus } from "@/lib/dialog";
 import { Button } from "@/components/ui";
 
 export function ConfirmDialog({
@@ -46,34 +47,30 @@ export function ConfirmDialog({
   children?: ReactNode;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
 
   // Focus lands on the way OUT, never on the destructive button: a stray
-  // Enter must not delete a project.
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  // Enter must not delete a project. Tab stays inside, and closing puts it
+  // back on the button that opened this.
+  useDialogFocus(boxRef, { onClose: onCancel, initial: cancelRef });
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={title}
+      aria-labelledby={titleId}
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-4"
       onClick={onCancel}
     >
       <div
-        className="flex w-full max-w-md flex-col gap-4 rounded-lg border border-rule bg-surface p-5"
+        ref={boxRef}
+        className="flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-lg border border-rule bg-surface p-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="font-display text-base font-semibold text-ink [overflow-wrap:anywhere]">{title}</p>
+        <p id={titleId} className="font-display text-base font-semibold text-ink [overflow-wrap:anywhere]">
+          {title}
+        </p>
 
         {children}
 

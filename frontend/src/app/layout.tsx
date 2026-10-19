@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geologica, Golos_Text, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
+import { PRODUCT } from "@/lib/page-title";
 
 /*
  * Self-hosted at build time rather than linked from Google.
@@ -34,8 +35,11 @@ const mono = IBM_Plex_Mono({
   display: "swap",
 });
 
+// No `title` here. Each page names itself (lib/title), and a metadata title
+// is re-applied by the framework after the page has set its own — MEASURED:
+// the list, admin and profile tabs read "MoniReels" again a moment after
+// load. The plain <title> below is the fallback until a page says more.
 export const metadata: Metadata = {
-  title: "MoniReels",
   description: "Урт видеог богино хэмжээний видео болгон хувиргах студи",
 };
 
@@ -53,6 +57,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="mn" className={`${display.variable} ${body.variable} ${mono.variable}`}>
       <body>
+        {/* Hoisted into <head> by React. Static, so nothing re-renders it
+            over the name a page sets for itself. */}
+        <title>{PRODUCT}</title>
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
