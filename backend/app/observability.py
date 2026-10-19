@@ -26,8 +26,14 @@ import os
 import re
 import time
 import uuid
+from typing import TYPE_CHECKING
 
 from app.utils.logging import get_logger, job_id, job_kind, request_id
+
+if TYPE_CHECKING:
+    # Types only: the SDK stays an optional import at run time (see
+    # init_error_reports).
+    from sentry_sdk.types import Event, Hint
 
 logger = get_logger(__name__)
 
@@ -97,7 +103,7 @@ class ServerErrors:
 _SCRUBBED_HEADERS = {"authorization", "cookie", "x-api-key", "set-cookie"}
 
 
-def _before_send(event: dict, hint: dict) -> dict:
+def _before_send(event: Event, hint: Hint) -> Event | None:
     """Tag the event with the request or job it came from, and take out the
     headers that carry credentials whatever the SDK's own defaults are."""
     tags = event.setdefault("tags", {})
