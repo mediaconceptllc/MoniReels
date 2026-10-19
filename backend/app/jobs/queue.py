@@ -84,6 +84,12 @@ def _active_with_key(db: Session, dedupe_key: str) -> str | None:
     )
 
 
+def active_with_key(db: Session, dedupe_key: str) -> str | None:
+    """The live job holding `dedupe_key`, if any — what `enqueue` would hand
+    back instead of queueing (app.quotas admits such a click for free)."""
+    return _active_with_key(db, dedupe_key)
+
+
 # ---------------------------------------------------------------------------
 # Enqueue / read
 # ---------------------------------------------------------------------------

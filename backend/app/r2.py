@@ -229,6 +229,15 @@ def exists(key: str) -> bool:
     return head(key) is not None
 
 
+def object_size(key: str) -> int | None:
+    """The stored object's length in bytes, or None when it is not there."""
+    meta = head(key)
+    if meta is None:
+        return None
+    size = meta.get("ContentLength")
+    return int(size) if isinstance(size, int) else None
+
+
 def delete(key: str) -> None:
     settings = get_settings()
     _client_or_raise().delete_object(Bucket=settings.r2_bucket, Key=key)
