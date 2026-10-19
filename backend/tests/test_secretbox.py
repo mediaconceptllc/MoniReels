@@ -244,8 +244,13 @@ def test_every_change_is_audited_by_name_never_by_value(client, db, key):
     # Unchanged on the second save: nothing to record.
     client.put("/admin/settings", json={"openrouter_api_key": SECRET}, headers=headers)
 
-    rows = db.scalars(select(AuditLog).order_by(AuditLog.path)).all()
+    rows = db.scalars(select(AuditLog).order_by(AuditLog.path, AuditLog.id)).all()
+    # Two kinds of row: the request itself, with the status it got (every
+    # state-changing admin request is recorded — app.observability), and one
+    # per field that actually changed, which is what says WHICH key moved.
     assert [(r.user, r.method, r.path, r.status) for r in rows] == [
+        ("keeper", "PUT", "/admin/settings", 200),
+        ("keeper", "PUT", "/admin/settings", 200),
         ("keeper", "PUT", "/admin/settings/elevenlabs_tts_voice_id", 200),
         ("keeper", "PUT", "/admin/settings/openrouter_api_key", 200),
     ]
