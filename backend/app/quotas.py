@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.dbmodels import Job, Project, UsageEvent
 from app.jobs import queue
-from app.jobs.kinds import LANE_METERED, LANES
+from app.jobs.kinds import LANES, METERED_LANES
 from app.security import Principal
 
 # The first half of the two-key advisory lock: a namespace of its own, so a
@@ -38,7 +38,7 @@ LOCK_CLASS = 0x51_54  # "QT"
 # Imports follow an upload and are free; the project limits bound them.
 UNCAPPED_KINDS = frozenset({"import_video"})
 
-PAID_KINDS = frozenset(kind for kind, lane in LANES.items() if lane == LANE_METERED)
+PAID_KINDS = frozenset(kind for kind, lane in LANES.items() if lane in METERED_LANES)
 
 
 def _lock(db: Session, user_id: str) -> None:

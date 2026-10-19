@@ -28,6 +28,16 @@ def test_plan_transition_reduces_duration_when_too_long():
     assert plan.duration < 1.0
 
 
+def test_plan_transition_snapped_to_frames_stays_under_half_the_shortest_clip():
+    # 30-frame clips allow T < 15 frames. 0.49 s is 14.7 frames: rounding
+    # would make it 15 — the limit itself — so it goes down instead.
+    plan = plan_transition([1.0, 1.0, 1.0], requested_duration=0.49, fps=30.0)
+    assert plan.reduced is False
+    assert plan.duration == 14 / 30
+    # Away from the limit it is the nearest frame.
+    assert plan_transition([2.0, 2.0], requested_duration=0.49, fps=30.0).duration == 15 / 30
+
+
 def test_plan_transition_requires_at_least_two_clips():
     with pytest.raises(ValueError):
         plan_transition([10.0], requested_duration=1.0)
