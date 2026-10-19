@@ -15,7 +15,8 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -53,7 +54,18 @@ from app.schemas import (
     UploadCompleteOut,
 )
 from app.security import Principal, current_user
-from app.store import ProjectNotFound, get_row, list_for_owner, load, save, summary, to_domain
+from app.store import (
+    SETTINGS_FIELDS,
+    ProjectNotFound,
+    get_row,
+    list_for_owner,
+    load,
+    load_settings,
+    save,
+    save_settings,
+    summary,
+    to_domain,
+)
 from app.timeline.builder import build_clips_from_ranges
 from app.tts.voiceover import speakers
 from app.utils.logging import get_logger
@@ -66,6 +78,11 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 # (config.job_keep_days) is the other, harder bound, and the payload says so
 # rather than letting a short history read as a quiet project.
 JOB_HISTORY_LIMIT = 30
+
+#: What PATCH /projects/{id} answers with: every field it can change, as
+#: saved, and when. The rest of the document is unchanged by it and the
+#: client already has it.
+PATCH_ANSWER = {"id", "name", "updated_at", *SETTINGS_FIELDS}
 
 
 def _not_found(project_id: str) -> HTTPException:
@@ -223,19 +240,42 @@ def list_projects(
     return items
 
 
+def _json_object(document: str, extra: dict) -> Response:
+    """One JSON object: an already serialized document plus a few more keys.
+
+    The document is serialized by pydantic in one native pass. It used to go
+    through `model_dump` and then FastAPI's `jsonable_encoder`, which walks
+    every value of a 4 MB transcript in Python before `json.dumps` walks it
+    again — half of a 762 ms read of a 2-hour project (audit PERF-10). The
+    added keys are small and go the ordinary way; none may be a document
+    field, or the object would name one key twice.
+    """
+    clash = extra.keys() & Project.model_fields.keys()
+    if clash:
+        raise ValueError(f"would repeat document fields: {sorted(clash)}")
+    tail = json.dumps(jsonable_encoder(extra), ensure_ascii=False, allow_nan=False,
+                      separators=(",", ":"))
+    if not (document.startswith("{") and document.endswith("}") and len(document) > 2):
+        raise ValueError("the document must serialize to a non-empty JSON object")
+    if not (tail.startswith("{") and tail.endswith("}")):
+        raise ValueError("the extra keys must serialize to a JSON object")
+    body = document if tail == "{}" else f"{document[:-1]},{tail[1:]}"
+    return Response(content=body.encode("utf-8"), media_type="application/json")
+
+
 @router.get("/{project_id}")
 def get_project(
     project_id: str,
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
-) -> dict:
+) -> Response:
     try:
         row = get_row(db, project_id, principal.id)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
     project = to_domain(row)
-    data = project.model_dump(mode="json")
+    data: dict = {}
     # Signed, short-lived, and regenerated on every read — a URL embedded in
     # a page the user leaves open would otherwise expire silently mid-session.
     data["media"] = {
@@ -254,7 +294,7 @@ def get_project(
     # client that worked it out for itself would be a second copy of the rule,
     # and the first change to either would put a number on the page that the
     # server then refuses.
-    duration = (data.get("video") or {}).get("duration_sec") or 0.0
+    duration = (project.video.duration_sec if project.video else 0.0) or 0.0
     shorts_max, youtube_max = count_limits(duration)
     shorts_default, youtube_default = default_counts(duration)
     data["suggest_limits"] = {
@@ -269,7 +309,7 @@ def get_project(
     # Who speaks, for the per-speaker voice picker: counted and quoted, since
     # a bare `speaker_1` identifies nobody.
     data["speakers"] = speakers(project.transcript.segments) if project.transcript else []
-    transcript = (data.get("transcript") or {}).get("full_text") or ""
+    transcript = (project.transcript.full_text if project.transcript else "") or ""
     data["spend"] = spend.view(
         db,
         project_id=project_id,
@@ -277,7 +317,7 @@ def get_project(
         characters=len(transcript),
         keep_days=get_settings().job_keep_days,
     )
-    return data
+    return _json_object(project.model_dump_json(), data)
 
 
 @router.patch("/{project_id}")
@@ -293,9 +333,16 @@ def update_project(
     process owns the file and destructive as soon as two tabs are open: the
     second save overwrites fields the first tab changed and this one never
     loaded. Only fields actually present in the request are applied.
+
+    Only the settings are read and written (store.load_settings): the
+    transcript never leaves Postgres for a change of `crf`. A document from
+    an older schema takes the whole-document path once, which migrates it.
     """
     try:
-        project = load(db, project_id, principal.id, for_update=True)
+        project = load_settings(db, project_id, principal.id)
+        whole = project is None
+        if project is None:
+            project = load(db, project_id, principal.id, for_update=True)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
@@ -319,9 +366,15 @@ def update_project(
                 value = current.model_copy(update=value)
             setattr(target, field, value)
 
-    save(db, project)
+    if whole:
+        save(db, project)
+    else:
+        save_settings(db, project)
     db.commit()
-    return project.model_dump(mode="json")
+    # What this route can change, as saved — not the whole document. It used
+    # to answer with all of it: 4 MB for a 2-hour transcript, encoded for a
+    # client that threw it away and read the project again (audit PERF-10).
+    return project.model_dump(mode="json", include=PATCH_ANSWER)
 
 
 @router.put("/{project_id}/transcript")
@@ -423,7 +476,7 @@ def delete_project(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     try:
-        row = get_row(db, project_id, principal.id)
+        row = get_row(db, project_id, principal.id, doc=False)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
@@ -920,7 +973,10 @@ def list_outputs(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> list[OutputOut]:
     try:
-        row = get_row(db, project_id, principal.id)
+        # Ownership and the outputs; the document stays in Postgres. The
+        # project page asks for this beside the project itself, and loading
+        # the document twice per page view doubled its cost.
+        row = get_row(db, project_id, principal.id, doc=False)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
 
@@ -955,7 +1011,7 @@ def delete_output(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
     try:
-        get_row(db, project_id, principal.id)
+        get_row(db, project_id, principal.id, doc=False)
     except ProjectNotFound as e:
         raise _not_found(project_id) from e
     out = db.get(Output, output_id)

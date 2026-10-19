@@ -127,7 +127,8 @@ def test_list_is_newest_first(db, owner):
 
 def test_summary_does_not_require_a_full_document(db, owner):
     """The list view must not pay to deserialize every transcript and
-    suggestion block it never shows."""
+    suggestion block it never shows: its flags are read in SQL (see
+    test_big_projects for the query that proves the document stays put)."""
     project = Project(name="s")
     project.video = _video()
     project.suggestions = Suggestions(
@@ -143,7 +144,8 @@ def test_summary_does_not_require_a_full_document(db, owner):
     row.video_key = "sources/x/source.mp4"
     db.commit()
 
-    result = summary(row)
+    (listed,) = list_for_owner(db, owner.id)
+    result = summary(listed)
     assert result["has_video"] is True
     assert result["has_suggestions"] is True
     assert result["has_transcript"] is False
