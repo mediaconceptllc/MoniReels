@@ -6,8 +6,10 @@
 import { useEffect } from "react";
 import { ErrorScreen } from "@/components/ErrorScreen";
 import { Button } from "@/components/ui";
+import { usePageTitle } from "@/lib/title";
 
 export default function PageError({ error, reset }: { error: Error; reset: () => void }) {
+  usePageTitle("Алдаа гарлаа");
   useEffect(() => {
     // Kept in the browser console for whoever is chasing it.
     console.error(error);

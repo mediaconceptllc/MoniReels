@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { errorMessage, useRequireAuth } from "@/lib/auth";
+import { keyState } from "@/lib/key-state";
+import { usePageTitle } from "@/lib/title";
 import type {
   BalanceRow,
   Capability,
@@ -63,31 +65,21 @@ const SECRETS: {
   },
 ];
 
-/** The live state of what this key switches on, beside the key itself.
- *
- *  The table further down already said all of this, and the operator who came
- *  here because something is not working had to read the field, scroll, find
- *  the matching row, and carry one back to the other. */
-function KeyState({
-  secret,
-  capabilities,
-  sttProvider,
-}: {
+/** The live state of what this key switches on, beside the key itself
+ *  (see lib/key-state for what each badge may claim). */
+function KeyState(props: {
   secret: (typeof SECRETS)[number];
   capabilities: Capability[];
   sttProvider: string;
+  stt: SttStatus | null;
 }) {
-  // Nothing is claimed when the status read failed — the keys are still
-  // editable, and a badge invented from no data is worse than no badge.
-  if (capabilities.length === 0) return null;
-
-  if (secret.sttProvider && sttProvider && secret.sttProvider !== sttProvider) {
-    return <Badge>Сонгогдоогүй</Badge>;
-  }
-  const capability = capabilities.find((c) => c.name === secret.capability);
-  if (!capability) return null;
-  if (capability.ready) return <Badge tone="fit">Ажиллаж байна</Badge>;
-  return <Badge tone="warn">Тохируулаагүй</Badge>;
+  const state = keyState(props.secret, props.capabilities, props.sttProvider, props.stt);
+  if (!state) return null;
+  return (
+    <span title={state.title}>
+      <Badge tone={state.tone}>{state.label}</Badge>
+    </span>
+  );
 }
 
 function sourceLabel(field: ProviderSettings[SecretName] | undefined): string {
@@ -217,6 +209,7 @@ export default function AdminPage() {
   // who IS signed in, so nobody ever sent the signed-out case anywhere.
   const { user, loading: authLoading } = useRequireAuth();
   const router = useRouter();
+  usePageTitle("Тохиргоо");
 
   const [settings, setSettings] = useState<ProviderSettings | null>(null);
   const [drafts, setDrafts] = useState<ProviderSettingsPatch>({});
@@ -382,6 +375,7 @@ export default function AdminPage() {
               {capabilities.length > 0 && (
                 <CapabilityTable
                   capabilities={capabilities}
+                  stt={stt}
                   sttProvider={sttProvider}
                   sttProviders={sttProviders}
                   onSttProvider={(name) => {
@@ -423,6 +417,7 @@ export default function AdminPage() {
                           secret={secret}
                           capabilities={capabilities}
                           sttProvider={sttProvider}
+                          stt={stt}
                         />
                       }
                     >

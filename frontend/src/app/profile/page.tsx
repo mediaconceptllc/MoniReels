@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { api, setToken } from "@/lib/api";
-import { useAuth, errorMessage } from "@/lib/auth";
+import { useRequireAuth, errorMessage } from "@/lib/auth";
 import { duration, relativeTime } from "@/lib/format";
+import { usePageTitle } from "@/lib/title";
 import type { ProjectSummary } from "@/lib/types";
-import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TAP, TextInput } from "@/components/ui";
+import { Alert, Badge, Button, Card, Field, Loading, Skeleton, TextInput, buttonClass } from "@/components/ui";
 import { Shell } from "@/components/Shell";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -15,9 +16,14 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 export default function ProfilePage() {
-  const { user, loading } = useAuth();
+  // Signed out, this was «Нэвтэрнэ үү.» on its own — no link, no way to the
+  // sign-in page but the address bar (audit UX-9). Every other signed-in
+  // page sends the visitor to sign in; this one now does too, and shows its
+  // own shape while it does.
+  const { user, loading } = useRequireAuth();
+  usePageTitle("Профайл");
 
-  if (loading) {
+  if (loading || !user) {
     return (
       <Shell>
         <Loading className="flex max-w-2xl flex-col gap-6">
@@ -31,14 +37,6 @@ export default function ProfilePage() {
       </Shell>
     );
   }
-  if (!user) {
-    return (
-      <Shell>
-        <Alert>Нэвтэрнэ үү.</Alert>
-      </Shell>
-    );
-  }
-
   return (
     <Shell>
       <div className="flex max-w-2xl flex-col gap-6">
@@ -78,8 +76,8 @@ export default function ProfilePage() {
                   Гадаад үйлчилгээний түлхүүр, брэндийн материал, хадмалын загвар.
                 </p>
               </div>
-              <Link href="/admin" className={`${TAP} inline-flex`}>
-                <Button>Нээх</Button>
+              <Link href="/admin" className={buttonClass()}>
+                Нээх
               </Link>
             </div>
           </Card>
@@ -136,8 +134,8 @@ function Work() {
         {/* An empty state with a way out of it. A link buried in the sentence
             would be the one target on this page too small to hit — and making
             THAT 44px tall would break the line it sits in. */}
-        <Link href="/" className={`${TAP} inline-flex`}>
-          <Button tone="primary">Эхний видеогоо оруулах</Button>
+        <Link href="/" className={buttonClass("primary")}>
+          Эхний видеогоо оруулах
         </Link>
       </Card>
     );

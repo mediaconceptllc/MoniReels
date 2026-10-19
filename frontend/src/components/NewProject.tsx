@@ -106,6 +106,11 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
           type="file"
           accept={ACCEPT}
           className="sr-only"
+          // Driven by «Видео сонгох» below, which is the one control a
+          // keyboard or screen reader meets. Left in the tab order it was an
+          // invisible, unnamed stop (axe `label`, critical; audit A11Y-2).
+          aria-hidden="true"
+          tabIndex={-1}
           onChange={(e) => pick(e.target.files?.[0] ?? null)}
         />
 
@@ -163,7 +168,7 @@ export function NewProject({ onCreated }: { onCreated: () => void }) {
               <span className="text-ink-2">Хуулж байна</span>
               <span className="tabular text-ink-3">{Math.round((progress ?? 0) * 100)}%</span>
             </div>
-            <ProgressBar value={progress ?? 0} />
+            <ProgressBar value={progress ?? 0} label="Видео хуулж байна" />
             <Button tone="quiet" className="self-start" onClick={() => abortRef.current?.()}>
               Цуцлах
             </Button>

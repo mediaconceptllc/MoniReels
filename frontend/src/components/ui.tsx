@@ -8,6 +8,7 @@ import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
+  Ref,
   SelectHTMLAttributes,
 } from "react";
 
@@ -41,6 +42,15 @@ const TONE_CLASS: Record<Tone, string> = {
   quiet: "bg-transparent text-ink-2 border-transparent hover:bg-surface-2",
 };
 
+/** A button's look, for the one thing that has to be a LINK and look like a
+ *  button: a download. `<a><Button/></a>` was two tab stops for one action
+ *  and an interactive element nested in another, which a screen reader
+ *  announces twice (axe `nested-interactive`; audit A11Y-3). The anchor
+ *  takes the classes instead, and `npm run check-ui` refuses the nesting. */
+export function buttonClass(tone: Tone = "default", className = ""): string {
+  return `${TAP} inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]} ${className}`;
+}
+
 /** Forwards its ref so a dialog can put focus on the way OUT rather than on
  *  the destructive button — a stray Enter must not delete anything. */
 export const Button = forwardRef<
@@ -52,7 +62,7 @@ export const Button = forwardRef<
       {...rest}
       ref={ref}
       disabled={disabled || loading}
-      className={`${TAP} inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${TONE_CLASS[tone]} ${className}`}
+      className={`${TAP} ${buttonClass(tone, className)}`}
     >
       {loading && <Spinner />}
       {children}
@@ -137,12 +147,24 @@ export function Badge({
   );
 }
 
-export function ProgressBar({ value, tone = "accent" }: { value: number; tone?: "accent" | "fit" }) {
+/** `label` is required: a progressbar without a name is announced as
+ *  "progress bar, 42%" — of what? (axe `aria-progressbar-name`, serious, on
+ *  every project page with a running job; audit A11Y-2). */
+export function ProgressBar({
+  value,
+  label,
+  tone = "accent",
+}: {
+  value: number;
+  label: string;
+  tone?: "accent" | "fit";
+}) {
   const percent = Math.round(Math.max(0, Math.min(1, value)) * 100);
   return (
     <div
       className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2"
       role="progressbar"
+      aria-label={label}
       aria-valuenow={percent}
       aria-valuemin={0}
       aria-valuemax={100}
@@ -181,7 +203,9 @@ export function Field({
   );
 }
 
-export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
+/** Takes a ref as a prop (React 19), so a dialog can put focus on its
+ *  field — `autoFocus` focuses it, but nothing returns focus afterwards. */
+export function TextInput(props: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   return (
     <input
       {...props}
@@ -238,11 +262,23 @@ export function Checkbox({
   );
 }
 
+/**
+ * A notice in the page's own flow.
+ *
+ * `role="alert"` interrupts whatever a screen reader is saying, and every
+ * Alert used to carry it — including the standing notes a page is born with
+ * ("Зарим мөрийн хуваарь ойролцоо"), which then talked over the page's own
+ * title on every load (audit A11Y-3). A failure is still an alert; a warning
+ * or a note is a `status`, read when there is a pause. `live` overrides it
+ * for the rare warning that really is the answer to what was just pressed.
+ */
 export function Alert({
   tone = "danger",
+  live,
   children,
 }: {
   tone?: "danger" | "warn" | "accent";
+  live?: "alert" | "status";
   children: ReactNode;
 }) {
   const map = {
@@ -250,8 +286,9 @@ export function Alert({
     warn: "border-warn/40 bg-warn-soft text-warn",
     accent: "border-accent/30 bg-accent-soft text-accent",
   } as const;
+  const role = live ?? (tone === "danger" ? "alert" : "status");
   return (
-    <div role="alert" className={`rounded-md border px-3.5 py-2.5 text-sm ${map[tone]}`}>
+    <div role={role} className={`rounded-md border px-3.5 py-2.5 text-sm ${map[tone]}`}>
       {children}
     </div>
   );

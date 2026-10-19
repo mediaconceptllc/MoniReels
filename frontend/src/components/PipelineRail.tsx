@@ -212,8 +212,11 @@ export function PipelineRail({
                   {stage.label}
                 </span>
               </span>
+              {/* A long word wraps rather than spilling out of its cell:
+                  two cells share a 360px row, and «Боловсруулагдаж» alone
+                  measured 133px in a 123px column. */}
               <span
-                className={`tabular pl-[31px] text-xs ${
+                className={`tabular min-w-0 pl-[31px] text-xs [overflow-wrap:anywhere] ${
                   stage.state === "current" ? "text-accent" : "text-ink-3"
                 }`}
               >

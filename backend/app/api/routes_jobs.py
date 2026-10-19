@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
-from app.db import get_db
+from app.db import get_db, session_scope
 from app.dbmodels import Job, Project
 from app.jobs import queue
+from app.jobs.kinds import KINDS, lane_of
 from app.security import Principal, current_user
 from app.utils.paths import disk_report
 
@@ -42,6 +45,53 @@ def _owned_job(db: Session, job_id: str, principal: Principal) -> Job:
         if project is None or project.owner_id != principal.id:
             raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
     return job
+
+
+def queue_ahead(db: Session, job: Job) -> int | None:
+    """How many waiting jobs a worker takes before this one, or None when it
+    is not waiting.
+
+    "Ажлын дараалалд хүлээж байна" with nothing else said is the panel a
+    producer stares at while someone else's two-hour render holds the only
+    render slot; the number is what turns "is it stuck?" into "two to go".
+
+    Counted the way `queue.claim` orders the queue — priority, then age —
+    and only within the job's own lane, because a job in another lane does
+    not hold this one back. A retry still waiting out its backoff is not
+    counted: no worker would take it first. Running jobs are not counted
+    either; the panel says separately that a slot has to come free.
+    """
+    if job.state != "queued":
+        return None
+    lane = lane_of(job.kind)
+    same_lane = [kind for kind in KINDS if lane_of(kind) == lane]
+    return db.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.state == "queued",
+            Job.id != job.id,
+            Job.kind.in_(same_lane),
+            or_(Job.available_at.is_(None), Job.available_at <= time.time()),
+            or_(
+                Job.priority < job.priority,
+                and_(Job.priority == job.priority, Job.created_at < job.created_at),
+            ),
+        )
+    ) or 0
+
+
+def _live(db: Session, job: Job) -> dict:
+    """A job as its own panel follows it: the row, and its place in line."""
+    out = queue.to_dict(job)
+    out["queue_ahead"] = queue_ahead(db, job)
+    return out
+
+
+def _snapshot(job_id: str) -> dict | None:
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        return _live(db, job) if job else None
 
 
 @router.get("/queue")
@@ -74,13 +124,49 @@ def queue_status(
     return overview
 
 
+@router.get("/latest")
+def latest_jobs(
+    principal: Principal = Depends(current_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """The newest job of each of the caller's projects.
+
+    The project list said where a project had got to and nothing about what
+    was happening to it: a transcription running, or one that had failed an
+    hour ago, looked exactly like a project nobody had touched. One query —
+    DISTINCT ON over the (project, created) index — rather than a request per
+    card. Only what a card shows; a job's result and error stay on the
+    project page.
+    """
+    rows = db.scalars(
+        select(Job)
+        .join(Project, Project.id == Job.project_id)
+        .where(Project.owner_id == principal.id)
+        .order_by(Job.project_id, Job.created_at.desc())
+        .distinct(Job.project_id)
+    ).all()
+    return {
+        "jobs": [
+            {
+                "project_id": job.project_id,
+                "job_id": job.id,
+                "kind": job.kind,
+                "state": job.state,
+                "progress": round(job.progress, 4),
+                "finished_at": job.finished_at,
+            }
+            for job in rows
+        ]
+    }
+
+
 @router.get("/{job_id}")
 def get_job(
     job_id: str,
     principal: Principal = Depends(current_user),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
-    return queue.to_dict(_owned_job(db, job_id, principal))
+    return _live(db, _owned_job(db, job_id, principal))
 
 
 @router.post("/{job_id}/cancel")
@@ -109,7 +195,7 @@ async def job_events(
         last: str | None = None
         elapsed = 0.0
         while elapsed < MAX_STREAM_SEC:
-            snapshot = await asyncio.to_thread(queue.get, job_id)
+            snapshot = await asyncio.to_thread(_snapshot, job_id)
             if snapshot is None:
                 break
             payload = json.dumps(snapshot, ensure_ascii=False)
