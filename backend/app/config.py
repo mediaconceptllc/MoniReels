@@ -22,6 +22,15 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com"
+
+#: The worker service's draining time on Railway (Settings → Deploy →
+#: Draining seconds): how long SIGTERM is given before SIGKILL. It lives on
+#: the dashboard, not in this repository — `railway.worker.json` said 600 for
+#: months while the deployments recorded no config file at all and ran on the
+#: default 0 (measured: a 4-5 minute paid call killed 10 seconds into a
+#: deploy). Pinned here so the shutdown grace can be checked against it;
+#: change both together, and docs/DEPLOY.md with them.
+WORKER_DRAINING_S = 600
 _R2_ACCOUNT_RE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -245,8 +254,9 @@ class Settings(BaseSettings):
     # generic verdict five minutes later.
     #
     # This MUST stay below the platform's own SIGTERM-to-SIGKILL window
-    # (`drainingSeconds` in railway.worker.json), or the worker is killed
-    # before it can settle anything and the wait buys nothing at all.
+    # (WORKER_DRAINING_S below: the worker service's draining time, set on
+    # Railway's dashboard), or the worker is killed before it can settle
+    # anything and the wait buys nothing at all.
     # `test_shutdown_grace_fits_the_platform_window` holds the two together.
     #
     # Costs nothing on an idle worker: the loop notices the signal within
