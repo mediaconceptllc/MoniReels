@@ -715,10 +715,15 @@ def output_title(text: str) -> str:
     rendered and uploaded. Shortened at a word where one is near, with an
     ellipsis so it reads as shortened; the idea keeps its whole title.
     """
+    from sqlalchemy import String
+
     from app.dbmodels import Output
 
     # The column's own width, so the two cannot drift apart.
-    limit = Output.__table__.c.title.type.length
+    column = Output.__table__.c.title.type
+    if not isinstance(column, String) or column.length is None:
+        raise TypeError("outputs.title must be a String with a length")
+    limit = column.length
     if len(text) <= limit:
         return text
     cut = text[: limit - 1]
