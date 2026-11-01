@@ -9,8 +9,8 @@
  * product's entire interface is Mongolian, and most display faces render
  * Cyrillic as fallback boxes or with visibly wrong proportions.
  */
-/* The three families are loaded and self-hosted by next/font in
- * app/layout.tsx, which exposes each as a CSS variable. The fallback stacks
+/* The three families are self-hosted from @fontsource, imported in
+ * app/layout.tsx (why not next/font/google: see there). The fallback stacks
  * below matter: until the face loads, Cyrillic must still render in
  * something, not in a font with no coverage. */
 
@@ -106,9 +106,9 @@
      that render happens on a Linux container. Inter is the face there —
      metrically close, openly licensed. See app/subtitle/fonts.py. */
   --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display";
-  --font-display: var(--font-system), var(--font-display-loaded), "Golos Text", system-ui, sans-serif;
-  --font-sans: var(--font-system), var(--font-sans-loaded), system-ui, sans-serif;
-  --font-mono: var(--font-mono-loaded), ui-monospace, monospace;
+  --font-display: var(--font-system), "Geologica", "Golos Text", system-ui, sans-serif;
+  --font-sans: var(--font-system), "Golos Text", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 * {

@@ -18,6 +18,9 @@
     "check-headers": "tsx scripts/check-headers.ts"
   },
   "dependencies": {
+    "@fontsource/geologica": "^5.3.0",
+    "@fontsource/golos-text": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "next": "^15.5.28",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
