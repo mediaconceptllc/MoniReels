@@ -14,7 +14,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import security
+from app import provider_settings, security
 from app.api.projects.common import projects_router
 from app.db import get_db
 from app.dbmodels import SubtitleTemplate
@@ -114,7 +114,7 @@ def provider_readiness(
     reachability probe. Someone who cannot change a setting still has to know
     why a button will not work, and that is all this says.
     """
-    from app import brand, provider_settings, providers
+    from app import brand, providers
 
     settings = provider_settings.effective(db)
     return {
@@ -144,7 +144,6 @@ async def tts_voices(
     asked for its list and nothing is synthesised. Never raises; an
     unreachable provider is the answer, not a 500.
     """
-    from app import provider_settings
     from app.tts import elevenlabs
 
     settings = provider_settings.effective(db)

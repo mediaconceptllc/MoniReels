@@ -11,6 +11,11 @@ them means a render can use the whole worker without the API ever going quiet.
 Concurrency is bounded by lane (app.jobs.kinds.LANES), not by a single number:
 "how many jobs at once" is the wrong question when one job is an HTTP wait and
 the next is a full-CPU encode.
+
+This module is the loop: claiming, lanes, heartbeats, settling, housekeeping,
+the drain at shutdown, the watchdog and the wait for the schema. What each job
+kind does is in app.handlers, one module per kind; the registry that maps a
+kind to its handler is HANDLERS, here.
 """
 from __future__ import annotations
 
@@ -22,41 +27,24 @@ import socket
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
-from app import metering, migrate, observability, worker_report
+from app import metering, migrate, observability, provider_settings, worker_report
 from app.ai import usage as llm_usage
-from app.ai.localize import localize_suggestions
-from app.ai.openrouter_client import build_client as build_llm_client
-from app.ai.schema import count_limits, default_counts
-from app.ai.suggest import generate_suggestions
-from app.ai.translate import translate_transcript
 from app.audio import dub_bed
 from app.config import get_settings, heavy_threads
 from app.db import session_scope
+from app.handlers.export import handle_export, handle_export_all
+from app.handlers.import_video import handle_import_video
+from app.handlers.suggest import handle_suggest
+from app.handlers.transcribe import handle_transcribe
+from app.handlers.translate import handle_translate
 from app.jobs import cancel, queue
 from app.jobs.kinds import MAX_ATTEMPTS, lane_of, open_lanes, parse_lanes, validate_registry
 from app.jobs.queue import JobCancelled, JobHandle
-from app.languages import (
-    lines_used,
-    needs_translation,
-    removes_source_speech,
-    subtitle_segments,
-    suggested_ranges,
-    translation_holes,
-    voice_over_on,
-)
-from app.models import Suggestions, Transcript, VideoMeta
-from app.store import ProjectNotFound, get_row, load, save
-from app.stt import chunk_cache
-from app.stt.factory import build_client as build_stt_client
-from app.stt.factory import for_language as stt_for_language
-from app.stt.pipeline import separation_available, transcribe_audio
-from app.subtitle.srt import segments_to_srt
-from app.tts import voiceover
+from app.store import ProjectNotFound, get_row
+from app.stt.pipeline import separation_available
 from app.tts.elevenlabs import TtsError
-from app.tts.elevenlabs import build_client as build_tts_client
 from app.utils.logging import get_logger, setup_logging
 from app.utils.logging import job_id as job_id_var
 from app.utils.logging import job_kind as job_kind_var
@@ -66,13 +54,8 @@ from app.utils.paths import (
     clear_all_workdirs,
     clear_job_workdir,
     ensure_free,
-    job_workdir,
     purge_trash,
 )
-from app.video.audio import extract_audio_16k_mono_wav, extract_audio_native_wav
-from app.video.capabilities import build_capabilities
-from app.video.ffmpeg import discover_ffmpeg
-from app.video.probe import ProbeError, generate_thumbnail, probe_video
 
 logger = get_logger(__name__)
 
@@ -153,697 +136,9 @@ SCHEMA_NOTE_SEC = 60.0
 
 
 # ---------------------------------------------------------------------------
-# Handlers
+# Handlers: one module per kind in app.handlers. The registry stays here,
+# beside the loop that checks it (main) and runs it (_run_job).
 # ---------------------------------------------------------------------------
-
-
-async def handle_import_video(handle: JobHandle) -> dict:
-    """Probe an uploaded source and make its thumbnail.
-
-    Runs after the browser's direct-to-R2 upload finishes; the API only ever
-    recorded the key.
-    """
-    binaries = _require_ffmpeg()
-    workdir = job_workdir(handle.job_id)
-
-    with session_scope() as db:
-        row = get_row(db, _project_id(handle))
-        source_key = row.video_key
-        project_name = row.name
-    if not source_key:
-        raise RuntimeError("This project has no uploaded source video")
-
-    from app import r2
-
-    await handle.set_progress(0.05, stage="download", message="Fetching the uploaded video")
-    local = workdir / f"source{Path(source_key).suffix or '.mp4'}"
-    await asyncio.to_thread(r2.download_file, source_key, local)
-
-    await handle.set_progress(0.5, stage="probe", message="Reading video metadata")
-    raw = await probe_video(binaries.ffprobe, local)
-
-    # Extract the speech track once, here, while the video is already on
-    # disk. Every transcribe used to pull the whole source down again — a
-    # 200 MB+ download and a second ffmpeg pass — to arrive at ~32 MB of
-    # audio that never changes. Re-runs are what made that hurt: the video is
-    # fetched once, the audio is re-read on every attempt.
-    audio_key = ""
-    if raw["has_audio"]:
-        await handle.set_progress(0.6, stage="audio", message="Extracting the audio track")
-        audio_local = workdir / "audio.wav"
-        await extract_audio_16k_mono_wav(binaries.ffmpeg, local, audio_local)
-        audio_key = r2.audio_key(handle.project_id or "", "audio.wav")
-        await asyncio.to_thread(r2.upload_file, audio_local, audio_key, "audio/wav")
-
-    await handle.set_progress(0.7, stage="thumbnail", message="Extracting a thumbnail")
-    thumb = workdir / "thumbnail.jpg"
-    # Half-way in, not the first frame: an opening fade or a black slate makes
-    # for a thumbnail that identifies nothing.
-    await generate_thumbnail(binaries.ffmpeg, local, thumb, at_sec=max(0.0, raw["duration_sec"] / 2))
-    thumb_key = r2.thumbnail_key(handle.project_id or "")
-    await asyncio.to_thread(r2.upload_file, thumb, thumb_key, "image/jpeg")
-
-    with session_scope() as db:
-        project = load(db, _project_id(handle), for_update=True)
-        project.video = VideoMeta(
-            source_key=source_key,
-            duration_sec=raw["duration_sec"],
-            width=raw["width"],
-            height=raw["height"],
-            fps=raw["fps"],
-            has_audio=raw["has_audio"],
-            codec=raw["codec"],
-            thumbnail_key=thumb_key,
-            audio_key=audio_key,
-        )
-        save(db, project)
-        row = get_row(db, project.id)
-        row.thumbnail_key = thumb_key
-        row.audio_key = audio_key or None
-
-    logger.info("Imported %s (%s): %.1fs", project_name, source_key, raw["duration_sec"])
-    return {"duration_sec": raw["duration_sec"], "has_audio": raw["has_audio"]}
-
-
-async def handle_transcribe(handle: JobHandle) -> dict:
-    binaries = _require_ffmpeg()
-    workdir = job_workdir(handle.job_id)
-
-    from app import provider_settings, r2
-
-    with session_scope() as db:
-        # Read per job rather than once at worker start: an admin who fixes
-        # a key expects the next job to use it, not the next deploy — and
-        # the API process has no way to push the new value to this one.
-        settings = provider_settings.effective(db)
-        project = load(db, _project_id(handle))
-    if project.video is None:
-        raise RuntimeError("This project has no video to transcribe yet")
-    if not project.video.has_audio:
-        raise RuntimeError("This video has no audio track")
-
-    audio_path = workdir / "audio.wav"
-    # Demucs is the one consumer that wants the source's own sample rate:
-    # separation degrades on audio already narrowed to the 16 kHz mono STT
-    # contract, so the stored copy is a shortcut only while separation is off.
-    separating = separation_available(settings)
-    if project.video.audio_key and not separating:
-        # ~32 MB instead of the whole source, and no second ffmpeg pass.
-        await handle.set_progress(0.02, stage="download", message="Fetching the audio")
-        await asyncio.to_thread(r2.download_file, project.video.audio_key, audio_path)
-    else:
-        await handle.set_progress(0.02, stage="download", message="Fetching the video")
-        local = workdir / f"source{Path(project.video.source_key).suffix or '.mp4'}"
-        await asyncio.to_thread(r2.download_file, project.video.source_key, local)
-
-        await handle.set_progress(0.05, stage="extract_audio", message="Extracting audio")
-        if separating:
-            await extract_audio_native_wav(binaries.ffmpeg, local, audio_path)
-        else:
-            await extract_audio_16k_mono_wav(binaries.ffmpeg, local, audio_path)
-
-    # Heard in the language it is spoken in — see stt.factory.for_language.
-    settings = stt_for_language(settings, project.language)
-    client = build_stt_client(settings)
-    # A client that sends chunk by chunk reads back what an unfinished run of
-    # this project already paid for (app.stt.chunk_cache), and keeps each new
-    # answer the moment it arrives.
-    cache = None
-    variant = getattr(client, "variant", None)
-    if variant is not None:
-        cache = chunk_cache.ChunkCache(_project_id(handle), variant)
-        client.chunk_cache = cache
-    try:
-        async def on_progress(p: float) -> None:
-            await handle.set_progress(0.1 + p * 0.85, stage="transcribing", message="Transcribing speech")
-
-        transcript: Transcript = await transcribe_audio(
-            client, audio_path, workdir, settings, binaries.ffmpeg, on_progress=on_progress
-        )
-    finally:
-        await client.aclose()
-
-    handle.raise_if_cancelled()
-
-    srt_key = None
-    if transcript.segments:
-        srt_path = workdir / "subtitles.srt"
-        srt_path.write_text(segments_to_srt(transcript.segments), encoding="utf-8")
-        srt_key = r2.audio_key(_project_id(handle), "subtitles.srt")
-        await asyncio.to_thread(r2.upload_file, srt_path, srt_key, "text/plain; charset=utf-8")
-
-    with session_scope() as db:
-        project = load(db, _project_id(handle), for_update=True)
-        project.transcript = transcript
-        save(db, project)
-        # The transcript holds their text now, and a deliberate re-run must
-        # hear the audio afresh rather than be handed this run's answers.
-        chunk_cache.clear(db, project.id)
-
-    out = {
-        "segments": len(transcript.segments),
-        "characters": len(transcript.full_text),
-        "timings_estimated": transcript.timings_estimated,
-        "srt_key": srt_key,
-    }
-    # Chunks an earlier, unfinished run had paid for and this one read back.
-    if cache is not None and cache.hits:
-        out["chunks_reused"] = cache.hits
-    return out
-
-
-def _suggest_counts(payload: dict | None, duration_sec: float) -> tuple[int, int]:
-    """The counts this job was queued with, held to what this video can take.
-
-    A job queued before counts existed carries none and gets what the button
-    always meant. The limit is applied again here rather than trusted from the
-    route: a row can sit in the queue across a deploy that tightened it, and a
-    count this video cannot hold would only buy near-duplicates.
-    """
-    shorts_max, youtube_max = count_limits(duration_sec)
-    shorts_default, youtube_default = default_counts(duration_sec)
-    payload = payload or {}
-
-    def pick(key: str, default: int, most: int, least: int) -> int:
-        value = payload.get(key)
-        if not isinstance(value, int) or isinstance(value, bool):
-            return default
-        return max(least, min(most, value))
-
-    return (
-        pick("shorts", shorts_default, shorts_max, 1),
-        pick("youtube", youtube_default, youtube_max, 0),
-    )
-
-
-async def handle_suggest(handle: JobHandle) -> dict:
-    from app import provider_settings
-
-    with session_scope() as db:
-        settings = provider_settings.effective(db)
-        project = load(db, _project_id(handle))
-    if project.video is None:
-        raise RuntimeError("This project has no video")
-    if project.transcript is None or not project.transcript.segments:
-        raise RuntimeError("Transcribe the video before asking for suggestions")
-    # What goes INTO the prompt, held for the result below: the project is
-    # read again before saving, and its transcript is not this one's concern.
-    transcript = project.transcript
-
-    shorts, youtube = _suggest_counts(handle.payload, project.video.duration_sec)
-
-    await handle.set_progress(0.1, stage="requesting", message="Asking the model for suggestions")
-    client = build_llm_client(settings)
-    try:
-        suggestions: Suggestions = await generate_suggestions(
-            client, transcript, project.video.duration_sec,
-            shorts=shorts, youtube=youtube,
-        )
-        # Before anyone reads them: the cards in Mongolian, whatever the
-        # model wrote them in.
-        suggestions, localized = await _localize(client, suggestions)
-    finally:
-        await client.aclose()
-
-    handle.raise_if_cancelled()
-
-    with session_scope() as db:
-        project = load(db, _project_id(handle), for_update=True)
-        project.suggestions = suggestions
-        save(db, project)
-
-    result: dict[str, Any] = {
-        "shorts": len(suggestions.shorts),
-        "youtube": len(suggestions.youtube),
-        # What was asked for, beside what came back. The bill follows the ask
-        # (the model generates what it was told to), so an estimate built from
-        # past runs has to know which count those runs were for.
-        "requested_shorts": shorts,
-        "requested_youtube": youtube,
-        # What went INTO the prompt, recorded beside what came out of it. The
-        # bill scales with this, so a cost without it can be reported but not
-        # projected onto the next run (see app.spend.suggest_rate).
-        "characters": len(transcript.full_text),
-    }
-    if localized:
-        result["localized"] = localized
-    follow = _translate_suggested(project)
-    if follow:
-        result["translation"] = follow
-    return result
-
-
-async def _localize(client, suggestions: Suggestions) -> tuple[Suggestions, int]:
-    """The suggestion texts in Mongolian (app.ai.localize), or as they are.
-
-    Never a reason to fail: the ideas are already paid for, and a card in
-    English is worth far less than the ideas it names. The failure is logged
-    and the texts stay as the model wrote them.
-    """
-    try:
-        return await localize_suggestions(client, suggestions)
-    except JobCancelled:
-        raise
-    except Exception:  # noqa: BLE001 - the ideas are paid for; keep them whatever this does
-        logger.exception("Could not translate the suggestion texts; they stay as the model wrote them")
-        return suggestions, 0
-
-
-def _translate_suggested(project) -> dict | None:
-    """Queues the translation of the lines the new suggestions cut, when an
-    export of them would show or read one that has none yet.
-
-    After the suggestions, not before them: they are chosen from what was
-    said, so a translation run first bought the whole transcript to export
-    a few minutes of it. Only the lines an export of them uses
-    (languages.translation_holes) — the rest can still be translated from
-    the page — and only when the export uses the translation at all: a
-    producer who chose subtitles in the spoken language and no Mongolian
-    voice is not billed for a translation nothing shows.
-
-    Queued as its own job rather than run here, so the ideas are on the page
-    while it runs, a failure costs only the translation, and a re-run is the
-    same button as any other. Its dedupe key is the manual one: a translation
-    of the project already running is not paid for twice.
-    """
-    missing = translation_holes(project, suggested_ranges(project))
-    if not missing:
-        return None
-    try:
-        job_id = queue.enqueue(
-            "translate",
-            project_id=project.id,
-            payload={"force": False, "scope": "suggested"},
-            dedupe_key=f"translate:{project.id}",
-        )
-    except Exception:  # noqa: BLE001 - the ideas are saved; the page offers the translation itself
-        logger.exception("Could not queue the translation of the suggested lines")
-        return None
-    return {"job_id": job_id, "lines": missing}
-
-
-async def handle_translate(handle: JobHandle) -> dict:
-    from app import provider_settings
-
-    with session_scope() as db:
-        settings = provider_settings.effective(db)
-        project = load(db, _project_id(handle))
-    if not needs_translation(project.language):
-        raise RuntimeError("This video is already in Mongolian")
-    if project.transcript is None or not project.transcript.segments:
-        raise RuntimeError("Transcribe the video before translating it")
-    force = (handle.payload or {}).get("force") is True
-    # "suggested": only the lines the suggestions cut — what follows a
-    # suggestion run on its own (_translate_suggested). Anything else, the
-    # whole transcript, as the page's button always did.
-    scope = "suggested" if (handle.payload or {}).get("scope") == "suggested" else "all"
-    only = (
-        {s.id for s in lines_used(project, suggested_ranges(project))}
-        if scope == "suggested"
-        else None
-    )
-    read = project.transcript
-
-    async def on_progress(p: float) -> None:
-        await handle.set_progress(0.05 + p * 0.9, stage="translating", message="Translating the transcript")
-
-    await handle.set_progress(0.05, stage="translating", message="Translating the transcript")
-    client = build_llm_client(settings)
-    try:
-        translated, report = await translate_transcript(
-            client, read, force=force, only=only, on_progress=on_progress
-        )
-    finally:
-        await client.aclose()
-
-    # A cancel is honoured AFTER the fold, not before it: the lines that came
-    # back are paid for, and a re-run without them would buy them again. The
-    # job still ends canceled, saying how many it kept.
-
-    # Folded onto the transcript as it is NOW, not as it was read. A run takes
-    # minutes, and in that time the producer may correct an English line
-    # (which clears its translation) or hand-edit a Mongolian one. Writing back
-    # the copy read at the start would silently undo both. So a line takes the
-    # new translation only if neither its text nor its translation moved while
-    # this ran; one that did is kept as the producer left it, and counted.
-    before = {s.id: (s.text, s.translation) for s in read.segments}
-    fresh = {s.id: s for s in translated.segments}
-    applied = kept = 0
-    with session_scope() as db:
-        project = load(db, _project_id(handle), for_update=True)
-        if project.transcript is None:
-            raise RuntimeError("The transcript was removed while it was being translated")
-        for seg in project.transcript.segments:
-            new = fresh.get(seg.id)
-            if new is None or not new.translation or new.translation == seg.translation:
-                continue
-            if (seg.text, seg.translation) != before.get(seg.id):
-                kept += 1
-                continue
-            seg.translation = new.translation
-            applied += 1
-        save(db, project)
-
-    if report.stopped or handle.cancel_requested:
-        raise JobCancelled({"lines_applied": applied, "lines_asked": report.asked})
-    return {**report.to_dict(), "applied": applied, "kept_edits": kept, "scope": scope}
-
-
-async def handle_export_all(handle: JobHandle) -> dict:
-    return await _render(handle, all_ideas=True)
-
-
-async def handle_export(handle: JobHandle) -> dict:
-    return await _render(handle, all_ideas=False)
-
-
-async def _render(handle: JobHandle, *, all_ideas: bool) -> dict:
-    from sqlalchemy import select
-
-    from app import brand, r2
-    from app.dbmodels import Output
-    from app.export.ideas import idea_ranges, pick_ideas
-    from app.export.overlay import LogoOverlay
-    from app.export.pipeline import render_all_ideas, render_timeline
-
-    binaries = _require_ffmpeg()
-    workdir = job_workdir(handle.job_id)
-    project_id = _project_id(handle)
-
-    with session_scope() as db:
-        project = load(db, project_id)
-        project_name = project.name
-    if project.video is None:
-        raise RuntimeError("This project has no video")
-
-    caps = await build_capabilities(binaries.ffmpeg)
-
-    await handle.set_progress(0.02, stage="download", message="Fetching the video")
-    local = workdir / f"source{Path(project.video.source_key).suffix or '.mp4'}"
-    await asyncio.to_thread(r2.download_file, project.video.source_key, local)
-
-    out_dir = workdir / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    segments, subtitle_fallback = subtitle_segments(project)
-
-    # The mark is global and the choice is per project, so both have to be
-    # true before a byte is fetched. A logo the project turned off must not
-    # cost a download, and a project asking for one nobody uploaded renders
-    # without it rather than failing (render_timeline says so in the log).
-    logo = logo_path = None
-    if project.export.logo.enabled:
-        with session_scope() as db:
-            logo_key = brand.get(db)
-        if logo_key:
-            logo_path = workdir / f"logo{Path(logo_key).suffix or '.png'}"
-            await asyncio.to_thread(r2.download_file, logo_key, logo_path)
-            logo = LogoOverlay(
-                position=project.export.logo.position,
-                width_pct=project.export.logo.width_pct,
-                opacity=project.export.logo.opacity,
-                margin_pct=project.export.logo.margin_pct,
-            )
-        else:
-            logger.warning("Project asked for the brand logo but none is uploaded")
-
-    async def _brand_clip(asset: str) -> Path | None:
-        """Fetches an intro/outro if the project wants one and it exists.
-
-        A missing asset is a warning, never a failure: an export must not die
-        over a title card, and the alternative is a producer discovering at
-        render time that the outro nobody uploaded has cost them the render.
-        """
-        with session_scope() as db:
-            key = brand.get(db, asset)
-        if not key:
-            logger.warning("Project asked for the brand %s but none is uploaded", asset)
-            return None
-        path = workdir / f"{asset}{Path(key).suffix or '.mp4'}"
-        await asyncio.to_thread(r2.download_file, key, path)
-        return path
-
-    intro_path = await _brand_clip("intro") if project.export.use_intro else None
-    outro_path = await _brand_clip("outro") if project.export.use_outro else None
-
-    skipped: list[str] = []
-    if all_ideas:
-        if project.suggestions is None or not (
-            project.suggestions.shorts or project.suggestions.youtube
-        ):
-            raise RuntimeError("There are no suggestions to export")
-        # A job queued for SOME of the ideas carries which ones. An empty
-        # selection is every one of them, so a job queued before choosing
-        # existed renders exactly what it always did.
-        wanted, skipped = pick_ideas(project.suggestions, handle.payload)
-        if not (wanted.shorts or wanted.youtube):
-            raise RuntimeError(
-                "None of the selected ideas are still in this project: "
-                + "; ".join(skipped)
-            )
-        ranges = idea_ranges(wanted)
-    else:
-        if not project.clips:
-            raise RuntimeError("The timeline has no clips")
-        # The stored clips point at the desktop-era source path; the render
-        # must read the copy this worker just downloaded.
-        clips = [c.model_copy(update={"source_path": str(local)}) for c in project.clips]
-        ranges = [(c.start, c.end) for c in clips]
-
-    # Only the lines these ranges say, and before the render: a voice that
-    # cannot be made fails the export while it has cost a download, not a
-    # render. Each clip bought is stored the moment it arrives, so a retry
-    # pays only for what the failed attempt did not get.
-    voice = (
-        await _prepare_voice(handle, project, ranges, workdir, binaries, local)
-        if voice_over_on(project) and project.transcript is not None
-        else None
-    )
-
-    if all_ideas:
-        rendered = await render_all_ideas(
-            handle, binaries, str(local), wanted, project.transition,
-            crf=project.export.crf, preset=project.export.preset,
-            orientation=project.export.orientation, portrait_fill=project.export.portrait_fill,
-            supported_xfade=caps.xfade_transitions, container="mp4",
-            output_dir=out_dir, job_id=handle.job_id,
-            write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
-            subtitle_style=project.subtitle_style, transcript_segments=segments,
-            logo=logo, logo_path=logo_path, transcript_source=str(local),
-            intro_path=intro_path, outro_path=outro_path, voice=voice,
-        )
-    else:
-        output_path = out_dir / "export.mp4"
-        await render_timeline(
-            handle, binaries, clips, project.transition,
-            crf=project.export.crf, preset=project.export.preset,
-            orientation=project.export.orientation, portrait_fill=project.export.portrait_fill,
-            supported_xfade=caps.xfade_transitions, workdir=workdir, output_path=output_path,
-            write_srt=project.export.write_srt, burn_subtitles=project.export.burn_subtitles,
-            subtitle_style=project.subtitle_style, transcript_segments=segments,
-            logo=logo, logo_path=logo_path, transcript_source=str(local),
-            intro_path=intro_path, outro_path=outro_path, voice=voice,
-        )
-        rendered = [{"kind": "export", "title": project_name, "output_path": str(output_path)}]
-
-    handle.raise_if_cancelled()
-
-    await handle.set_progress(0.9, stage="upload", message="Uploading the results")
-    results: list[dict] = []
-    counts: dict[str, int] = {}
-    for item in rendered:
-        path = Path(item["output_path"])
-        if not path.is_file():
-            continue
-        kind = item["kind"]
-        counts[kind] = counts.get(kind, 0) + 1
-        key = r2.output_key(project_id, handle.job_id, kind, counts[kind], "mp4")
-        duration = await _rendered_duration(binaries, path)
-        size = await asyncio.to_thread(r2.upload_file, path, key, "video/mp4")
-
-        srt_local = path.with_suffix(".srt")
-        srt_key = None
-        if srt_local.is_file():
-            srt_key = key.rsplit(".", 1)[0] + ".srt"
-            await asyncio.to_thread(r2.upload_file, srt_local, srt_key, "text/plain; charset=utf-8")
-
-        title = output_title(item.get("title", ""))
-        with session_scope() as db:
-            # A retry of this job uploads to the same keys, and its earlier
-            # attempt may have recorded some of them before it failed: update
-            # that row rather than listing the same video twice.
-            row = db.scalar(
-                select(Output).where(Output.project_id == project_id, Output.r2_key == key)
-            )
-            if row is None:
-                db.add(
-                    Output(
-                        project_id=project_id,
-                        kind=kind,
-                        title=title,
-                        r2_key=key,
-                        srt_key=srt_key,
-                        size_bytes=size,
-                        duration_sec=duration,
-                    )
-                )
-            else:
-                row.title = title
-                row.srt_key = srt_key
-                row.size_bytes = size
-                row.duration_sec = duration
-        results.append({"kind": kind, "title": item.get("title", ""), "key": key, "srt_key": srt_key})
-
-    out: dict = {"outputs": results}
-    # An idea that could not be found is NAMED, never dropped quietly: the
-    # producer picked three and has to be able to see they got two.
-    if skipped:
-        out["skipped"] = skipped
-    # Same rule for a subtitle line that went out in the source language
-    # because its translation was cleared after the export was queued.
-    if subtitle_fallback:
-        out["subtitle_fallback_lines"] = subtitle_fallback
-    # What the voice cost in characters, what it already had, and every line
-    # it had to hurry or cut — the parts of a voice-over a producer should
-    # listen to before publishing.
-    if voice is not None:
-        out["voice"] = voice.report.to_dict()
-    return out
-
-
-def output_title(text: str) -> str:
-    """A title the outputs row can hold.
-
-    The model's title has no length limit (audit REL-9): one past the
-    column failed the job at its very end, after every file had been
-    rendered and uploaded. Shortened at a word where one is near, with an
-    ellipsis so it reads as shortened; the idea keeps its whole title.
-    """
-    from sqlalchemy import String
-
-    from app.dbmodels import Output
-
-    # The column's own width, so the two cannot drift apart.
-    column = Output.__table__.c.title.type
-    if not isinstance(column, String) or column.length is None:
-        raise TypeError("outputs.title must be a String with a length")
-    limit = column.length
-    if len(text) <= limit:
-        return text
-    cut = text[: limit - 1]
-    space = cut.rfind(" ")
-    if space > limit * 3 // 4:
-        cut = cut[:space]
-    return cut.rstrip() + "…"
-
-
-async def _rendered_duration(binaries, path: Path) -> float:
-    """How long the file that was rendered actually plays.
-
-    Probed, not added up from the plan: a crossfade overlaps its two clips, an
-    intro and outro add their own length, and the encoder rounds to frames —
-    a total of the cut ranges is a different number from the video's.
-
-    0.0 — the column's own "not measured", as on every output recorded before
-    this was written — when ffprobe cannot read it. The file was rendered and
-    is about to be uploaded; refusing it over a missing number would throw
-    the render away.
-    """
-    try:
-        return round((await probe_video(binaries.ffprobe, path))["duration_sec"], 3)
-    except (ProbeError, OSError) as e:
-        logger.warning("Could not measure %s: %s", path.name, e)
-        return 0.0
-
-
-async def _prepare_voice(
-    handle: JobHandle,
-    project,
-    ranges: list[tuple[float, float]],
-    workdir: Path,
-    binaries,
-    source: Path,
-) -> voiceover.VoiceOver:
-    from app import provider_settings
-
-    remove_speech = removes_source_speech(project)
-    # Before a character is paid for: the voice would be bought for an export
-    # that cannot be made the way it was asked for. The page is told this
-    # before it queues (app.worker_report); an export queued before this
-    # worker was deployed without Demucs is the case that reaches here.
-    if remove_speech and not dub_bed.available():
-        raise dub_bed.DubUnavailable(
-            "Эх яриаг арилгах Demucs энэ worker-т суугаагүй байна — worker сервисийг "
-            "INSTALL_DUB=1-ээр дахин build хийнэ."
-        )
-
-    with session_scope() as db:
-        settings = provider_settings.effective(db)
-
-    async def on_progress(p: float) -> None:
-        await handle.set_progress(0.03 + p * 0.07, stage="voicing",
-                                  message="Synthesising the Mongolian voice")
-
-    await handle.set_progress(0.03, stage="voicing", message="Synthesising the Mongolian voice")
-    client = build_tts_client(settings)
-    try:
-        audio, report = await voiceover.prepare(
-            client, _project_id(handle), project.transcript.segments, ranges,
-            workdir / "voice", voices=project.export.speaker_voices, on_progress=on_progress,
-        )
-    finally:
-        await client.aclose()
-    voice = voiceover.VoiceOver(
-        ffmpeg=binaries.ffmpeg,
-        segments=project.transcript.segments,
-        audio=audio,
-        original_volume=project.export.original_volume,
-        report=report,
-        remove_speech=remove_speech,
-    )
-    if remove_speech:
-        voice.beds, beds = await _prepare_beds(handle, ranges, workdir, binaries, source)
-        report.beds_separated = beds.separated
-        report.bed_seconds = beds.seconds
-        report.beds_cached = beds.cached
-    return voice
-
-
-async def _prepare_beds(
-    handle: JobHandle, ranges: list[tuple[float, float]], workdir: Path, binaries, source: Path
-) -> tuple[dict[tuple[float, float], Path], dub_bed.BedReport]:
-    """The rendered ranges without their speech, separated before the render
-    for the reason the voice is: a failure costs a download, not a render."""
-    settings = get_settings()
-
-    async def on_progress(p: float) -> None:
-        await handle.set_progress(0.10 + p * 0.10, stage="separating",
-                                  message="Removing the source speech")
-
-    await handle.set_progress(0.10, stage="separating", message="Removing the source speech")
-    separate = functools.partial(
-        dub_bed.separate_sync,
-        model_name=settings.demucs_model,
-        cache_dir=settings.resolved_model_cache_dir,
-        threads=heavy_threads(),
-    )
-    return await dub_bed.prepare(
-        binaries.ffmpeg, _project_id(handle), source, ranges, workdir / "beds",
-        model_name=settings.demucs_model, separate=separate,
-        check=handle.raise_if_cancelled, on_progress=on_progress,
-    )
-
-
-def _retry_cannot_help(error: Exception) -> bool:
-    """A failure the next attempt would meet exactly as this one did.
-
-    A spent character quota or a revoked key at the voice provider: every
-    retry of the export claims the render slot and downloads the source again
-    to be refused the same way. Settled at once, like a job bigger than the
-    whole disk, with the provider's reason as the error.
-    """
-    if isinstance(error, dub_bed.DubUnavailable):
-        return True
-    return isinstance(error, TtsError) and error.ends_the_run
 
 
 HANDLERS = {
@@ -859,19 +154,6 @@ HANDLERS = {
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
-
-
-def _project_id(handle: JobHandle) -> str:
-    if not handle.project_id:
-        raise RuntimeError(f"Job {handle.job_id} ({handle.kind}) has no project")
-    return handle.project_id
-
-
-def _require_ffmpeg():
-    binaries = discover_ffmpeg()
-    if not binaries.available:
-        raise RuntimeError("FFmpeg is not installed in this image")
-    return binaries
 
 
 async def _heartbeat_loop(handle: JobHandle) -> None:
@@ -908,8 +190,6 @@ def _disk_need(job) -> int:
     (see DISK_BUDGET). Unknown size: the old fixed budget."""
     if job.kind not in DISK_BUDGET or not job.project_id:
         return DISK_NEED_BYTES.get(job.kind, 0)
-    from app import provider_settings
-
     with session_scope() as db:
         try:
             doc = get_row(db, job.project_id).doc or {}
@@ -931,6 +211,20 @@ def _disk_need(job) -> int:
     if separating:
         need += int(float(video.get("duration_sec") or 0) * SEPARATION_BYTES_PER_SEC)
     return need
+
+
+def _retry_cannot_help(error: Exception) -> bool:
+    """A failure the next attempt would meet exactly as this one did.
+
+    A spent character quota or a revoked key at the voice provider: every
+    retry of the export claims the render slot and downloads the source again
+    to be refused the same way. Settled at once, like a job bigger than the
+    whole disk, with the provider's reason as the error.
+    """
+    if isinstance(error, dub_bed.DubUnavailable):
+        return True
+    return isinstance(error, TtsError) and error.ends_the_run
+
 
 
 async def _run_job(job) -> None:

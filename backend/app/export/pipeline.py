@@ -543,7 +543,7 @@ async def _bracket_with_brand(
 
     async def whole_file(path: Path, order: int) -> Clip | None:
         meta = await probe_video(binaries.ffprobe, path)  # type: ignore[arg-type]
-        duration = float(meta.get("duration") or 0.0)
+        duration = meta["duration_sec"]
         if duration <= 0:
             # A file ffprobe reports as zero-length would join as nothing and
             # can make xfade's offsets negative. Skipping is the safe read.
@@ -565,44 +565,63 @@ async def _bracket_with_brand(
     return bracketed
 
 
+@dataclass(frozen=True)
+class RenderSpec:
+    """How a render looks and sounds: everything `render_timeline` is told
+    besides the clips it cuts and the folder and file it works in.
+
+    One value for every render of a job — `render_all_ideas` hands the same
+    spec to each idea — so an option added here reaches both callers at once
+    instead of being threaded through two keyword lists that can drift.
+    """
+
+    transition: Transition
+    crf: int
+    preset: str
+    orientation: str
+    portrait_fill: str
+    supported_xfade: list[str]
+    write_srt: bool = False
+    burn_subtitles: bool = False
+    subtitle_style: SubtitleStyle | None = None
+    transcript_segments: list[Segment] | None = None
+    logo: LogoOverlay | None = None
+    logo_path: Path | None = None
+    transcript_source: str | None = None
+    intro_path: Path | None = None
+    outro_path: Path | None = None
+    voice: VoiceOver | None = None
+
+
 async def render_timeline(
     handle: JobHandle,
     binaries: FfmpegBinaries,
     clips: list[Clip],
-    transition: Transition,
-    crf: int,
-    preset: str,
-    orientation: str,
-    portrait_fill: str,
-    supported_xfade: list[str],
+    spec: RenderSpec,
+    *,
     workdir: Path,
     output_path: Path,
-    write_srt: bool = False,
-    burn_subtitles: bool = False,
-    subtitle_style: SubtitleStyle | None = None,
-    transcript_segments: list[Segment] | None = None,
-    logo: LogoOverlay | None = None,
-    logo_path: Path | None = None,
-    transcript_source: str | None = None,
-    intro_path: Path | None = None,
-    outro_path: Path | None = None,
-    voice: VoiceOver | None = None,
 ) -> Path:
     if not clips:
         raise ValueError("Cannot render an empty clip list")
+    crf, preset = spec.crf, spec.preset
+    orientation, portrait_fill = spec.orientation, spec.portrait_fill
+    transcript_segments, transcript_source = spec.transcript_segments, spec.transcript_source
+    voice = spec.voice
     # A logo asks for a pass that draws pixels; without the file there is
     # nothing to draw, so the export runs without it rather than failing on
     # an asset the render does not depend on.
+    logo, logo_path = spec.logo, spec.logo_path
     if logo is not None and (logo_path is None or not logo_path.exists()):
         logger.warning("Logo requested but no image is available; rendering without it")
         logo = None
 
     validate_portrait_fill(portrait_fill)
     width, height = resolve_dimensions(orientation)
-    want_subtitles = bool(transcript_segments) and (write_srt or burn_subtitles)
+    want_subtitles = bool(transcript_segments) and (spec.write_srt or spec.burn_subtitles)
 
     ordered_clips = sorted(clips, key=lambda c: c.order)
-    ordered_clips = await _bracket_with_brand(binaries, ordered_clips, intro_path, outro_path)
+    ordered_clips = await _bracket_with_brand(binaries, ordered_clips, spec.intro_path, spec.outro_path)
     workdir.mkdir(parents=True, exist_ok=True)
     # Keep the extension (output.part.mp4, not output.mp4.part) so ffmpeg's
     # muxer can still infer the output format from the temp filename.
@@ -656,16 +675,16 @@ async def render_timeline(
         # Decided before the join, because it chooses where the join writes.
         # A logo alone is reason enough: it draws on pixels exactly as the
         # subtitles do, and both ride the same single re-encode.
-        need_burn_pass = (burn_subtitles and bool(transcript_segments)) or logo is not None
+        need_burn_pass = (spec.burn_subtitles and bool(transcript_segments)) or logo is not None
         join_target = joined_path if need_burn_pass else part_path
 
-        if transition.duration <= 0 or n == 1:
+        if spec.transition.duration <= 0 or n == 1:
             clip_output_starts = _cumulative_starts(clip_durations)
             final_duration = sum(clip_durations)
             await _join_concat(binaries, handle, normalized_paths, clip_durations, workdir, join_target)
         else:
-            xfade_name = resolve_transition(transition.type, supported_xfade)
-            plan = plan_transition(clip_durations, transition.duration, fps=target_fps)
+            xfade_name = resolve_transition(spec.transition.type, spec.supported_xfade)
+            plan = plan_transition(clip_durations, spec.transition.duration, fps=target_fps)
             clip_output_starts = [0.0, *plan.offsets]
             final_duration = plan.final_duration
             if plan.reduced:
@@ -686,13 +705,13 @@ async def render_timeline(
                 transcript_segments, ordered_clips, clip_output_starts, transcript_source
             )
 
-        if write_srt and retimed_segments:
+        if spec.write_srt and retimed_segments:
             atomic_write_text(output_path.with_suffix(".srt"), segments_to_srt(retimed_segments))
 
-        burn_subs = burn_subtitles and bool(retimed_segments)
+        burn_subs = spec.burn_subtitles and bool(retimed_segments)
         if burn_subs or logo is not None:
             if burn_subs:
-                ass_content = build_ass_document(retimed_segments, subtitle_style or SubtitleStyle())
+                ass_content = build_ass_document(retimed_segments, spec.subtitle_style or SubtitleStyle())
                 (workdir / "subs.ass").write_text(ass_content, encoding="utf-8")
             await _burn_overlays(
                 binaries, handle, joined_path, part_path, workdir, crf, preset, final_duration,
@@ -749,28 +768,15 @@ async def render_all_ideas(
     binaries: FfmpegBinaries,
     video_path: str,
     suggestions: Suggestions,
-    transition: Transition,
-    crf: int,
-    preset: str,
-    orientation: str,
-    portrait_fill: str,
-    supported_xfade: list[str],
+    spec: RenderSpec,
+    *,
     container: str,
     output_dir: Path,
     job_id: str,
-    write_srt: bool = False,
-    burn_subtitles: bool = False,
-    subtitle_style: SubtitleStyle | None = None,
-    transcript_segments: list[Segment] | None = None,
-    logo: LogoOverlay | None = None,
-    logo_path: Path | None = None,
-    transcript_source: str | None = None,
-    intro_path: Path | None = None,
-    outro_path: Path | None = None,
-    voice: VoiceOver | None = None,
 ) -> list[dict]:
     """Renders one standalone output file per suggested idea (up to 3 reels +
-    up to 3 youtube compilations), reusing render_timeline unchanged for each.
+    up to 3 youtube compilations), reusing render_timeline unchanged for each,
+    every one with the same `spec`.
 
     Progress is per-idea (0..1 within each render_timeline call, including
     its own final 1.0), not smoothed across the whole batch - it visibly
@@ -810,15 +816,7 @@ async def render_all_ideas(
         output_path = output_dir / filename
         idea_workdir = job_workdir(f"{job_id}_{i}")
 
-        await render_timeline(
-            handle, binaries, clips, transition,
-            crf=crf, preset=preset, orientation=orientation, portrait_fill=portrait_fill,
-            supported_xfade=supported_xfade, workdir=idea_workdir, output_path=output_path,
-            write_srt=write_srt, burn_subtitles=burn_subtitles, subtitle_style=subtitle_style,
-            transcript_segments=transcript_segments, logo=logo, logo_path=logo_path,
-            transcript_source=transcript_source, intro_path=intro_path, outro_path=outro_path,
-            voice=voice,
-        )
+        await render_timeline(handle, binaries, clips, spec, workdir=idea_workdir, output_path=output_path)
         results.append({"kind": kind, "title": title, "output_path": str(output_path)})
 
     await handle.set_progress(1.0, stage="done", message="All exports complete")

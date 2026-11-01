@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.export.pipeline import render_all_ideas
+from app.export.pipeline import RenderSpec, render_all_ideas
 from app.models import Cut, KeepRange, ShortIdea, Suggestions, YoutubePlan
 from app.timeline.models import Transition
 
@@ -75,7 +75,7 @@ def _youtube(title: str, ranges: list[tuple[float, float]]) -> YoutubePlan:
 async def _run(monkeypatch, tmp_path, suggestions, handle=None):
     calls: list[list] = []
 
-    async def fake_render_timeline(handle, binaries, clips, transition, **kwargs):
+    async def fake_render_timeline(handle, binaries, clips, spec, **kwargs):
         calls.append(clips)
         return kwargs["output_path"]
 
@@ -83,9 +83,9 @@ async def _run(monkeypatch, tmp_path, suggestions, handle=None):
 
     results = await render_all_ideas(
         handle or _handle(), binaries=object(), video_path="C:/video.mp4", suggestions=suggestions,
-        transition=Transition(), crf=20, preset="medium", orientation="landscape",
-        portrait_fill="blur",
-        supported_xfade=[], container="mp4", output_dir=tmp_path, job_id="job-test",
+        spec=RenderSpec(transition=Transition(), crf=20, preset="medium", orientation="landscape",
+                        portrait_fill="blur", supported_xfade=[]),
+        container="mp4", output_dir=tmp_path, job_id="job-test",
     )
     return results, calls
 
@@ -233,8 +233,8 @@ def test_a_source_that_is_not_in_the_timeline_falls_back():
 async def test_every_idea_is_rendered_with_the_voice(monkeypatch, tmp_path):
     seen: list = []
 
-    async def fake_render_timeline(handle, binaries, clips, transition, **kwargs):
-        seen.append(kwargs.get("voice"))
+    async def fake_render_timeline(handle, binaries, clips, spec, **kwargs):
+        seen.append(spec.voice)
         return kwargs["output_path"]
 
     monkeypatch.setattr("app.export.pipeline.render_timeline", fake_render_timeline)
@@ -243,9 +243,9 @@ async def test_every_idea_is_rendered_with_the_voice(monkeypatch, tmp_path):
         _handle(), binaries=object(), video_path="C:/video.mp4",
         suggestions=Suggestions(shorts=[_short("a", (0, 5), (6, 10), (11, 20))],
                                 youtube=[_youtube("y", [(0, 300)])]),
-        transition=Transition(), crf=20, preset="medium", orientation="landscape",
-        portrait_fill="blur", supported_xfade=[], container="mp4", output_dir=tmp_path,
-        job_id="job-test", voice=voice,
+        spec=RenderSpec(transition=Transition(), crf=20, preset="medium", orientation="landscape",
+                        portrait_fill="blur", supported_xfade=[], voice=voice),
+        container="mp4", output_dir=tmp_path, job_id="job-test",
     )
     assert seen == [voice, voice]
 
@@ -260,7 +260,7 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
     cuts: list[tuple[str, object, float, object]] = []
 
     async def fake_probe(ffprobe, path):
-        return {"fps": 30.0, "has_audio": True, "duration": 3.0}
+        return {"fps": 30.0, "has_audio": True, "duration_sec": 3.0}
 
     async def fake_cut(binaries, handle, clip, has_audio, *args, voice_path=None, original_volume=1.0,
                        bed_path=None, frames=None):
@@ -293,10 +293,12 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
     await pipeline.render_timeline(
         _handle(), type("Bin", (), {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})(),
         # No transition: two clips then join by concatenation, which is faked.
-        [Clip(id="c", source_path="/src.mp4", start=5.0, end=9.0, order=0)], Transition(duration=0.0),
-        crf=20, preset="medium", orientation="landscape", portrait_fill="pad",
-        supported_xfade=[], workdir=tmp_path / "work", output_path=tmp_path / "out.mp4",
-        transcript_source="/src.mp4", intro_path=intro, voice=voice,
+        [Clip(id="c", source_path="/src.mp4", start=5.0, end=9.0, order=0)],
+        RenderSpec(Transition(duration=0.0),
+                   crf=20, preset="medium", orientation="landscape", portrait_fill="pad",
+                   supported_xfade=[],
+                   transcript_source="/src.mp4", intro_path=intro, voice=voice),
+        workdir=tmp_path / "work", output_path=tmp_path / "out.mp4",
     )
 
     assert voice.asked == [(5.0, 9.0)]
@@ -305,6 +307,52 @@ async def test_only_the_content_speaks_and_it_carries_the_level_asked(monkeypatc
     assert content_cut[0] == "/src.mp4" and content_cut[1] is not None and content_cut[2] == 0.25
     # The content is laid over the bed for exactly its own range.
     assert content_cut[3] == Path("/beds/5.0-9.0.flac")
+
+
+@pytest.mark.asyncio
+async def test_the_brand_intro_and_outro_reach_the_timeline_through_the_real_probe(monkeypatch, tmp_path):
+    """The bracket read `"duration"` from what `probe_video` returns, which
+    only ever held `"duration_sec"` — so every intro and outro measured 0 and
+    was left out of every export, with a warning line as the only trace. The
+    fakes above returned `"duration"` too, which is how it hid. Here the REAL
+    probe parses ffprobe's own JSON; only the process is canned."""
+    import json
+
+    from app.export import pipeline
+    from app.timeline.models import Clip
+    from app.video import probe
+
+    lengths = {"intro.mp4": "2.500000", "outro.mp4": "4.000000"}
+
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        async def communicate(self):
+            out = {
+                "streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920,
+                             "avg_frame_rate": "30/1"}],
+                "format": {"duration": lengths[Path(self.path).name]},
+            }
+            return json.dumps(out).encode(), b""
+
+    async def fake_exec(*args, **kwargs):
+        return FakeProc(args[-1])
+
+    monkeypatch.setattr(probe.asyncio, "create_subprocess_exec", fake_exec)
+    intro, outro = tmp_path / "intro.mp4", tmp_path / "outro.mp4"
+    content = [Clip(id="c", source_path="/src.mp4", start=5.0, end=9.0, order=0)]
+    binaries = type("Bin", (), {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})()
+
+    bracketed = await pipeline._bracket_with_brand(binaries, content, intro, outro)
+
+    assert [(c.source_path, c.start, c.end) for c in bracketed] == [
+        (str(intro), 0.0, 2.5),
+        ("/src.mp4", 5.0, 9.0),
+        (str(outro), 0.0, 4.0),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +430,7 @@ async def _record_render(monkeypatch, tmp_path, n_clips: int) -> list[list[str]]
     runs: list[list[str]] = []
 
     async def fake_probe(ffprobe, path):
-        return {"fps": 30.0, "has_audio": True, "duration": 60.0}
+        return {"fps": 30.0, "has_audio": True, "duration_sec": 60.0}
 
     async def fake_run(self, ffmpeg, args, *, expected_duration_sec, cwd=None, on_progress=None):
         runs.append(list(args))
@@ -395,8 +443,8 @@ async def _record_render(monkeypatch, tmp_path, n_clips: int) -> list[list[str]]
              for i, d in enumerate(_durations(n_clips))]
     await pipeline.render_timeline(
         _handle(), type("Bin", (), {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})(), clips,
-        Transition(duration=0.5), crf=20, preset="medium", orientation="portrait",
-        portrait_fill="blur", supported_xfade=["fade"], workdir=tmp_path / "work",
+        RenderSpec(Transition(duration=0.5), crf=20, preset="medium", orientation="portrait",
+                   portrait_fill="blur", supported_xfade=["fade"]), workdir=tmp_path / "work",
         output_path=tmp_path / "out.mp4",
     )
     return runs
@@ -463,8 +511,9 @@ async def test_a_batched_join_is_the_single_pass_frame_for_frame(monkeypatch, tm
         monkeypatch.setattr(pipeline, "XFADE_BATCH", batch)
         out = tmp_path / f"{name}.mp4"
         await pipeline.render_timeline(
-            _handle(), binaries, clips, Transition(duration=0.3), crf=23, preset="ultrafast",
-            orientation="landscape", portrait_fill="pad", supported_xfade=["fade"],
+            _handle(), binaries, clips,
+            RenderSpec(Transition(duration=0.3), crf=23, preset="ultrafast",
+                       orientation="landscape", portrait_fill="pad", supported_xfade=["fade"]),
             workdir=tmp_path / name, output_path=out,
         )
         return out
@@ -599,8 +648,9 @@ async def test_the_sound_is_on_the_picture_to_the_last_of_many_clips(
     binaries = FfmpegBinaries(ffmpeg=Path(FFMPEG), ffprobe=Path(FFMPEG).with_name("ffprobe"))
     out = tmp_path / "out.mp4"
     await pipeline.render_timeline(
-        _handle(), binaries, clips, Transition(duration=transition), crf=35, preset="ultrafast",
-        orientation="landscape", portrait_fill="pad", supported_xfade=["fade"],
+        _handle(), binaries, clips,
+        RenderSpec(Transition(duration=transition), crf=35, preset="ultrafast",
+                   orientation="landscape", portrait_fill="pad", supported_xfade=["fade"]),
         workdir=tmp_path / "work", output_path=out,
     )
 

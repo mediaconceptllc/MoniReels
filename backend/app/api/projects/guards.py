@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app import providers, worker_report
+from app import provider_settings, providers, worker_report
 from app.languages import (
     needs_translation,
     removes_source_speech,
@@ -28,8 +28,6 @@ def require_provider(db: Session, capability: str) -> None:
     notice is a failure with a stack trace in it. Reading the stored settings
     is one query.
     """
-    from app import provider_settings, providers
-
     reason = providers.blocker(provider_settings.effective(db), capability)
     if reason:
         raise HTTPException(status_code=503, detail=reason)
@@ -68,8 +66,6 @@ def require_translation_ready(project: Project, ranges: list[tuple[float, float]
 def voice_view(db: Session, project: Project) -> dict:
     """Whether this project's export reads a Mongolian voice, and why it
     cannot right now — the guard's own verdict, read by the page."""
-    from app import provider_settings
-
     # One dict, built once: two literals for the two answers is how a field
     # gets renamed in one and not the other — and the page reads both.
     on = voice_over_on(project)
@@ -109,7 +105,6 @@ def require_recogniser_for(db: Session, language: str) -> None:
     Scribe key must stop it here — not after the video has been downloaded
     and the job has failed with a message about a recogniser nobody chose.
     """
-    from app import provider_settings
     from app.stt.factory import for_language
 
     settings = for_language(provider_settings.effective(db), language)
