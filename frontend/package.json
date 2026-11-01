@@ -18,7 +18,7 @@
     "check-headers": "tsx scripts/check-headers.ts"
   },
   "dependencies": {
-    "next": "^15.5.27",
+    "next": "^15.5.28",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -29,7 +29,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.17.0",
-    "eslint-config-next": "^15.5.27",
+    "eslint-config-next": "^15.5.28",
     "postcss": "^8.5.23",
     "tailwindcss": "^4.0.0",
     "tsx": "^4.23.13",
