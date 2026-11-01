@@ -152,6 +152,32 @@ export function laneNames(lanes: string[]): string {
   return lanes.map((lane) => `«${LANE_LABELS[lane] ?? lane}»`).join(", ");
 }
 
+/** Where a waiting job stands, in words. "Ажлын дараалалд хүлээж байна" alone
+ *  was the whole answer while another project's two-hour render held the
+ *  only slot — and from in here that looks exactly like a stuck job.
+ *
+ *  `served` is the server's verdict on the job's lane (`Job.lane_served`),
+ *  drawn, never recomputed here. Only `false` changes the words: "first in
+ *  line" was a promise no worker could keep while the render pool was down
+ *  and the I/O pool alive. Unknown — null, or absent from an older API —
+ *  keeps the place in line and raises no alarm. The admin is pointed at
+ *  Railway; an editor is told the work is kept and starts by itself, and
+ *  learns nothing about machines (#74). */
+export function queueLine(
+  ahead: number | null | undefined,
+  served: boolean | null | undefined = null,
+  admin = false,
+): string {
+  if (served === false) {
+    return admin
+      ? "Энэ ажлыг гүйцэтгэх сервис ажиллахгүй байна — сэргэтэл эхлэхгүй. Railway дээрх worker сервисүүдийг шалгана уу."
+      : "Энэ ажлыг гүйцэтгэх сервис одоогоор ажиллахгүй байна. Ажил хадгалагдсан — сервис сэргэмэгц өөрөө эхэлнэ. Удаан үргэлжилбэл админд хэлнэ үү.";
+  }
+  if (ahead === undefined || ahead === null) return "Ажлын дараалалд хүлээж байна";
+  if (ahead === 0) return "Дараалалд эхнийх — ажиллаж буй ажил дуусмагц эхэлнэ";
+  return `Дараалалд таны өмнө ${ahead} ажил байна`;
+}
+
 export const STAGE_LABELS: Record<string, string> = {
   starting: "Эхэлж байна",
   download: "Файл татаж байна",

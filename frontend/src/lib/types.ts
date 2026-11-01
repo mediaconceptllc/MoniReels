@@ -288,6 +288,13 @@ export interface Job {
    *  once it is not waiting. Sent with a job followed on its own — GET
    *  /jobs/{id} and the stream — and absent from the project's job list. */
   queue_ahead?: number | null;
+  /** Whether a live worker serves this waiting job's lane — decided on the
+   *  server (the queue page's own reading), only drawn here. false: none
+   *  does, or nothing at all is alive, so "first in line" would be a promise
+   *  nobody keeps. null: not waiting, or it cannot be known (an older build
+   *  still speaking) — never an alarm. A bare boolean: which machine is
+   *  down is the admin's to look up. Sent beside `queue_ahead`. */
+  lane_served?: boolean | null;
 }
 
 /** A project's newest job, as the list card shows it (`GET /jobs/latest`). */

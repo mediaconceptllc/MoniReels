@@ -84,10 +84,34 @@ def queue_ahead(db: Session, job: Job) -> int | None:
     ) or 0
 
 
+def lane_served(db: Session, job: Job) -> bool | None:
+    """Whether a live worker serves this waiting job's lane, or None when it
+    is not waiting or that cannot be known.
+
+    "First in line" is a promise only a worker can keep. With a render pool
+    and an I/O pool (#64) the I/O pool can be alive and well while every
+    render worker is down, and the panel kept telling the producer their
+    export was next. Decided by the same reading as the queue page's lanes
+    (`queue.WorkerLiveness`), so the two cannot disagree; the panel only
+    draws it. False also when nothing at all is alive (the queue page's
+    `stalled`). Unknown — an older build still speaking, or a busy worker
+    that has not said its lanes — stays None and raises no alarm.
+
+    A boolean on purpose: which machine, how many workers, which commit is
+    the admin's to look up (#74); the editor learns only that this kind of
+    work is waiting for a service that is down.
+    """
+    if job.state != "queued":
+        return None
+    return queue.WorkerLiveness.read(db, time.time()).waiting_served(lane_of(job.kind))
+
+
 def _live(db: Session, job: Job) -> dict:
-    """A job as its own panel follows it: the row, and its place in line."""
+    """A job as its own panel follows it: the row, its place in line, and
+    whether anything alive can take it."""
     out = queue.to_dict(job)
     out["queue_ahead"] = queue_ahead(db, job)
+    out["lane_served"] = lane_served(db, job)
     return out
 
 

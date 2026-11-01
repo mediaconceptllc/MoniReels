@@ -199,6 +199,81 @@ def list_for_project(project_id: str, limit: int = 50, db: Session | None = None
 WORKER_REPORT_STALE_SEC = worker_report.STALE_SEC
 
 
+@dataclass(frozen=True)
+class WorkerLiveness:
+    """Who is alive to take work, read once.
+
+    The queue page and a waiting job's own panel ask the same question —
+    does any live worker serve this lane — and answer it from here, so they
+    cannot disagree. `served` is tri-state: True (a live worker runs the
+    lane), False (workers running this code are alive and none runs it), and
+    None when that cannot be known — no worker running this code is alive,
+    or an older build that does not say its lanes still is. Unknown never
+    raises an alarm.
+
+    `nothing_alive` is the other confident answer: no heartbeat, no fresh
+    report from any build, and no running job still beating — the whole
+    worker service is down (the queue page's `stalled`). A waiting job then
+    has no lane served whatever its lane, so `waiting_served` says False
+    there instead of the lanes' unknown.
+    """
+
+    beats: list[worker_report.Heartbeat]
+    alive: list[worker_report.Heartbeat]
+    legacy: worker_report.WorkerReport | None
+    legacy_fresh: bool
+    # A fresh single row that no heartbeat wrote: an older build is still
+    # running, and its lanes are unknown.
+    unseen: bool
+    # Running jobs whose heartbeat still moves: a worker busy on one is
+    # alive whatever its report says.
+    running_live: int
+
+    @classmethod
+    def read(cls, session: Session, now: float) -> WorkerLiveness:
+        beats = worker_report.heartbeats(session)
+        legacy = worker_report.read_legacy(session)
+        legacy_fresh = legacy is not None and now - legacy.at < WORKER_REPORT_STALE_SEC
+        return cls(
+            beats=beats,
+            alive=[b for b in beats if b.live(now)],
+            legacy=legacy,
+            legacy_fresh=legacy_fresh,
+            unseen=legacy_fresh and legacy is not None and legacy.worker is None,
+            running_live=session.scalar(
+                select(func.count())
+                .select_from(Job)
+                .where(
+                    Job.state == "running",
+                    Job.heartbeat_at.is_not(None),
+                    Job.heartbeat_at > now - _stale_sec(),
+                )
+            )
+            or 0,
+        )
+
+    @property
+    def reported(self) -> bool:
+        """A worker said it is alive within the stale window, any build."""
+        return bool(self.alive) or self.legacy_fresh
+
+    @property
+    def nothing_alive(self) -> bool:
+        return not self.running_live and not self.reported
+
+    def serving(self, lane: str) -> int:
+        return sum(1 for b in self.alive if b.serves(lane))
+
+    def served(self, lane: str) -> bool | None:
+        if self.serving(lane):
+            return True
+        return None if not self.alive or self.unseen else False
+
+    def waiting_served(self, lane: str) -> bool | None:
+        """`served` for one waiting job: False also when nothing is alive."""
+        return False if self.nothing_alive else self.served(lane)
+
+
 def queue_overview(db: Session | None = None, *, owner_id: str | None = None) -> dict:
     """What the queue page shows. A queue with waiting work and no genuinely
     live worker means the worker service is down — the single most common
@@ -237,12 +312,6 @@ def queue_overview(db: Session | None = None, *, owner_id: str | None = None) ->
             for state, n in session.execute(mine(select(Job.state, func.count())).group_by(Job.state))
         }
         now = time.time()
-        stale_cutoff = now - _stale_sec()
-        live = session.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.state == "running", Job.heartbeat_at.is_not(None), Job.heartbeat_at > stale_cutoff)
-        )
         waiting = counts.get("queued", 0)
         # A retry waiting out its backoff is not work a live worker would have
         # taken: counted as waiting, it reported a healthy idle worker as
@@ -263,33 +332,29 @@ def queue_overview(db: Session | None = None, *, owner_id: str | None = None) ->
         for kind, n in by_kind.items():
             per_lane[lane_of(kind)] = per_lane.get(lane_of(kind), 0) + n
 
-        beats = worker_report.heartbeats(session)
-        alive = [b for b in beats if b.live(now)]
-        legacy = worker_report.read_legacy(session)
-        legacy_fresh = legacy is not None and now - legacy.at < WORKER_REPORT_STALE_SEC
-        # A fresh single row that no heartbeat wrote: an older build is still
-        # running, and its lanes are unknown.
-        unseen = legacy_fresh and legacy is not None and legacy.worker is None
-        reported = bool(alive) or legacy_fresh
+        workers = WorkerLiveness.read(session, now)
 
-        lanes = []
-        for lane in LANE_LIMITS:
-            serving = sum(1 for b in alive if b.serves(lane))
-            served = True if serving else (None if not alive or unseen else False)
-            lanes.append(
-                {"lane": lane, "runnable": per_lane.get(lane, 0), "workers": serving, "served": served}
-            )
-        seen = [b.seen_at for b in beats] + ([legacy.at] if legacy is not None else [])
+        lanes = [
+            {
+                "lane": lane,
+                "runnable": per_lane.get(lane, 0),
+                "workers": workers.serving(lane),
+                "served": workers.served(lane),
+            }
+            for lane in LANE_LIMITS
+        ]
+        legacy = workers.legacy
+        seen = [b.seen_at for b in workers.beats] + ([legacy.at] if legacy is not None else [])
         return {
             "counts": counts,
             "waiting": waiting,
-            "live_workers": live or 0,
+            "live_workers": workers.running_live,
             # When a worker last said it was alive, whatever it was doing.
             "worker_seen_at": max(seen) if seen else None,
             # Runnable work with nothing actually alive to do it: a retry
             # still backing off is not runnable, and an idle worker that
             # reported recently is alive.
-            "stalled": bool(runnable and not live and not reported),
+            "stalled": bool(runnable and workers.nothing_alive),
             "lanes": lanes,
             # Lanes with runnable work and, as far as can be known, nobody to
             # run it — the warning, already decided here so every page that
