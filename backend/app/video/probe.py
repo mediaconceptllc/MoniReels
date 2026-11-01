@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import TypedDict
 
 from app.utils.logging import get_logger
 from app.video.inputs import guard, untrusted
@@ -13,6 +14,20 @@ logger = get_logger(__name__)
 
 class ProbeError(Exception):
     pass
+
+
+class ProbeResult(TypedDict):
+    """What `probe_video` returns. Typed so a reader that asks for a key it
+    does not have fails mypy instead of reading 0: the brand intro/outro read
+    `"duration"` from a dict that only ever held `"duration_sec"`, so every
+    export left both out with nothing but a log line to say so."""
+
+    duration_sec: float
+    width: int
+    height: int
+    fps: float
+    has_audio: bool
+    codec: str
 
 
 def _parse_fps(rate: str) -> float:
@@ -26,7 +41,7 @@ def _parse_fps(rate: str) -> float:
     return float(rate)
 
 
-async def probe_video(ffprobe_path: Path, video_path: Path) -> dict:
+async def probe_video(ffprobe_path: Path, video_path: Path) -> ProbeResult:
     """Returns raw fields needed to build a VideoMeta (thumbnail_path filled in by caller)."""
     args = [
         str(ffprobe_path),
