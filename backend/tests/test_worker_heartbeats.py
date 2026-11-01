@@ -244,3 +244,92 @@ def test_the_queue_says_which_lane_nobody_serves_and_only_admins_see_workers(db,
     assert stats["unserved_lanes"] == ["heavy"]
     (only,) = stats["workers"]
     assert only["id"] == "io-1" and only["live"] is True and only["lanes"] == IO
+
+
+# ---------------------------------------------------------------------------
+# A waiting job's own panel (#70's "first in line", #73's lanes)
+# ---------------------------------------------------------------------------
+
+
+def _served(db, job_id: str) -> bool | None:
+    from app.api.routes_jobs import lane_served
+
+    db.expire_all()
+    return lane_served(db, db.get(Job, job_id))
+
+
+def test_a_waiting_job_is_told_when_no_live_worker_serves_its_lane(db, client):
+    """The panel said «Дараалалд эхнийх» while only the I/O pool was alive:
+    first in line for a render worker that was not coming."""
+    editor = _login(db, client, "alice", "editor")
+    admin = _login(db, client, "root", "admin")
+    alice = db.query(User).filter_by(username="alice").one()
+    mine = Project(owner_id=alice.id, name="a", doc={})
+    db.add(mine)
+    db.commit()
+    _beat(db, "io-1", IO, separation=False)
+    export = queue.enqueue("export", project_id=mine.id)
+    translate = queue.enqueue("translate", project_id=mine.id)
+
+    body = client.get(f"/jobs/{export}", headers=editor).json()
+    assert body["queue_ahead"] == 0 and body["lane_served"] is False
+    # Its own lane is what counts: the I/O pool does take the translation.
+    assert client.get(f"/jobs/{translate}", headers=editor).json()["lane_served"] is True
+    # The admin reads the same verdict; the editor learns which kind of
+    # their work is stuck from the job itself, and nothing about machines.
+    as_admin = client.get(f"/jobs/{export}", headers=admin).json()
+    assert as_admin["lane_served"] is False
+    assert set(body) == set(as_admin)
+    assert not {"workers", "worker", "lanes", "commit", "claimed_by", "unserved_lanes"} & set(body)
+    # The stream follows the job through the same function.
+    from app.api.routes_jobs import _snapshot
+
+    snap = _snapshot(export)
+    assert snap is not None and snap["lane_served"] is False
+
+    # A render worker comes back: served, and the panel's place in line is
+    # a promise again.
+    _beat(db, "render-1", RENDER, separation=True)
+    assert client.get(f"/jobs/{export}", headers=editor).json()["lane_served"] is True
+
+    # Once it is not waiting the question does not arise.
+    row = db.get(Job, export)
+    row.state = "running"
+    row.heartbeat_at = time.time()
+    db.commit()
+    assert client.get(f"/jobs/{export}", headers=editor).json()["lane_served"] is None
+
+
+def test_a_waiting_job_is_unknown_rather_than_a_false_alarm(db):
+    export = queue.enqueue("export", project_id=None)
+    now = time.time()
+
+    # An older build alive mid-deploy writes the single row without a worker
+    # name and does not say its lanes — it may be the one rendering.
+    worker_report.publish(db, worker_report.WorkerReport(separation=True, model="htdemucs", at=now))
+    db.commit()
+    assert _served(db, export) is None
+    # ... still unknown with a worker running this code beside it.
+    _beat(db, "io-1", IO, separation=False)
+    assert _served(db, export) is None
+
+    # A worker busy on a job whose heartbeat moves, with no row of its own
+    # (a build from before the heartbeats, its report gone stale): alive,
+    # lanes unknown.
+    db.query(WorkerHeartbeat).delete()
+    worker_report.publish(db, worker_report.WorkerReport(separation=True, model="htdemucs", at=now - 3600))
+    busy = queue.enqueue("import_video", project_id=None)
+    db.get(Job, busy).state = "running"
+    db.get(Job, busy).heartbeat_at = now
+    db.commit()
+    assert _served(db, export) is None
+
+    # Nothing alive at all: the whole worker service is down — the queue
+    # page's `stalled`, a sure "no", so the panel must not promise a turn.
+    db.get(Job, busy).heartbeat_at = now - 3600
+    db.commit()
+    assert queue.queue_overview(db=db)["stalled"] is True
+    assert _served(db, export) is False
+    # A dead worker's row is not life either.
+    _beat(db, "render-1", RENDER, separation=True, at=now - worker_report.STALE_SEC - 1)
+    assert _served(db, export) is False
