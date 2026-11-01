@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
-from app import observability
+from app import observability, provider_settings
 from app.api import routes_admin, routes_auth, routes_jobs, routes_projects, routes_usage
 from app.bodylimit import BodyLimit
 from app.config import Settings, get_settings
@@ -125,8 +125,6 @@ async def lifespan(app: FastAPI):
     # After the schema, before the first request: keys stored before the
     # encryption key was set are sealed now, and a malformed key stops the
     # API here — loudly — instead of on the first paid job.
-    from app import provider_settings
-
     with session_scope() as db:
         sealed = provider_settings.seal_stored(db)
     if sealed:

@@ -18,6 +18,7 @@ the store, the key builders, the SRT writer, the models.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from pathlib import Path
 
@@ -145,6 +146,12 @@ def _suggestions(*, youtube: bool = False) -> Suggestions:
     return Suggestions(shorts=shorts, youtube=plans)
 
 
+def _as_kwargs(spec, kwargs: dict) -> dict:
+    """A render's RenderSpec and its own keywords as one dict, the shape the
+    renderer took its options in before the spec bundled them."""
+    return {f.name: getattr(spec, f.name) for f in dataclasses.fields(spec)} | kwargs
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     """Installs the doubles and hands back what they recorded."""
@@ -158,7 +165,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(r2, "download_file", rec.r2.download_file)
     monkeypatch.setattr(r2, "upload_file", rec.r2.upload_file)
 
-    monkeypatch.setattr(worker, "discover_ffmpeg", lambda: FfmpegBinaries(FFMPEG, FFPROBE))
+    monkeypatch.setattr("app.handlers.common.discover_ffmpeg", lambda: FfmpegBinaries(FFMPEG, FFPROBE))
 
     async def fake_probe(ffprobe, path):
         return dict(PROBE)
@@ -175,10 +182,12 @@ def world(tmp_path, monkeypatch):
         rec.audio_extracts.append(("native", Path(dest)))
         Path(dest).write_bytes(b"wavnative")
 
-    monkeypatch.setattr(worker, "probe_video", fake_probe)
-    monkeypatch.setattr(worker, "generate_thumbnail", fake_thumbnail)
-    monkeypatch.setattr(worker, "extract_audio_16k_mono_wav", fake_16k)
-    monkeypatch.setattr(worker, "extract_audio_native_wav", fake_native)
+    monkeypatch.setattr("app.handlers.import_video.probe_video", fake_probe)
+    monkeypatch.setattr("app.handlers.export.probe_video", fake_probe)
+    monkeypatch.setattr("app.handlers.import_video.generate_thumbnail", fake_thumbnail)
+    monkeypatch.setattr("app.handlers.import_video.extract_audio_16k_mono_wav", fake_16k)
+    monkeypatch.setattr("app.handlers.transcribe.extract_audio_16k_mono_wav", fake_16k)
+    monkeypatch.setattr("app.handlers.transcribe.extract_audio_native_wav", fake_native)
 
     class FakeClient:
         def __init__(self, which: str) -> None:
@@ -207,34 +216,36 @@ def world(tmp_path, monkeypatch):
         rec.asked = (shorts, youtube)
         return rec.suggestions
 
-    monkeypatch.setattr(worker, "build_stt_client", lambda s: FakeClient("stt"))
-    monkeypatch.setattr(worker, "build_llm_client", build_llm)
-    monkeypatch.setattr(worker, "transcribe_audio", fake_transcribe)
-    monkeypatch.setattr(worker, "generate_suggestions", fake_suggest)
+    monkeypatch.setattr("app.handlers.transcribe.build_stt_client", lambda s: FakeClient("stt"))
+    monkeypatch.setattr("app.handlers.suggest.build_llm_client", build_llm)
+    monkeypatch.setattr("app.handlers.translate.build_llm_client", build_llm)
+    monkeypatch.setattr("app.handlers.transcribe.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("app.handlers.suggest.generate_suggestions", fake_suggest)
 
     async def fake_localize(client, suggestions):
         # Every card already Mongolian: what a compliant model sends back.
         rec.localized.append(suggestions)
         return suggestions, 0
 
-    monkeypatch.setattr(worker, "localize_suggestions", fake_localize)
+    monkeypatch.setattr("app.handlers.suggest.localize_suggestions", fake_localize)
     monkeypatch.setattr(worker, "separation_available", lambda s: False)
+    monkeypatch.setattr("app.handlers.transcribe.separation_available", lambda s: False)
 
     async def fake_caps(ffmpeg):
         return type("Caps", (), {"xfade_transitions": frozenset({"fade"})})()
 
-    monkeypatch.setattr(worker, "build_capabilities", fake_caps)
+    monkeypatch.setattr("app.handlers.export.build_capabilities", fake_caps)
 
-    async def fake_render_timeline(handle, binaries, clips, transition, **kwargs):
+    async def fake_render_timeline(handle, binaries, clips, spec, **kwargs):
         rec.rendered_clips = list(clips)
-        rec.render_kwargs = kwargs
+        rec.render_kwargs = _as_kwargs(spec, kwargs)
         out = Path(kwargs["output_path"])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"mp4")
         return out
 
-    async def fake_render_all(handle, binaries, video_path, suggestions, transition, **kwargs):
-        rec.render_kwargs = kwargs
+    async def fake_render_all(handle, binaries, video_path, suggestions, spec, **kwargs):
+        rec.render_kwargs = _as_kwargs(spec, kwargs)
         out_dir = Path(kwargs["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
         items = []
@@ -377,7 +388,7 @@ def test_a_silent_video_imports_without_an_audio_key(world, project, db, monkeyp
     async def silent(ffprobe, path):
         return {**PROBE, "has_audio": False}
 
-    monkeypatch.setattr(worker, "probe_video", silent)
+    monkeypatch.setattr("app.handlers.import_video.probe_video", silent)
     project.video_key = f"sources/{project.id}/source.mp4"
     db.commit()
     world.r2.put(project.video_key)
@@ -429,7 +440,7 @@ def test_separation_forces_the_video_and_the_native_rate(world, project, db, mon
     """
     from app import worker
 
-    monkeypatch.setattr(worker, "separation_available", lambda s: True)
+    monkeypatch.setattr("app.handlers.transcribe.separation_available", lambda s: True)
     _with_video(db, project.id)
     world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
     world.r2.put(f"sources/{project.id}/source.mp4")
@@ -512,7 +523,7 @@ def test_the_stt_client_is_closed_even_when_transcription_fails(world, project, 
     async def boom(*a, **k):
         raise RuntimeError("provider said no")
 
-    monkeypatch.setattr(worker, "transcribe_audio", boom)
+    monkeypatch.setattr("app.handlers.transcribe.transcribe_audio", boom)
     _with_video(db, project.id)
     world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
 
@@ -588,7 +599,7 @@ def test_the_cards_are_stored_in_mongolian(world, project, db, monkeypatch):
         out.shorts[0].title = "Богино 0"
         return out, 1
 
-    monkeypatch.setattr(worker, "localize_suggestions", localize)
+    monkeypatch.setattr("app.handlers.suggest.localize_suggestions", localize)
     result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
 
     db.expire_all()
@@ -606,7 +617,7 @@ def test_cards_that_could_not_be_translated_still_keep_the_ideas(world, project,
     async def broken(client, suggestions):
         raise RuntimeError("the model is down")
 
-    monkeypatch.setattr(worker, "localize_suggestions", broken)
+    monkeypatch.setattr("app.handlers.suggest.localize_suggestions", broken)
     result = asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
 
     db.expire_all()
@@ -995,7 +1006,7 @@ def test_each_output_records_how_long_its_own_file_plays(world, project, db, mon
             raise ProbeError("unreadable")
         return {**PROBE, "duration_sec": measured[Path(path).name]}
 
-    monkeypatch.setattr(worker, "probe_video", probe)
+    monkeypatch.setattr("app.handlers.export.probe_video", probe)
     _ready_to_render(db, project.id, clips=False, suggestions=_suggestions())
     world.r2.put(f"sources/{project.id}/source.mp4")
 
@@ -1198,7 +1209,7 @@ def test_a_job_that_spent_money_reports_what_it_cost(world, project, db, monkeyp
         llm_usage.record(model="test/model", prompt=1200, completion=800, cost=0.0042)
         return world.suggestions
 
-    monkeypatch.setattr(worker, "generate_suggestions", paid)
+    monkeypatch.setattr("app.handlers.suggest.generate_suggestions", paid)
     _with_video(db, project.id)
     doc = load(db, project.id)
     doc.transcript = world.transcript
@@ -1412,7 +1423,7 @@ def test_a_missing_ffmpeg_is_named_as_the_image_being_wrong(world, project, db, 
     from app import worker
     from app.video.ffmpeg import FfmpegBinaries
 
-    monkeypatch.setattr(worker, "discover_ffmpeg", lambda: FfmpegBinaries(None, None))
+    monkeypatch.setattr("app.handlers.common.discover_ffmpeg", lambda: FfmpegBinaries(None, None))
 
     with pytest.raises(RuntimeError, match="FFmpeg is not installed"):
         asyncio.run(worker.handle_import_video(_handle(db, project.id)))
@@ -1459,7 +1470,7 @@ def test_a_render_that_produced_no_file_creates_no_output_row(world, project, db
     from app import worker
     from app.dbmodels import Output
 
-    async def renders_nothing(handle, binaries, video_path, suggestions, transition, **kwargs):
+    async def renders_nothing(handle, binaries, video_path, suggestions, spec, **kwargs):
         never_written = Path(kwargs["output_dir"]) / "gone.mp4"
         return [{"kind": "short", "title": "vanished", "output_path": str(never_written)}]
 
@@ -1492,7 +1503,7 @@ def test_an_english_video_is_heard_by_scribe_in_english(world, project, db, monk
     from app import worker
 
     heard: list = []
-    monkeypatch.setattr(worker, "build_stt_client", lambda s: heard.append(s) or type(
+    monkeypatch.setattr("app.handlers.transcribe.build_stt_client", lambda s: heard.append(s) or type(
         "C", (), {"aclose": staticmethod(lambda: asyncio.sleep(0))})())
     _with_video(db, project.id)
     _set_language(db, project.id, "en")
@@ -1508,7 +1519,7 @@ def test_a_mongolian_video_is_heard_by_the_recogniser_the_operator_chose(world, 
     from app import worker
 
     heard: list = []
-    monkeypatch.setattr(worker, "build_stt_client", lambda s: heard.append(s) or type(
+    monkeypatch.setattr("app.handlers.transcribe.build_stt_client", lambda s: heard.append(s) or type(
         "C", (), {"aclose": staticmethod(lambda: asyncio.sleep(0))})())
     _with_video(db, project.id)
     world.r2.put(r2.audio_key(project.id, "audio.wav"), b"wav")
@@ -1553,7 +1564,7 @@ def _fake_translation(monkeypatch, worker, *, during=None):
         asked = sum(1 for s in transcript.segments if only is None or s.id in only)
         return transcript.model_copy(update={"segments": segs}), Report(len(segs), asked, asked, 0, 0)
 
-    monkeypatch.setattr(worker, "translate_transcript", fake)
+    monkeypatch.setattr("app.handlers.translate.translate_transcript", fake)
     return seen
 
 
@@ -1704,7 +1715,6 @@ def _voice_over(db, project_id: str, *, on: bool = True, volume: float = 0.3, cl
 def _fake_voice(monkeypatch, world, heard: list | None = None) -> list[str]:
     """A voice that records what it was asked to read — and, into `heard`,
     in which voice — over a bucket that knows which clips it already holds."""
-    from app import worker
     from app.tts.elevenlabs import VoiceConfig
 
     said: list[str] = []
@@ -1721,7 +1731,7 @@ def _fake_voice(monkeypatch, world, heard: list | None = None) -> list[str]:
         async def aclose(self) -> None:
             said.append("<closed>")
 
-    monkeypatch.setattr(worker, "build_tts_client", lambda settings: FakeTts())
+    monkeypatch.setattr("app.handlers.export.build_tts_client", lambda settings: FakeTts())
     monkeypatch.setattr(r2, "exists", lambda key: key in world.r2.objects)
     return said
 
@@ -2129,8 +2139,8 @@ def test_a_finished_transcription_forgets_the_chunks_it_kept(world, project, db,
         assert await asyncio.to_thread(client.chunk_cache.get, "a" * 64) == "kept"
         return world.transcript
 
-    monkeypatch.setattr(worker, "build_stt_client", lambda s: ChunkedClient())
-    monkeypatch.setattr(worker, "transcribe_audio", reads_back)
+    monkeypatch.setattr("app.handlers.transcribe.build_stt_client", lambda s: ChunkedClient())
+    monkeypatch.setattr("app.handlers.transcribe.transcribe_audio", reads_back)
 
     result = asyncio.run(worker.handle_transcribe(_handle(db, project.id, "transcribe")))
 
@@ -2161,7 +2171,7 @@ def test_a_canceled_translation_keeps_the_lines_it_already_bought(world, project
             Report(lines=3, asked=3, translated=1, over_budget=0, failed_chunks=0, stopped=True),
         )
 
-    monkeypatch.setattr(worker, "translate_transcript", stopped_half_way)
+    monkeypatch.setattr("app.handlers.translate.translate_transcript", stopped_half_way)
 
     with pytest.raises(JobCancelled) as stopped:
         asyncio.run(worker.handle_translate(_handle(db, project.id, "translate")))
@@ -2185,7 +2195,7 @@ def test_a_cancel_during_the_card_translation_is_not_swallowed(world, project, d
     async def canceled(client, suggestions):
         raise JobCancelled()
 
-    monkeypatch.setattr(worker, "localize_suggestions", canceled)
+    monkeypatch.setattr("app.handlers.suggest.localize_suggestions", canceled)
     with pytest.raises(JobCancelled):
         asyncio.run(worker.handle_suggest(_handle(db, project.id, "suggest")))
 
