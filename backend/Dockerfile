@@ -60,7 +60,7 @@ COPY requirements.txt requirements-dub.txt ./
 # something did. In the worker, torch 2.11 asks for setuptools<82 and pip
 # takes it back to 81 — the worker's audit step in CI names why that is let
 # through.
-RUN pip install --no-cache-dir pip==26.2.1 setuptools==84.0.0 \
+RUN pip install --no-cache-dir pip==26.2.1 setuptools==84.1.0 \
     && pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_DUB" = "1" ]; then pip install --no-cache-dir -r requirements-dub.txt; fi
 
