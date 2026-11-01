@@ -543,7 +543,7 @@ async def _bracket_with_brand(
 
     async def whole_file(path: Path, order: int) -> Clip | None:
         meta = await probe_video(binaries.ffprobe, path)  # type: ignore[arg-type]
-        duration = float(meta.get("duration") or 0.0)
+        duration = meta["duration_sec"]
         if duration <= 0:
             # A file ffprobe reports as zero-length would join as nothing and
             # can make xfade's offsets negative. Skipping is the safe read.
