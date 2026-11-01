@@ -330,8 +330,9 @@ const present: unknown[] = [
   // what can and cannot run
   raw.readiness.capabilities.map((c) => [c.name, c.label, c.ready, c.blocked]),
   raw.readiness.brand.logo, raw.readiness.brand.intro, raw.readiness.brand.outro,
-  // the waiting job's place in line, and the list cards' newest job
-  raw.job_queued.queue_ahead,
+  // the waiting job's place in line and whether anything alive serves its
+  // lane, and the list cards' newest job
+  raw.job_queued.queue_ahead, raw.job_queued.lane_served,
   raw.latest_jobs.jobs.map((j) => [j.project_id, j.job_id, j.kind, j.state, j.progress, j.finished_at]),
   raw.providers.capabilities.map((c) => [
     c.name, c.label, c.ready, c.blocked, c.provider, c.powers, c.configured,

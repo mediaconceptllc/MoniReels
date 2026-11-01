@@ -5,20 +5,11 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { errorMessage } from "@/lib/auth";
-import { JOB_LABELS, STAGE_LABELS, isTerminal, watchJob } from "@/lib/jobs";
+import { errorMessage, useAuth } from "@/lib/auth";
+import { JOB_LABELS, STAGE_LABELS, isTerminal, queueLine, watchJob } from "@/lib/jobs";
 import type { Job } from "@/lib/types";
 import { Alert, Button, ProgressBar } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-
-/** Where a waiting job stands, in words. "Ажлын дараалалд хүлээж байна" alone
- *  was the whole answer while another project's two-hour render held the
- *  only slot — and from in here that looks exactly like a stuck job. */
-export function queueLine(ahead: number | null | undefined): string {
-  if (ahead === undefined || ahead === null) return "Ажлын дараалалд хүлээж байна";
-  if (ahead === 0) return "Дараалалд эхнийх — ажиллаж буй ажил дуусмагц эхэлнэ";
-  return `Дараалалд таны өмнө ${ahead} ажил байна`;
-}
 
 export function JobProgress({
   jobId,
@@ -27,6 +18,7 @@ export function JobProgress({
   jobId: string;
   onSettled?: (job: Job) => void;
 }) {
+  const admin = useAuth().user?.role === "admin";
   const [job, setJob] = useState<Job | null>(null);
   const [watchError, setWatchError] = useState<string | null>(null);
   // Cancelling is asked first and then SEEN to happen. It used to be one
@@ -106,10 +98,13 @@ export function JobProgress({
   // every stage sat unused two files away.
   const stage = STAGE_LABELS[job.stage] ?? job.message ?? job.stage;
   const queued = job.state === "queued";
+  // The server's verdict, drawn as it comes: false only when it is sure no
+  // live worker can take this job (queueLine says what that means for whom).
+  const unserved = queued && !canceling && job.lane_served === false;
   const line = canceling
     ? "Цуцалж байна — одоогийн алхам дуусмагц зогсоно"
     : queued
-      ? queueLine(job.queue_ahead)
+      ? queueLine(job.queue_ahead, job.lane_served, admin)
       : stage;
 
   return (
@@ -125,7 +120,7 @@ export function JobProgress({
         {/* Announced when the STEP changes, not on every percent: the bar
             carries the number, and a live region reading "41%, 42%, 43%"
             would drown out everything else on the page. */}
-        <span aria-live="polite" className="text-xs text-ink-3">
+        <span aria-live="polite" className={`text-xs ${unserved ? "text-warn" : "text-ink-3"}`}>
           {line}
         </span>
         <Button

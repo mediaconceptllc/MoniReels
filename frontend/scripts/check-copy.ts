@@ -17,6 +17,7 @@ import { explainJob, explainJobError } from "../src/lib/job-errors";
 import type { JobErrorCode } from "../src/lib/types";
 import { relativeTime } from "../src/lib/format";
 import { describeValidation } from "../src/lib/messages";
+import { queueLine } from "../src/lib/jobs";
 
 const problems: string[] = [];
 const LATIN = /[A-Za-z]{3,}/;
@@ -152,10 +153,49 @@ const refused = describeValidation([
 ]);
 if (/should|required|Value error/i.test(refused)) problems.push(`validation left English in: ${refused}`);
 
+// A waiting job's line. The server decides whether a live worker serves
+// its lane (`lane_served`); only a sure "no" may change the words, and an
+// unknown answer must read exactly as before — an alarm on a guess is the
+// one thing this line must never raise. The editor is told the work is kept
+// and starts by itself, in Mongolian only, with no machine named; the admin
+// alone is sent to Railway.
+for (const ahead of [null, undefined, 0, 3]) {
+  for (const admin of [false, true]) {
+    const before = queueLine(ahead);
+    for (const served of [true, null, undefined]) {
+      const line = queueLine(ahead, served, admin);
+      if (line !== before) problems.push(`queue line changed on lane_served=${served}: ${line}`);
+    }
+    if (queueLine(ahead, false, admin) === before) {
+      problems.push(`queue line still says "${before}" with no worker for the lane`);
+    }
+  }
+}
+const unservedEditor = queueLine(0, false, false);
+const unservedAdmin = queueLine(0, false, true);
+for (const [who, line] of [["editor", unservedEditor], ["admin", unservedAdmin]] as const) {
+  if (/эхнийх|өмнө \d/.test(line)) problems.push(`${who}: unserved line still promises a place in line: ${line}`);
+  if (queueLine(4, false, who === "admin") !== line) problems.push(`${who}: unserved line depends on the position`);
+}
+if (LATIN.test(unservedEditor)) problems.push(`editor's unserved line has Latin text: ${unservedEditor}`);
+if (!/админ/i.test(unservedEditor) || !/өөрөө эхэлнэ/.test(unservedEditor)) {
+  problems.push(`editor's unserved line must say it starts by itself and to tell the admin: ${unservedEditor}`);
+}
+if (!/Railway/.test(unservedAdmin)) problems.push(`admin's unserved line must point at Railway: ${unservedAdmin}`);
+if (LATIN.test(unservedAdmin.replace(/Railway|worker/g, ""))) {
+  problems.push(`admin's unserved line has Latin text: ${unservedAdmin}`);
+}
+// The panel must hand the verdict over: `served` defaults to unknown, so a
+// call that drops it reads every outage as "first in line" again, silently.
+const panel = readFileSync(join(__dirname, "..", "src", "components", "JobProgress.tsx"), "utf8");
+if (!/queueLine\(\s*job\.queue_ahead,\s*job\.lane_served,\s*admin\s*\)/.test(panel)) {
+  problems.push("JobProgress must pass job.lane_served and the viewer's role to queueLine");
+}
+
 if (problems.length) {
   console.error(`check-copy: ${problems.length} problem(s)\n  ${problems.join("\n  ")}`);
   process.exit(1);
 }
 console.log(
-  `check-copy: ${WORKER_ERRORS.length} worker errors explained in Mongolian, relative times and validation messages too.`,
+  `check-copy: ${WORKER_ERRORS.length} worker errors explained in Mongolian, relative times, validation messages and the waiting job's line too.`,
 );
