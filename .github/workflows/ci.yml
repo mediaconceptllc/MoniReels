@@ -312,7 +312,7 @@ jobs:
       # below, with a comment saying why and when to look again. The findings
       # go to the job summary and to annotations.
       #
-      # Let through today, two — both held back by torch 2.11, which
+      # Let through today, three — all held back by torch 2.11, which
       # torchaudio's last release (2.11.0) requires exactly, and Demucs
       # imports torchaudio. Look again when torchaudio or Demucs releases,
       # or Demucs no longer needs torchaudio.
@@ -323,6 +323,12 @@ jobs:
       #   matching when an sdist is BUILT. Fixed in 83, but torch 2.11
       #   requires setuptools<82 (its install_requires), so the worker keeps
       #   81. Nothing builds an sdist in this image; the API image has 84.
+      # - GHSA-xmj3-9gf7-h52w: setuptools' LEGACY wheel install path (the
+      #   egg-dir one) can write an __init__.py outside its directory from a
+      #   wheel's namespace_packages.txt — on Windows. Fixed in 84.1, out of
+      #   reach for the same setuptools<82 reason. The image is Linux and
+      #   installs nothing at run time; pip, not setuptools, installed every
+      #   wheel in it. The API image has 84.1.
       - name: No known advisory in the worker image
         run: |
           docker run --rm monireels-dub-ci:latest pip freeze --all | sed -E 's/\+cpu$//' > /tmp/freeze.txt
@@ -330,6 +336,7 @@ jobs:
           pipx run --spec pip-audit==2.10.1 pip-audit -r /tmp/freeze.txt --no-deps --disable-pip \
             --ignore-vuln PYSEC-2025-194 --ignore-vuln GHSA-rrmf-rvhw-rf47 \
             --ignore-vuln PYSEC-2026-3447 --ignore-vuln GHSA-h35f-9h28-mq5c \
+            --ignore-vuln GHSA-xmj3-9gf7-h52w \
             --progress-spinner off -f json -o /tmp/audit.json || status=$?
           python3 .github/scripts/pip_audit_report.py /tmp/audit.json monireels-dub-ci:latest || status=$?
           exit $status
