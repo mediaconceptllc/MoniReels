@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import re
 import time
+from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import Float, case, cast, func, select
 from sqlalchemy.orm import Session
 
-from app import r2
+from app import provider_settings, r2
 from app.db import get_db
 from app.dbmodels import Job, Project, User
 from app.schemas import BrandSaveIn, BrandUploadIn, CreateUserIn, ProviderSettingsIn, ResetPasswordIn
@@ -25,6 +26,16 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+_Row = TypeVar("_Row")
+
+
+def _get_or_404(db: Session, model: type[_Row], row_id: str, detail: str) -> _Row:
+    """The row, or the 404 that names what was not found."""
+    row = db.get(model, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=detail)
+    return row
 
 
 @router.get("/users")
@@ -88,9 +99,7 @@ def reset_password(
     body: ResetPasswordIn,
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
+    user = _get_or_404(db, User, user_id, "Хэрэглэгч олдсонгүй.")
     salt, digest = hash_password(body.new_password)
     user.pw_salt, user.pw_hash = salt, digest
     # Same rule as a self-service change: an admin reset must end the
@@ -107,9 +116,7 @@ def set_active(
     principal: Principal = Depends(require_admin),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> dict:
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
+    user = _get_or_404(db, User, user_id, "Хэрэглэгч олдсонгүй.")
     # Locking yourself out leaves nobody able to unlock anyone.
     if user.id == principal.id and not active:
         raise HTTPException(status_code=400, detail="Өөрийн бүртгэлээ хаах боломжгүй.")
@@ -150,7 +157,7 @@ async def provider_status(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     Never raises. A provider being unreachable is itself the answer, and a
     diagnostics page that 500s tells the operator nothing.
     """
-    from app import provider_settings, providers, secretbox, worker_report
+    from app import providers, secretbox, worker_report
     from app.config import get_settings
     from app.stt import factory
 
@@ -281,7 +288,6 @@ async def tts_voices(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     printed "not supported" for a model it could not ask about would be
     guessing in the operator's direction.
     """
-    from app import provider_settings
     from app.tts import elevenlabs
 
     settings = provider_settings.effective(db)
@@ -302,8 +308,6 @@ def provider_settings_read(db: Session = Depends(get_db)) -> dict:  # noqa: B008
     Never the value itself — the response is the same whether or not the
     caller already knows the key.
     """
-    from app import provider_settings
-
     return provider_settings.describe(db)
 
 
@@ -325,8 +329,6 @@ async def provider_settings_write(
     this reason; the model was free text, so a typo saved cleanly and surfaced
     as a 400 on the next paid job instead of under the box it was typed in.
     """
-    from app import provider_settings
-
     fields = body.model_dump(exclude_unset=True)
     model_check = await _check_new_model(db, fields)
 
@@ -351,7 +353,6 @@ async def _check_new_model(db: Session, fields: dict) -> dict | None:
     Returns None when no model was sent, so "not checked" and "checked and
     fine" stay apart in the response.
     """
-    from app import provider_settings
     from app.ai import openrouter_client
 
     model = (fields.get("openrouter_model") or "").strip()
@@ -664,9 +665,7 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> dict:  # noqa: B008
     """
     from app.jobs import queue
 
-    job = db.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Ажил олдсонгүй.")
+    job = _get_or_404(db, Job, job_id, "Ажил олдсонгүй.")
     if job.state not in RETRYABLE:
         raise HTTPException(
             status_code=400,
